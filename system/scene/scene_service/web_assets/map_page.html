@@ -227,6 +227,30 @@ function draw() {
     ctx.clearRect(0, 0, c.width, c.height);
     if (!state) return;
 
+    if (state.route_map) {
+        occImg = occMeta = null;
+        const roads = state.route_map.network.roads || [];
+        const points = roads.flatMap(r => r.points);
+        if (!viewInit && points.length) {
+            const xs = points.map(p => p.x), ys = points.map(p => p.y);
+            const width = Math.max(10, Math.max(...xs)-Math.min(...xs));
+            const height = Math.max(10, Math.max(...ys)-Math.min(...ys));
+            center = [(Math.min(...xs)+Math.max(...xs))/2, (Math.min(...ys)+Math.max(...ys))/2];
+            pxPerM = Math.min((c.width-40)/width, (c.height-40)/height);
+            viewInit = true;
+        }
+        for (const road of roads) {
+            ctx.beginPath();
+            road.points.map(p => w2p(p.x,p.y)).forEach(([x,y],i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
+            ctx.strokeStyle = road.gait === 'stairs' ? '#bb9fe9' : '#75a0c3';
+            ctx.lineWidth = 4; ctx.stroke();
+            if (road.low_accuracy) {
+                ctx.strokeStyle='#e5b45e';ctx.lineWidth=7;ctx.setLineDash([3,8]);ctx.stroke();ctx.setLineDash([]);
+            }
+        }
+        document.getElementById('btn-pose-estimate').hidden = true;
+    }
+
     // Occupancy underlay; occStamp advances only on a successful decode, so
     // a corrupt frame is retried.
     if (state.occupancy && state.occupancy.stamp_ms !== occStamp
@@ -268,7 +292,7 @@ function draw() {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(occImg, x0, y0, wM * pxPerM, hM * pxPerM);
         ctx.globalAlpha = 1.0;
-    } else {
+    } else if (!state.route_map) {
         ctx.fillStyle = '#7d828b'; ctx.font = '13px sans-serif';
         ctx.fillText('no map yet — the SLAM map appears here once mapping publishes it', 20, 30);
     }
@@ -622,6 +646,9 @@ c.addEventListener('wheel', (ev) => {
 
 // ── API + polling ────────────────────────────────────────────────────────
 async function api(method, path, body) {
+    if (state?.map_binding?.map_type === 'outdoor' && path.startsWith('/api/regions')) {
+        body = {...(body || {}), map_id: state.map_binding.map_id, version: state.map_binding.version};
+    }
     try {
         const r = await fetch(path, {
             method,

@@ -323,43 +323,8 @@ _MAP_OPS = ("list_maps", "save_map", "load_map", "delete_map",
 
 
 def _map_rpc(op: str, payload: Optional[dict] = None, timeout_s: float = 20.0) -> dict:
-    """Call one robonix/service/map operation through Atlas and gRPC; the
-    response's set fields as a dict, or {ok: False, detail}."""
-    import grpc  # lazy: web debug imports should not fail without grpc
-    import map_pb2  # type: ignore
-    import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore
-
-    assert op in _MAP_OPS, op
-    method_name = "".join(part.title() for part in op.split("_"))
-    contract_id = f"robonix/service/map/{op}"
-    stub_name = f"RobonixServiceMap{method_name}Stub"
-    req_name = f"{method_name}_Request"
-    caps = ATLAS.find_capability(contract_id=contract_id, transport="grpc")
-    if not caps:
-        return {"ok": False, "detail": f"no provider for {contract_id}"}
-    cap = caps[0]
-    channel_ref = ATLAS.connect_capability(
-        consumer_id="scene",
-        provider_id=cap.provider_id,
-        contract_id=contract_id,
-        transport="grpc",
-    )
-    try:
-        endpoint = (channel_ref.endpoint or "").strip()
-        if not endpoint:
-            return {"ok": False, "detail": f"{contract_id} resolved to an empty endpoint"}
-        with grpc.insecure_channel(endpoint) as grpc_channel:
-            stub = getattr(contracts_grpc, stub_name)(grpc_channel)
-            req = getattr(map_pb2, req_name)(**(payload or {}))
-            resp = getattr(stub, method_name)(req, timeout=timeout_s)
-        return {field.name: value for field, value in resp.ListFields()}
-    except grpc.RpcError as e:
-        return {"ok": False, "detail": f"{contract_id} rpc failed: {e.code().name}: {e.details()}"}
-    except Exception as e:  # noqa: BLE001
-        log.exception("scene map rpc %s failed", contract_id)
-        return {"ok": False, "detail": str(e)}
-    finally:
-        channel_ref.close()
+    from .map_clients import call
+    return call("map", op, payload, timeout_s)
 
 
 def _maps_payload() -> dict:
@@ -404,6 +369,7 @@ _NAV_LINKS = (
     ("/maps", "maps", "nav.maps"),
     ("/", "3D", "nav.semantic"),
     ("/2d", "2D", "nav.2d"),
+    ("/outdoor", "outdoor routes", "nav.outdoorRoutes"),
     ("/cam", "camera", "nav.cam"),
     ("/regions", "regions", "nav.regions"),
     ("/logs", "logs", "nav.logs"),
@@ -706,6 +672,12 @@ def _shell_page(active: str, body: str, title: str,
     dock = _dock_html() if info_panel else ""
     script = "<script>" + _i18n_js() + """
     applyLang(langGet());
+    const outdoorView = location.pathname === '/outdoor' || new URLSearchParams(location.search).get('map_type') === 'outdoor';
+    sessionStorage.setItem('sceneMapType', outdoorView ? 'outdoor' : 'indoor');
+    document.getElementById(outdoorView ? 'scene-outdoor' : 'scene-indoor').classList.add('on');
+    if (outdoorView) {
+      document.querySelectorAll('nav a[href="/maps"], nav a[href="/regions"]').forEach(a => a.href += '?map_type=outdoor');
+    }
     document.getElementById('lang-switch').addEventListener('click', () => {
       langSet(langGet() === 'zh' ? 'en' : 'zh');
     });
@@ -719,7 +691,10 @@ def _shell_page(active: str, body: str, title: str,
     return (
         "<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
         f"<title>{title}</title><style>{css}</style></head><body>"
-        f'<div class="wrap"><nav><div class="brand">scene</div>{_nav(active)}'
+        f'<div class="wrap"><nav><div class="brand">scene</div>'
+        '<div class="scene-types"><a id="scene-indoor" href="/" data-i18n="nav.indoor">Indoor</a>'
+        '<a id="scene-outdoor" href="/outdoor" data-i18n="nav.outdoor">Outdoor</a></div>'
+        f'{_nav(active)}'
         '<div class="spacer"></div>'
         '<button class="lang" id="lang-switch"'
         ' data-i18n-other="nav.lang.self"'
@@ -748,7 +723,8 @@ def make_app(*, registry: ObjectRegistry,
              robot_geometry: Any = None,
              object_mutations: Any = None,
              object_views: Any = None,
-             rerun_sink: Any = None) -> Starlette:
+             rerun_sink: Any = None,
+             map_providers: Optional[dict] = None) -> Starlette:
     """The Scene web app: the pages, /api/state, region CRUD and the map
     library façade over robonix/service/map.
 
@@ -771,6 +747,19 @@ def make_app(*, registry: ObjectRegistry,
     # load in flight or failed, or a switch outside the façade); Save refuses.
     if semantic_hold is None:
         semantic_hold = {"reason": None}
+
+    from .map_clients import MapClients
+    from .outdoor import OutdoorScene
+    clients = MapClients(map_providers)
+    outdoor = OutdoorScene(clients, map_binding, anno_store, map_meta,
+                           registry, ops_lock, semantic_hold)
+    # Retain the default facade for existing single-provider deployments/tests.
+    def _map_rpc(op, payload=None, timeout_s=20.0):
+        if map_providers:
+            return clients.standard("indoor", op, payload, timeout_s)
+        return globals()["_map_rpc"](op, payload, timeout_s)
+    def _maps_payload():
+        return clients.list() if map_providers else globals()["_maps_payload"]()
 
     # /api/camera: one encode at a time, reused for a short interval.
     camera_preview_lock = asyncio.Lock()
@@ -846,6 +835,8 @@ def make_app(*, registry: ObjectRegistry,
         })
 
     def _map_page(path: str, view: str, title: str) -> HTMLResponse:
+        if map_binding.get("map_type") == "outdoor":
+            return HTMLResponse(_shell_page(path, '<div class="msg">Load an indoor map to use this viewer.</div>', title))
         # `available`, not `ready`: the frame is what starts the viewer.
         if rerun_sink is None or not rerun_sink.available:
             why = rerun_sink.detail if rerun_sink is not None else (
@@ -864,6 +855,8 @@ def make_app(*, registry: ObjectRegistry,
         return _map_page("/2d", "2d", "scene — 2D map")
 
     async def state(_request) -> JSONResponse:
+        if map_providers and map_binding.get("map_type") == "outdoor":
+            await outdoor.synchronize()
         payload = _state_payload(
             registry,
             hub,
@@ -879,6 +872,15 @@ def make_app(*, registry: ObjectRegistry,
             "detail": "" if live else (
                 rerun_sink.detail if rerun_sink is not None else ""),
         }
+        if map_binding.get("map_type") == "outdoor":
+            snapshot = await asyncio.to_thread(clients.outdoor, "get_map")
+            if snapshot.get("map_id") == map_binding.get("map_id") and snapshot.get("version") == map_binding.get("version"):
+                payload["route_map"] = snapshot
+            payload["occupancy"] = None
+            payload["robot"] = None
+            if semantic_hold.get("reason"):
+                payload["route_map"] = None
+                payload["annotations"] = []
         return JSONResponse(payload)
 
     # ── annotation CRUD ──────────────────────────────────────────────
@@ -891,12 +893,19 @@ def make_app(*, registry: ObjectRegistry,
             body = await request.json()
         except Exception:  # noqa: BLE001 — malformed body is a client error
             return None
-        return body if isinstance(body, dict) else None
+        if not isinstance(body, dict):
+            return None
+        if semantic_hold.get("reason") and request.url.path.startswith(("/api/regions", "/api/annotations")):
+            return None
+        if "version" in body and body.get("map_id") and (body["map_id"] != map_binding.get("map_id")
+                or body.get("version") != map_binding.get("version") or semantic_hold.get("reason")):
+            return None
+        return body
 
     async def annotations_list(_request) -> JSONResponse:
         if anno_store is None:
             return _anno_error(503, "annotation store unavailable")
-        return JSONResponse({"ok": True, "annotations": anno_store.list_json()})
+        return JSONResponse({"ok": True, "annotations": anno_store.list_json() if not semantic_hold.get("reason") else []})
 
     async def annotations_create(request) -> JSONResponse:
         """Create a region from {kind, name, points, theta?}."""
@@ -950,6 +959,10 @@ def make_app(*, registry: ObjectRegistry,
         """Delete a region; 404 when the id is unknown."""
         if anno_store is None:
             return _anno_error(503, "annotation store unavailable")
+        if semantic_hold.get("reason"):
+            return _anno_error(409, semantic_hold["reason"])
+        if map_binding.get("map_type") == "outdoor" and await _anno_body(request) is None:
+            return _anno_error(409, "Map identity changed; refresh the editor")
         ann_id = request.path_params["annotation_id"]
         if not anno_store.delete(ann_id):
             return _anno_error(404, f"unknown annotation id {ann_id!r}")
@@ -964,7 +977,7 @@ def make_app(*, registry: ObjectRegistry,
                 return True, item
         return False, {}
 
-    async def _map_request(request, locked_op, *, reserved_check=False):
+    async def _map_request(request, locked_op, *, reserved_check=False, outdoor_op=None):
         """Parse `{map_id, ...}` and run `locked_op(map_id, body)` under
         `ops_lock`, which serialises Save/Load/Delete with the lifecycle
         watcher."""
@@ -979,11 +992,35 @@ def make_app(*, registry: ObjectRegistry,
             if reserved is not None:
                 return reserved
         async with ops_lock:
-            return await locked_op(map_id, body)
+            try:
+                kind = body.get("map_type", "indoor")
+                if map_providers:
+                    await asyncio.to_thread(clients.check_identity, kind, map_id)
+                    if map_meta:
+                        stored_type = ("outdoor" if map_meta.read_routes(map_id) else
+                                       "indoor" if map_meta.read(map_id) else None)
+                        if stored_type and stored_type != kind:
+                            return _anno_error(409, "This map ID already owns Scene data of another map type")
+                if kind == "outdoor" and outdoor_op:
+                    return await getattr(outdoor, outdoor_op)(map_id, body)
+                if kind != "indoor":
+                    return _anno_error(400, "Unknown map type")
+                if map_providers and "outdoor" in map_providers:
+                    await outdoor.idle()
+                if outdoor_op == "save" and map_binding.get("map_type") == "outdoor":
+                    return _anno_error(409, "Load an indoor map before saving indoor annotations")
+                response = await locked_op(map_id, body)
+                if response.status_code == 200 and outdoor_op == "load":
+                    map_binding.update(map_type="indoor")
+                    map_binding.pop("version", None)
+                    map_binding.pop("origin_wgs84", None)
+                return response
+            except (ValueError, OSError) as error:
+                return _anno_error(409, str(error))
 
     async def maps_save(request) -> JSONResponse:
         return await _map_request(request, _maps_save_locked,
-                                  reserved_check=True)
+                                  reserved_check=True, outdoor_op="save")
 
     async def _maps_save_locked(map_id: str, body: dict) -> JSONResponse:
         if semantic_hold["reason"]:
@@ -1141,7 +1178,7 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def maps_load(request) -> JSONResponse:
-        return await _map_request(request, _maps_load_locked)
+        return await _map_request(request, _maps_load_locked, outdoor_op="load")
 
     async def _maps_load_locked(map_id: str, body: dict) -> JSONResponse:
         mode = str(body.get("mode") or "localization")
@@ -1278,7 +1315,7 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse(out, status_code=200 if out.get("ok") else 502)
 
     async def maps_delete(request) -> JSONResponse:
-        return await _map_request(request, _maps_delete_locked)
+        return await _map_request(request, _maps_delete_locked, outdoor_op="delete")
 
     async def _maps_delete_locked(map_id: str, _body: dict) -> JSONResponse:
         if (map_binding.get("source") != "default"
@@ -1466,9 +1503,12 @@ def make_app(*, registry: ObjectRegistry,
         return HTMLResponse(_framed("/cam", "scene — camera"))
 
     async def regions_page(request) -> HTMLResponse:
+        requested_type = request.query_params.get("map_type", "indoor")
+        if requested_type != map_binding.get("map_type", "indoor"):
+            return HTMLResponse(_shell_page("/regions", '<div class="msg">Load a map of the selected type before editing regions.</div>', "scene — regions"))
         if _bare(request):
             return HTMLResponse(_regions_html())
-        return HTMLResponse(_framed("/regions", "scene — regions"))
+        return HTMLResponse(_framed("/regions", "scene — regions").replace("/regions?bare=1", "/regions?bare=1&amp;map_type=" + requested_type))
 
     async def _correct(request, apply, reply):
         """One correction through the mutation coordinator.
@@ -1581,6 +1621,7 @@ def make_app(*, registry: ObjectRegistry,
             return {
                 "ok": True, "map_id": map_id, "grid": grid,
                 "regions": regions, "objects": objects,
+                "route_map": map_meta.read_routes(map_id) if map_meta is not None else None,
             }
 
         return JSONResponse(await asyncio.to_thread(collect))
@@ -1848,7 +1889,23 @@ def make_app(*, registry: ObjectRegistry,
         # Last: as a two-segment catch-all it would shadow POST /api/regions.
         Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
     ]
-    return Starlette(routes=routes, middleware=[Middleware(_JsonPostsOnly)])
+    def outdoor_page():
+        return _shell_page("/outdoor", _asset("outdoor.html"), "scene — outdoor map")
+    routes = outdoor.routes(outdoor_page) + routes
+    from contextlib import asynccontextmanager, suppress
+
+    @asynccontextmanager
+    async def lifespan(app):
+        task = asyncio.create_task(outdoor.watch()) if map_providers and "outdoor" in map_providers else None
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    return Starlette(routes=routes, middleware=[Middleware(_JsonPostsOnly)], lifespan=lifespan)
 
 
 class _JsonPostsOnly:

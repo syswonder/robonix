@@ -700,3 +700,12 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 - **No episodic memory.** Long-term memory belongs to memory services, not scene.
 - **No direct motion control.** `goal_near` returns an approach pose; navigation is performed by `robonix/service/navigation/navigate`.
 - **No browser-side URDF renderer.** The 3D view uses Soma's navigation footprint rather than loading deployment mesh assets into the generic Scene container.
+
+
+## Outdoor route maps
+
+`/outdoor` shares the Scene host and port with the indoor viewer. The upper-left Indoor/Outdoor tabs change pages and library filters; loading a map remains explicit. Configure `map_providers.indoor` and `map_providers.outdoor` with the exact Atlas provider IDs of running services. Maps must have unique IDs across those providers; ambiguous ownership is rejected before modifying annotations.
+
+Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. It exposes no motion execution button. Occupancy-based semantic goal tools reject outdoor maps.
+
+For native ROS manual annotation without perception models, build with `bash scripts/build_annotate.sh` and select `package_manifest.annotate-native.yaml` in the deployment. Set `ROS_SETUP` for a nonstandard ROS installation. Keep `rbnx-build/data` persistent. The default web host is loopback; use SSH forwarding for access from a laptop. This profile uses `web_viewer: off` and the outdoor SVG page; the existing indoor Rerun deployment remains available.

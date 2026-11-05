@@ -81,3 +81,6 @@
     nav a::before,button{transition:none}
     .sb-mode.map .dot{animation:none}
   }
+.scene-types { display:flex; gap:4px; padding:0 8px 14px; }
+.scene-types a { flex:1; padding:5px 3px; text-align:center; border:1px solid #334052; border-radius:5px; font-size:12px; }
+.scene-types a.on { background:#2c405e; color:#c7dcff; }

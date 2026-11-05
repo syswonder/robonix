@@ -71,6 +71,7 @@ log = logging.getLogger(__name__)
 
 
 _REGISTRY: ObjectRegistry | None = None
+_MAP_BINDING: dict = {}
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
@@ -679,6 +680,10 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     * no free cell exists within the target search radius.
 
     Contract: robonix/system/scene/goal_near."""
+    if _MAP_BINDING.get("map_type") == "outdoor":
+        return GoalNear_Response(reachable=False, x=0., y=0., yaw=0.,
+            reason="Outdoor route maps require route planning; occupancy-based semantic goals are unavailable")
+
     registry = _registry()
     footprint = _ROBOT_GEOMETRY.current() if _ROBOT_GEOMETRY is not None else None
     if footprint is None:
@@ -789,6 +794,10 @@ async def goal_region(req: GoalRegion_Request) -> GoalRegion_Response:
     The result never falls outside the region polygon.
     Contract: robonix/system/scene/goal_region.
     """
+    if _MAP_BINDING.get("map_type") == "outdoor":
+        return GoalRegion_Response(reachable=False, x=0., y=0., yaw=0.,
+            reason="Outdoor route maps require route planning; occupancy-based semantic goals are unavailable")
+
     # The footprint is read further down, right before it is used.
     region, ambiguous = _resolve_region_target(req.region_id)
     if ambiguous:

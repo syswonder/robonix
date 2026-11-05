@@ -122,9 +122,35 @@ class MapMetaStore:
         path = self._path(map_id)
         with self._lock:
             existed = path.exists()
-            for p in (path, *self._preview_paths(map_id)):
+            for p in (path, *self._preview_paths(map_id), self._base / f"{sanitize_map_id(map_id)}.routes.json"):
                 p.unlink(missing_ok=True)
             return existed
+
+    def write_routes(self, map_id: str, snapshot: dict) -> None:
+        """A display preview, never an occupancy grid or a navigation prior."""
+        from PIL import Image, ImageDraw
+        pts = [p for road in snapshot["network"]["roads"] for p in road["points"]]
+        if not pts:
+            raise ValueError("Route map has no roads")
+        lo_x, lo_y = min(p["x"] for p in pts)-2, min(p["y"] for p in pts)-2
+        hi_x, hi_y = max(p["x"] for p in pts)+2, max(p["y"] for p in pts)+2
+        resolution = max(hi_x-lo_x, hi_y-lo_y)/600
+        width, height = max(1, round((hi_x-lo_x)/resolution)), max(1, round((hi_y-lo_y)/resolution))
+        image = Image.new("RGB", (width,height), "#151b24")
+        draw = ImageDraw.Draw(image)
+        for road in snapshot["network"]["roads"]:
+            pixels = [((p["x"]-lo_x)/resolution, height-(p["y"]-lo_y)/resolution) for p in road["points"]]
+            draw.line(pixels, fill={"stairs":"#bb9fe9","flat":"#75a0c3"}.get(road["gait"],"#8b95a4"), width=4)
+        png, geometry = self._preview_paths(map_id)
+        with self._lock:
+            image.save(png)
+            geometry.write_text(json.dumps(dict(width=width,height=height,resolution=resolution,
+                origin_x=lo_x,origin_y=lo_y,map_type="outdoor")))
+            (self._base / f"{sanitize_map_id(map_id)}.routes.json").write_text(json.dumps(snapshot))
+
+    def read_routes(self, map_id: str):
+        path = self._base / f"{sanitize_map_id(map_id)}.routes.json"
+        return json.loads(path.read_text()) if path.exists() else None
 
     def _preview_paths(self, map_id: str) -> tuple[Path, Path]:
         clean = sanitize_map_id(map_id)

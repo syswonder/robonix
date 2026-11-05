@@ -72,7 +72,7 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
         "depth",
         "intrinsics",
         "occupancy_grid",
-        "map_lifecycle",
+        "map_lifecycle", "outdoor_map_lifecycle",
         "camera_extrinsics",
     }:
         depth = 1
@@ -97,7 +97,7 @@ def topic_qos_policy(spec: TopicSpec) -> tuple[str, str, int]:
         )
     if spec.kind in sensor_kinds:
         return "best_effort", "volatile", depth
-    if spec.kind in {"occupancy_grid", "map_lifecycle", "camera_extrinsics"}:
+    if spec.kind in {"occupancy_grid", "map_lifecycle", "outdoor_map_lifecycle", "camera_extrinsics"}:
         return "reliable", "transient_local", depth
     return "reliable", "volatile", depth
 

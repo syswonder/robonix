@@ -194,6 +194,21 @@ class AnnotationStore:
                 self._annotations = {}
             return existed
 
+    def copy_map(self, source: str, target: str, *, generation=None) -> None:
+        """Inherit annotations for a route revision sharing its parent's origin."""
+        target_path = self._base / f"{sanitize_map_id(target)}.json"
+        with self._lock:
+            if target_path.exists():
+                raise ValueError("Target annotations already exist")
+            if source == self._map_id:
+                annotations = [a.to_json() for a in self._annotations.values()]
+            else:
+                source_path = self._base / f"{sanitize_map_id(source)}.json"
+                annotations = [a.to_json() for a in _parse_file(source_path)[1]] if source_path.exists() else []
+            temporary = target_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(dict(generation=generation, annotations=annotations), ensure_ascii=False))
+            os.replace(temporary, target_path)
+
     def _load(self, current_generation: Optional[int]) -> None:
         """Read the per-map file into memory."""
         if not self._path.exists():

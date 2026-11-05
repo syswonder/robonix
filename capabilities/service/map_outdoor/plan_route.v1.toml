@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/plan_route"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/PlanRoute.srv"
+description = "Plan a bidirectional reference route with gait and quality intervals."
+
+[mode]
+type = "rpc"

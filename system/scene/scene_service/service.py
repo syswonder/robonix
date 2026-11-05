@@ -129,6 +129,7 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     # Mapping's latched {map_id, mode, generation}, for _lifecycle_watch; the
     # hub skips it when the generated `map` package is missing.
     ("map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
+    ("outdoor_map_lifecycle", "robonix/service/map/lifecycle", "MapLifecycle"),
 ]
 
 # Kinds dropped even when Atlas advertises them.
@@ -152,6 +153,8 @@ def _resolve_pb_transport(name: str) -> int:
 
 # (transport, contract_id) -> last resolution, so rediscovery logs changes only.
 _LAST_RESOLVED: dict[tuple, tuple] = {}
+_MAP_PROVIDERS: dict = {}
+_MAP_CONTEXT: dict = {}
 
 
 def _build_topic_specs(
@@ -211,12 +214,22 @@ def _resolve_one_contract(
     provider_id: str = "",
 ) -> Optional[TopicSpec]:
     """The endpoint serving `contract_id`, or None when nobody provides it."""
+    if kind == "odom" and _MAP_PROVIDERS.get("outdoor"):
+        return None
+    if kind == "outdoor_map_lifecycle":
+        provider_id = _MAP_PROVIDERS.get("outdoor", "")
+        if not provider_id:
+            return None
+    if kind in {"pose", "occupancy_grid", "map_lifecycle"} and _MAP_PROVIDERS:
+        provider_id = _MAP_PROVIDERS.get("indoor", "")
+        if not provider_id:
+            return None
     caps = ATLAS.find_capability(
         contract_id=contract_id,
         transport=transport,
         provider_id=provider_id,
     )
-    if not caps:
+    if len(caps) != 1:
         return None
     cap_view = caps[0]
     try:
@@ -360,6 +373,9 @@ class _SelfTracker:
         return self._latest
 
     async def on_pose(self, x: float, y: float, z: float, yaw: float) -> None:
+        if _MAP_CONTEXT.get("binding", {}).get("map_type") == "outdoor":
+            self._latest = None
+            return
         self._latest = (x, y, z, yaw)
         wf = self.world_frame_id
         footprint = self.robot_geometry.current()
@@ -734,7 +750,8 @@ async def _start_ros_ingest(
 
     # The camera often registers after the chassis; give it a bounded wait so
     # the RGB-D path is not lost to a startup race.
-    perception_wait_s = float(os.environ.get("SCENE_PERCEPTION_WAIT_S", "30"))
+    perception_wait_s = (0. if perception_config(config).profile == "annotate" else
+                         float(os.environ.get("SCENE_PERCEPTION_WAIT_S", "30")))
     deadline = time.time() + perception_wait_s
     while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
         new_specs = _build_topic_specs(
@@ -1351,6 +1368,8 @@ async def _lifecycle_watch(
         msg, _stamp, _count = hub.latest("map_lifecycle")
         if msg is None:
             return
+        if live_binding.get("map_type") == "outdoor":
+            return
         live_id, live_gen = str(msg.map_id), int(msg.generation)
         bound_id = str(live_binding.get("map_id") or "")
         ref_gen = live_binding.get("generation")
@@ -1520,6 +1539,8 @@ async def _run_active(config: dict) -> None:
     # The map this session belongs to partitions all persistent state.
     # Precedence: mapping's lifecycle broadcast, manifest `map_id`,
     # SCENE_MAP_ID, "default" (mapping usually boots after Scene).
+    _MAP_PROVIDERS.clear()
+    _MAP_PROVIDERS.update(config.get("map_providers") or {})
     broadcast = _discover_map_binding(
         float(os.environ.get("SCENE_MAP_BINDING_WAIT_S", "3.0"))
     )
@@ -1546,6 +1567,10 @@ async def _run_active(config: dict) -> None:
         "generation": binding.generation if restore_on_start else None,
         "source": binding.source if restore_on_start else "default",
     }
+    live_binding["map_type"] = "outdoor" if "outdoor" in _MAP_PROVIDERS and "indoor" not in _MAP_PROVIDERS else "indoor"
+    _MAP_CONTEXT.clear()
+    _MAP_CONTEXT.update({"binding": live_binding})
+    mcp_tools._MAP_BINDING = live_binding
     if broadcast is not None and not str(broadcast.get("map_id") or ""):
         # An unsaved mapping session never re-anchors a named partition.
         log.warning(
@@ -1848,6 +1873,7 @@ async def _run_active(config: dict) -> None:
             robot_geometry=robot_geometry,
             object_mutations=object_mutations,
             object_views=object_views,
+            map_providers=config.get("map_providers"),
         )
         web_uv = uvicorn.Config(
             app=web_app,

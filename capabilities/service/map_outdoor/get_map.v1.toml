@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/get_map"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/GetMap.srv"
+description = "Read a route map snapshot and its coordinate identity."
+
+[mode]
+type = "rpc"

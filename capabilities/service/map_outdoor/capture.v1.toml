@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/service/map_outdoor/capture"
+version = "1"
+kind = "service"
+idl = "outdoor_map/srv/Capture.srv"
+description = "Start, pause, resume or finish a GNSS and gait recording without motion."
+
+[mode]
+type = "rpc"

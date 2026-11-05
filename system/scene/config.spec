@@ -540,6 +540,16 @@ properties:
 
   # ═══ 2. Occasionally, continued ═══════════════════════════════════════════
 
+  map_providers:
+    type: object
+    x-group: Map binding
+    description: Explicit indoor and outdoor map provider instance IDs, used consistently for map operations and lifecycle discovery.
+    properties:
+      indoor:
+        type: string
+      outdoor:
+        type: string
+
   web_port:
     type: integer
     default: 50107

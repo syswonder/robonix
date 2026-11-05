@@ -131,7 +131,7 @@
     const id = m.map_id;
     const bound = id === boundId;
     const broken = m.has_spatial_artifact === false || m.spatial_ok === false;
-    const tags = [];
+    const tags = [`<span class="tag">${esc(m.map_type || 'indoor')}</span>`];
     if (bound) tags.push(`<span class="tag good" data-i18n="maps.inUse"></span>`);
     if (broken) tags.push(`<span class="tag bad" data-i18n="maps.broken"></span>`);
     return `
@@ -142,6 +142,7 @@
           ${tags.length ? `<div class="mg-tags">${tags.join('')}</div>` : ''}
           <dl class="mg-facts">
             <dt data-i18n="maps.saved"></dt><dd>${when(m.updated)}</dd>
+            ${m.version ? `<dt data-i18n="maps.version"></dt><dd>${esc(m.version)}</dd>` : ''}
             ${m.artifact_size ? `<dt data-i18n="maps.size"></dt>
               <dd>${(m.artifact_size / 1048576).toFixed(1)} MB</dd>` : ''}
           </dl>
@@ -166,6 +167,10 @@
         ? `${(m.artifact_size / 1048576).toFixed(2)} MB` : '—', false],
       ['maps.saved', when(m.updated), false],
       ['maps.id', m.map_id, false],
+      ['maps.version', m.version || '—', false],
+      ['maps.provider', m.provider_id || '—', false],
+      ['maps.parent', m.parent_map_id || '—', false],
+      ['maps.recordings', (m.recordings || []).join(', ') || '—', false],
     ];
     return rows.map(([key, value, bad]) =>
       `<dt data-i18n="${key}"></dt>`
@@ -320,7 +325,7 @@
       const r = await fetch(`/api/maps/${op}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({map_id: id}),
+        body: JSON.stringify({map_id: id, map_type: new URLSearchParams(location.search).get('map_type') || 'indoor'}),
       });
       d = await r.json();
       say(d.ok ? '' : (d.detail || t('maps.failed')), d.ok ? 'ok' : 'err');
@@ -352,7 +357,8 @@
       const mb = state.map_binding || {};
       // An unnamed live session has no card.
       boundId = (mb.source === 'default' && !mb.mode) ? '' : (mb.map_id || '');
-      const list = maps.maps || [];
+      const viewType = new URLSearchParams(location.search).get('map_type') || 'indoor';
+      const list = (maps.maps || []).filter(m => (m.map_type || 'indoor') === viewType);
       emptyNote.hidden = list.length > 0;
       backdrop.hidden = true;  // the open card is being rebuilt
       grid.innerHTML = list.map(card).join('');

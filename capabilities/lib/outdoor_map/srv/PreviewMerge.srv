@@ -1,0 +1,5 @@
+string request_json
+---
+bool ok
+string detail
+string result_json
