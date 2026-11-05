@@ -18,7 +18,7 @@ Before writing a helper, search for one. Robonix already has shared code for geo
 
 ### one-concept-one-name
 
-A concept has one name everywhere: code, contracts, UI strings, docs. `docs/src/developer-guide.md` is the source of truth for terms. Don't introduce a synonym for an existing concept; don't reuse a name for a different one.
+A concept has one name everywhere: code, contracts, UI strings, docs. `docs/docs/developer-guide.md` is the source of truth for terms. Don't introduce a synonym for an existing concept; don't reuse a name for a different one.
 
 ### dry
 

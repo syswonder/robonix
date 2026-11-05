@@ -1,27 +1,28 @@
-# robonix/system/voiceprint
+# robonix/service/voiceprint
 
-ECAPA-TDNN speaker-identification service. Implements the frozen v0.1
-capability `robonix/service/voiceprint/identify` (one-shot `Identify`)
-consumed by Liaison's voice-gating path, and adds two package-private
-admin RPCs (`Enroll`, `ListEnrolled`) for off-line enrollment tooling.
+CAM++ speaker-identification service using sherpa-onnx, with CPU inference by default. It serves
+`robonix/service/voiceprint/identify`, which Liaison's voice-gating path
+calls, and the enrollment contracts `enroll`, `list`, and `delete`, which
+`rbnx chat` uses to manage enrolled speakers.
 
 ## Layout
 
 ```
-system/voiceprint/
-  proto/voiceprint.proto         # package-private gRPC schema
+services/voiceprint/
+  config.spec                    # manifest config schema
+  package_manifest.yaml
   voiceprint_service/            # Python package
     __init__.py                  # bootstraps gRPC stubs on first import
-    engine.py                    # ECAPA-TDNN wrapper
-    service.py                   # gRPC servicer + entry point
+    engine.py                    # CAM++ ONNX embedding extractor
+    service.py                   # gRPC servicers + entry point
   scripts/build.sh               # uv venv + codegen + model pre-download
-  tests/                         # unittest suite (Enroll → Identify → Reject)
+  tests/                         # unittest suite
 ```
 
 ## Build
 
 ```bash
-cd system/voiceprint
+cd services/voiceprint
 bash scripts/build.sh
 ```
 
@@ -30,9 +31,11 @@ The build phase:
 1. Creates `rbnx-build/venv/` via `uv venv` + `uv sync`.
 2. Runs `rbnx codegen --mcp` with the venv interpreter and import-tests the
    generated contract modules under `rbnx-build/codegen/`.
-3. Pre-downloads ECAPA-TDNN (`speechbrain/spkrec-ecapa-voxceleb`) into
-   `rbnx-build/models/`. Set `SKIP_MODEL_DOWNLOAD=1` to skip; set
-   `HF_ENDPOINT=https://hf-mirror.com` (default) for runner environments where direct model downloads are unreliable.
+3. Downloads the CAM++ ONNX model into `rbnx-build/models/campplus_zh.onnx`.
+   Downloads use the author's Hugging Face repository and GitHub release,
+   verify SHA256, and publish the file only after verification. `HF_ENDPOINT`
+   and `RBNX_GH_MIRROR` select mirrors; stalled transfers time out.
+   Set `SKIP_MODEL_DOWNLOAD=1` to skip the model download and verification.
 
 ## Run
 
@@ -44,29 +47,50 @@ Environment variables:
 
 | Variable               | Default              | Meaning                              |
 |------------------------|----------------------|--------------------------------------|
-| `VOICEPRINT_PORT`      | `50092`              | gRPC listen port                     |
-| `VOICEPRINT_BIND_ADDR` | `0.0.0.0`            | gRPC bind address                    |
 | `VOICEPRINT_DATA_DIR`  | `rbnx-build/data`    | location of `enrolled.json`          |
-| `VOICEPRINT_THRESHOLD` | `0.25`               | cosine-similarity gate for `is_known` |
-| `VOICEPRINT_DEVICE`    | auto (`cuda:0`/`cpu`) | torch device for ECAPA-TDNN          |
+| `VOICEPRINT_THRESHOLD` | `0.55`               | cosine-similarity gate for `is_known` |
+| `VOICEPRINT_MODEL`     | `rbnx-build/models/campplus_zh.onnx` | CAM++ ONNX model path |
+| `VOICEPRINT_PROVIDER`  | `cpu` | sherpa-onnx execution provider; use `cuda` with a compatible GPU runtime |
+
+For GPU inference, install a GPU-enabled sherpa-onnx 1.13.4 build compatible
+with the board, driver and model into this package's venv after `rbnx build`,
+then export `VOICEPRINT_PROVIDER=cuda` before starting the service. Reapply
+the GPU runtime installation after rebuilding: the build script installs the
+default CPU wheel set. Installing `onnxruntime-gpu` alone does not replace
+the native runtime linked by sherpa-onnx.
+
+Other provider strings are passed directly to sherpa-onnx; support depends
+on its build and the model. Startup logs show the requested provider, not
+proof of GPU execution: sherpa-onnx may fall back to CPU for unsupported
+providers or operators. Verify execution and recalibrate the similarity
+threshold before changing providers in a deployment.
+
+Existing ECAPA enrollment vectors are incompatible with CAM++. Re-enroll
+users after upgrading. New `enrolled.json` records contain `"model": "campplus_zh"`.
+Legacy records without that marker or with another model are skipped with a
+warning on load; loading does not rewrite the file. Users can enroll again.
+Manifest `provider` overrides VOICEPRINT_PROVIDER, using cpu by default.
 
 ## Test
 
 ```bash
-bash scripts/build.sh   # one-time; pulls ECAPA-TDNN weights
+bash scripts/build.sh   # one-time; downloads CAM++ weights
 rbnx-build/venv/bin/python -m unittest discover -s tests -v
 ```
 
-The suite mirrors the original out-of-tree `test_tui.py` voiceprint-gating
-flow: enrol `liukaile` + `com`, identify the matching second sample of
-each as accepted, identify `change.wav` (un-enrolled) as rejected.
+The suite covers threshold configuration, concurrent enrollment,
+rollback when persisting fails, and model loading on activate and deactivate.
 
-## Capability contract
+## Capability contracts
 
-This package serves
-[`capabilities/system/speech/voiceprint.v1.toml`](../../capabilities/system/speech/voiceprint.v1.toml),
-whose IDL is
-[`capabilities/lib/voiceprint/srv/Identify.srv`](../../capabilities/lib/voiceprint/srv/Identify.srv).
-The two extra RPCs (`Enroll`, `ListEnrolled`) are package-private and are
-NOT registered as Atlas capabilities; they exist only on the local
-service port for admin tooling.
+All four contracts are registered with Atlas under the `voiceprint` provider
+and share one gRPC listener; `list` is also exposed over MCP:
+
+- [`identify.v1.toml`](../../capabilities/service/voiceprint/identify.v1.toml) — `Identify`
+- [`enroll.v1.toml`](../../capabilities/service/voiceprint/enroll.v1.toml) — `Enroll`
+- [`list.v1.toml`](../../capabilities/service/voiceprint/list.v1.toml) — `ListEnrolled`
+- [`delete.v1.toml`](../../capabilities/service/voiceprint/delete.v1.toml) — `DeleteEnrolled`
+
+The IDL lives in [`capabilities/lib/voiceprint/srv/`](../../capabilities/lib/voiceprint/srv/).
+The listen ports are picked at startup and registered with Atlas; the bind
+address follows `ROBONIX_PROVIDER_BIND_HOST` (see the robonix-api README).

@@ -419,12 +419,22 @@
 
     // ── /api/state → the panes ──
     const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${fmt(v)}</span></div>`;
+    let stateOffline = false;
 
     async function tick() {
+      let receivedState = false;
       try {
         const r = await fetch('/api/state', {cache: 'no-store'});
         if (r.ok) {
           const s = await r.json();
+          receivedState = true;
+          if (stateOffline) {
+            // The old recording survives in WASM after Scene's process stops.
+            // Reopen the real viewer route so the new process starts its feeds.
+            const viewer = document.querySelector('iframe#v[src^="/rerun?"]');
+            if (viewer) viewer.src = viewer.src;
+          }
+          stateOffline = false;
           lastBinding = s.map_binding || null;
           lastObjects = (s.objects || []).slice().sort(
             (a, b) => a.display_name.localeCompare(b.display_name, undefined, {numeric: true}));
@@ -461,8 +471,12 @@
           setHtml(document.getElementById('dock-robot'), s.robot
             ? ['x', 'y', 'z', 'yaw'].map(k => kv(k, s.robot[k])).join('')
             : `<span class="empty">${t('dock.empty.robot')}</span>`);
+        } else {
+          stateOffline = true;
         }
-      } catch (_) { /* the next tick retries */ }
+      } catch (_) {
+        if (!receivedState) stateOffline = true;
+      }
       setTimeout(tick, 500);
     }
     tick();

@@ -1,4 +1,4 @@
-# Robonix voiceprint service — ECAPA-TDNN one-shot speaker identification.
+# Robonix voiceprint service — CAM++ one-shot speaker identification.
 # One lifecycle interface and four voiceprint RPCs share one listener:
 #
 #   robonix/service/voiceprint/driver            — Driver lifecycle + config
@@ -25,16 +25,18 @@
 # Runtime config is delivered through Driver(CMD_INIT). Environment variables
 # provide fallbacks when the corresponding config key is absent:
 #   VOICEPRINT_DATA_DIR    — where enrolled.json lives
-#   VOICEPRINT_THRESHOLD   — cosine-similarity gate (default 0.25)
-#   VOICEPRINT_DEVICE      — cuda:0 | cpu (auto-detected)
+#   VOICEPRINT_THRESHOLD   — cosine-similarity gate (default 0.55)
+#   VOICEPRINT_MODEL       — optional CAM++ ONNX model path
 
 manifestVersion: 1
 
 package:
-  name: com.robonix.example.voiceprint_service
+  name: robonix.service.voiceprint
   version: 0.1.0
   vendor: robonix
-  description: Voiceprint service (ECAPA-TDNN speaker identification) under robonix/service/voiceprint.
+  description: Voiceprint service (CAM++ speaker identification) under robonix/service/voiceprint.
+  tags: [service, voiceprint, speaker-id, audio]
+  maintainers: [chenyanting <ytchen25@stu.pku.edu.cn>]
   license: MulanPSL-2.0
 
 build: bash scripts/build.sh
@@ -54,7 +56,12 @@ stop: |
 
 capabilities:
   - name: robonix/service/voiceprint/driver
+    transport: grpc
   - name: robonix/service/voiceprint/identify
+    transport: grpc
   - name: robonix/service/voiceprint/enroll
+    transport: grpc
   - name: robonix/service/voiceprint/list
+    transport: [grpc, mcp]
   - name: robonix/service/voiceprint/delete
+    transport: grpc

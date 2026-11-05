@@ -5,7 +5,7 @@ Robonix. Read once at session start; obey throughout.
 
 ## Concept and naming stability
 
-- `docs/src/developer-guide.md` is the source of truth for concepts and
+- `docs/docs/developer-guide.md` is the source of truth for concepts and
   terminology. When code and the dev guide disagree, fix the code, not
   the guide.
 - The formal concepts are **capability** (the interface) + **contract**
@@ -41,8 +41,8 @@ Third-party skills are not vendored into the repository. These are recommended f
 Robonix is an **embodied AI operating system**: a monorepo with Rust system
 components, Python packages, capability contracts, IDL libraries, examples, and
 documentation. The Rust workspace lives at the repository root in `Cargo.toml`;
-current Rust members are `system/{atlas,executor,liaison,pilot}` and
-`tools/{rbnx,codegen}`. The twelve system component directories live under
+current Rust members are `system/{atlas,executor,liaison,pilot,scribe,soma,vitals}`
+and `tools/{rbnx,codegen}`. The twelve system component directories live under
 `system/`; several are documentation/planning components today, while
 `system/scene` is a Python package managed by uv. Python workspace packages are
 listed in the root `pyproject.toml`: shared libraries in `pylib/*`, reference
@@ -51,7 +51,8 @@ files under `capabilities/{primitive,service,system}/`; reusable message and
 service IDL libraries live under `capabilities/lib/`. End-to-end and Webots
 examples live in `examples/`, Docker packaging in `docker/`, repo scripts in
 `scripts/`, image assets in
-`images/`, and the mdBook manual in `docs/src/`.
+`images/`, and the Docusaurus book in the `docs/` submodule (pages under
+`docs/docs/`).
 
 ### Crate README maintenance
 
@@ -68,15 +69,15 @@ Run Rust commands from the repository root unless noted:
 
 - `make build`: build all Rust workspace crates in debug mode.
 - `make release`: build all Rust crates with `--release`.
-- `make install`: install `rbnx`, Atlas, Pilot, Executor, Liaison, and Codegen
-  to `~/.cargo/bin`.
+- `make install`: install `rbnx`, Atlas, Pilot, Executor, Liaison, Soma,
+  Vitals, and Codegen to `~/.cargo/bin`, then run `rbnx setup` for this clone.
 - `make check`: run `cargo fmt --all -- --check` and clippy with warnings
   denied.
 - `cargo test --workspace --all-targets`: run unit and integration tests.
 - `uv sync`: resolve Python workspace dependencies from the repo root; service
   `scripts/build.sh` files usually perform package-local setup.
-- `cd docs && mdbook build`: build the documentation book when mdBook and
-  preprocessors are installed.
+- `make -C docs check`: build and check the Docusaurus documentation book
+  (run `make -C docs install` first).
 
 ## Coding Style & Naming Conventions
 
@@ -88,6 +89,12 @@ files follow `<interface>.v1.toml` naming, grouped by domain, for example
 `capabilities/primitive/camera/rgb.v1.toml`.
 
 Comments and docstrings follow `comments-explain-why` in `.agents/guidelines/maintainability.md`: say why when the code cannot, in a line or two.
+
+Every struct must have a documentation comment explaining what it represents
+and its purpose. Every field, including tuple struct fields, must have its own
+documentation comment explaining its meaning and role. This applies regardless of visibility.
+In Rust, use `///` doc comments, and explain semantics rather than merely
+restating the struct or field name.
 
 ## Testing Guidelines
 
@@ -107,7 +114,7 @@ diagnostics, or maintainability outside the test.
   at a time during a rename. Read each file before editing. Pattern variables
   that look identical at the string level can have different types; blanket
   replace breaks tuple destructures and loop variables.
-- Do not hand-edit generated documentation under `docs/src/reference/`
+- Do not hand-edit generated documentation under `docs/docs/reference/`
   (including `idl.md` and `contracts.md`). Update the source contracts / IDL /
   codegen inputs, then regenerate docs with the project tooling when generated
   reference pages need to change.
@@ -129,8 +136,10 @@ Other agents follow the same steps with the tools they have.
 
 ## Commit & Pull Request Guidelines
 
-- Don't commit unless the user explicitly says to. Multiple smaller reviewable
-  commits beat one mega-commit.
+- Don't commit unless the user explicitly says to.
+- One PR is one logical change; it lands as one squashed commit whose message
+  is the PR title and description. Split larger work into dependent PRs. Rebase
+  on `dev` instead of merging `dev` into a PR branch.
 - A commit's Git author must be a human contributor. Never use an AI agent in
   the author or committer fields, or in authorship, sign-off, review, or test
   trailers. When AI materially assists a change, the human author may disclose

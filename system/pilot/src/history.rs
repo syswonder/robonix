@@ -132,8 +132,8 @@ pub struct CompactionPlan {
     /// Everything older than the tail, oldest first, including any previous
     /// summary. It is folded into the new summary and then dropped.
     pub evicted: Vec<Message>,
-    /// The latest user task and the steers that followed it, when they fell
-    /// out of the tail: the model must always see what it is working on now.
+    /// The user's messages about tasks still open, when they fell out of the
+    /// tail: the model must always see the words of what it is working on.
     pub pinned: Vec<Message>,
     /// The most recent messages, kept verbatim except that no single message
     /// exceeds `message_cap` tokens.
@@ -141,14 +141,16 @@ pub struct CompactionPlan {
 }
 
 /// Keep the newest messages within `tail_cap` tokens, at least one of them,
-/// and the current task's own words within `pin_cap`; everything else is
-/// evicted. The caller sizes the caps so the result always fits with room to
+/// and the user messages labelled `User message <id> ` for each of
+/// `pinned_ids` (the open tasks' messages) within `pin_cap`, newest first when
+/// they do not all fit; everything else is evicted. The caller sizes the caps so the result always fits with room to
 /// spare, which is what lets compaction run forever without looping.
 pub fn plan_compaction(
     history: &[Message],
     tail_cap: usize,
     message_cap: usize,
     pin_cap: usize,
+    pinned_ids: &[String],
 ) -> CompactionPlan {
     let mut split = history.len();
     let mut used = 0usize;
@@ -166,41 +168,25 @@ pub fn plan_compaction(
         .map(|message| truncated(message, message_cap))
         .collect();
 
-    let starts = |message: &Message, label: &str| {
+    let is_pinned = |message: &Message| {
         message.role == "user"
-            && message
-                .content
-                .as_deref()
-                .is_some_and(|text| text.starts_with(label))
+            && message.content.as_deref().is_some_and(|text| {
+                pinned_ids
+                    .iter()
+                    .any(|id| text.starts_with(&format!("User message {id} ")))
+            })
     };
     let mut pinned = Vec::new();
-    if let Some(task) = evicted
-        .iter()
-        .rposition(|m| starts(m, "User task (authoritative):"))
-    {
-        let mut own_words: Vec<&Message> = std::iter::once(&evicted[task])
-            .chain(
-                evicted[task + 1..]
-                    .iter()
-                    .filter(|m| starts(m, "User steer (authoritative):")),
-            )
-            .collect();
-        // The task itself first, then the latest steers that still fit.
-        let mut room = pin_cap;
-        let task_message = truncated(own_words.remove(0), pin_cap);
-        room = room.saturating_sub(tokens(&task_message));
-        let mut steers = Vec::new();
-        for steer in own_words.into_iter().rev() {
-            let steer = truncated(steer, message_cap);
-            if tokens(&steer) > room {
-                break;
-            }
-            room -= tokens(&steer);
-            steers.push(steer);
+    let mut room = pin_cap;
+    for message in evicted.iter().rev().filter(|message| is_pinned(message)) {
+        let message = truncated(message, message_cap.min(room));
+        if tokens(&message) > room {
+            break;
         }
-        pinned.push(task_message);
-        pinned.extend(steers.into_iter().rev());
+        room -= tokens(&message);
+        pinned.push(message);
     }
+    pinned.reverse();
     CompactionPlan {
         evicted,
         pinned,
@@ -250,10 +236,11 @@ mod tests {
     use crate::vlm::Message;
 
     #[test]
-    fn compaction_keeps_a_bounded_tail_and_pins_the_current_task() {
-        let mut history = vec![Message::user(
-            "User task (authoritative): inspect the loading dock",
-        )];
+    fn compaction_keeps_a_bounded_tail_and_pins_the_open_tasks_messages() {
+        let mut history = vec![
+            Message::user("User message m1 (filed under T1): inspect the loading dock"),
+            Message::user("User message m2 (filed under T2): what time is it"),
+        ];
         for i in 0..40 {
             history.push(Message::assistant(&format!(
                 "narration {i} {}",
@@ -261,19 +248,26 @@ mod tests {
             )));
         }
         history.push(Message::user(
-            "User steer (authoritative): stop at the doorway",
+            "User message m3 (filed under T1): stop at the doorway",
         ));
         history.push(Message::user(&"huge executor result ".repeat(2_000)));
-        let plan = plan_compaction(&history, 400, 300, 100);
+        let open = ["m1".to_string(), "m3".to_string()];
+        let plan = plan_compaction(&history, 400, 300, 100, &open);
         assert!(plan.tail.iter().map(tokens).sum::<usize>() <= 400 + 20);
         assert!(plan.tail.iter().all(|m| tokens(m) <= 300 + 20));
         assert_eq!(plan.evicted.len() + plan.tail.len(), history.len());
-        assert!(
-            plan.pinned[0]
-                .content
+        let pinned: Vec<&str> = plan
+            .pinned
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect();
+        assert_eq!(pinned.len(), 1, "{pinned:?}");
+        assert!(pinned[0].contains("loading dock"));
+        // T2's message is not an open task's, so it is summarised, not pinned.
+        assert!(plan.evicted.iter().any(|m| {
+            m.content
                 .as_deref()
-                .unwrap()
-                .contains("loading dock")
-        );
+                .is_some_and(|t| t.contains("what time"))
+        }));
     }
 }

@@ -160,7 +160,12 @@ is pre-filled with the page's hostname so a third machine doesn't end
 up dialling its own `localhost`. The viewer uses the optimized W3D endpoint on
 port `1235`: it keeps the interactive WebGL scene and live robot transforms,
 but removes high-rate robot-window camera messages that the standard viewer
-does not consume. Viewer JavaScript, textures, meshes, and world assets are
+does not consume. This endpoint forces W3D broadcast mode and does not forward
+viewer controls such as pause, reset, or simulation timeouts. Connecting or
+reconnecting a viewer therefore cannot pause the simulator and interrupt ROS
+sensor samples. The raw Webots port `1234` does not have this protection; use
+the public `1235` endpoint for browser viewing.
+Viewer JavaScript, textures, meshes, and world assets are
 proxied and cached by the server, avoiding repeated cross-network downloads.
 
 For a remote machine, forward both endpoints over SSH:
@@ -227,3 +232,7 @@ Robonix drivers (e.g. `tiago_chassis`, `tiago_camera`, `tiago_lidar`,
 the same DDS graph as Webots. The entrypoint ends with `wait` (instead
 of the previous `exec python3 -m tiago_bridge.node`) so Compose treats
 the container as live for as long as the Webots launch is alive.
+
+`bash start.sh --detach` returns after live sensor and optional browser-stream
+readiness checks and RViz setup. The default follows simulator logs in the
+foreground. Use `bash stop.sh` to stop the simulator in either mode.

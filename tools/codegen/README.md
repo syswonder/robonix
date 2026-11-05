@@ -43,11 +43,15 @@ paths.
 Direct invocation:
 
 ```sh
-robonix-codegen \
-    --idl-root <repo>/capabilities/lib \
+robonix-codegen --lang proto \
+    -I <repo>/capabilities/lib \
     --contracts <repo>/capabilities --contracts <pkg>/capabilities \
-    --out-dir <pkg>/rbnx-build/codegen/proto_gen
+    -o <pkg>/rbnx-build/codegen/proto_gen
 ```
 
-Add `--mcp` for the MCP types output (writes `robonix_mcp_types/` next
-to `proto_gen/`).
+`--lang` selects the output: `proto` (default; gRPC stubs and
+`robonix_contracts.proto`), `mcp` (Python typed-input helpers for MCP
+servers), `ros2` (a colcon overlay of the ROS interface packages), or
+`docs` (the mdBook reference pages). `-I` may be repeated. `rbnx codegen
+--mcp` runs a second pass with `--lang mcp -o
+<pkg>/rbnx-build/codegen/robonix_mcp_types`.

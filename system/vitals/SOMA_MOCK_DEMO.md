@@ -28,7 +28,7 @@ subprocess to read real joint data and merge it into the synthetic snapshot.
 │ Vitals (same process)                       │
 │   soma_ingest.rs: normalize + threshold eval │
 │   service.rs: GetVitals + StreamVitals       │
-│   gRPC server on :50091                      │
+│   gRPC server on :50093                      │
 └──────────────────────────────────────────────┘
 ```
 
@@ -167,11 +167,11 @@ vitals [ACTIVE] robonix/system/vitals
 
 ```bash
 # Vitals side
-grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
+grpcurl -plaintext -d '{}' 127.0.0.1:50291 \
   robonix.contracts.RobonixSystemVitalsGet/GetVitals
 
 # Mock Soma side
-grpcurl -plaintext -d '{}' 127.0.0.1:50092 \
+grpcurl -plaintext -d '{}' 127.0.0.1:50292 \
   robonix.contracts.RobonixSystemSomaGetHealth/GetHealth
 ```
 

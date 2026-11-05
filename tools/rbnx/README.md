@@ -16,6 +16,8 @@ make install
 This builds the Cargo workspace and copies `rbnx` (plus the other system
 binaries) into `~/.cargo/bin`, then runs `rbnx setup` to register this
 clone as the Robonix source tree (`~/.robonix/config.yaml`).
+`CARGO_HOME` overrides the Cargo installation root; `ROBONIX_HOME` overrides
+the Robonix configuration directory.
 
 You can also install just `rbnx`:
 
@@ -27,10 +29,10 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 | Command | What it does |
 | --- | --- |
-| `rbnx build [PKG]`        | Build a deploy or a single package (incl. ROS workspaces) |
+| `rbnx build [-f MANIFEST \| -p PKG \| -g NAME]` | Build a deploy or a single package (incl. ROS workspaces) |
 | `rbnx boot [-f MANIFEST]` | Bring up the full stack from a deploy manifest         |
 | `rbnx shutdown`           | Tear down what `rbnx boot` brought up                  |
-| `rbnx start PKG`          | Launch one package directly (used internally by boot)  |
+| `rbnx start [-p PKG]`     | Launch one package directly (used internally by boot)  |
 | `rbnx caps [-v]`          | List capabilities currently registered with atlas      |
 | `rbnx contracts`          | List contracts in the loaded registry                  |
 | `rbnx tools`              | List the MCP capabilities visible to Pilot's model     |
@@ -38,15 +40,33 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx inspect`            | Dump atlas state for debugging                         |
 | `rbnx codegen [--mcp]`    | Generate proto + MCP type stubs for a package          |
 | `rbnx chat`               | Interactive TUI chat with the pilot                    |
-| `rbnx ask "..."`          | Single-turn task submission                            |
+| `rbnx ask "..."`          | Single-turn task submission; `--session ID` continues or steers a session |
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
 | `rbnx setup [PATH]`       | Register a robonix source tree at `PATH`               |
 | `rbnx clean`              | Remove per-package build artefacts                     |
+| `rbnx validate [PATH]`    | Validate a package manifest without building           |
+| `rbnx config [-s \| -p PATH]` | Show the CLI configuration, or set the package storage path |
+| `rbnx docs [--out-dir DIR]` | Regenerate the contract and ROS IDL reference pages from `capabilities/` |
+| `rbnx describe [--provider ID] [--json]` | Show `CAPABILITY.md` for registered providers |
+| `rbnx init NAME [--path DIR]` | Create a robot deployment directory with a `robonix_manifest.yaml` |
+| `rbnx package-new NAME [-t primitive\|service\|skill] [--path DIR]` | Create a new package |
+| `rbnx logs [-d DIR] [-t TAG] [-l LEVEL] [-f] [--json] [--list-tags]` | Read Scribe log files, by default from `./rbnx-boot/logs` |
 | `rbnx update [-y]`        | Fast-forward cloned `url:` packages; asks first unless `-y`, and refuses without a terminal |
 | `rbnx update --check [--json]` | Report which `url:` packages have upstream commits; pulls nothing |
 | `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
 
 Run `rbnx <cmd> --help` for full flags.
+
+Each package manifest capability declares `transport: mcp`, `grpc`, or `ros2`,
+or a non-empty list such as `transport: [grpc, ros2]`. `rbnx validate` rejects
+invalid or duplicate transports, repeated contracts, and transports incompatible
+with an available contract TOML's mode. An omitted transport warns and remains
+accepted while existing packages migrate; `manifestVersion` stays `1`.
+
+`rbnx install [--github REPO \| --path DIR]`, `rbnx list`, and `rbnx info NAME`
+manage system-installed packages. They are legacy commands, hidden from
+`rbnx --help`; deployment manifests with `rbnx build` and `rbnx boot` replace
+them.
 
 `rbnx tools` follows contract metadata and omits entries marked
 `llm_callable = false`; `rbnx contracts` still lists those contracts and marks
@@ -54,6 +74,15 @@ them `pilot-hidden`, because they remain registered and callable by system
 consumers.
 
 ### What a boot leaves behind
+
+When boot prepares an unbuilt system package, it uses the deployment's
+`manifest:` selector, including Jetson Native and Docker variants.
+
+During boot, `rbnx` compares package manifest transport declarations with Atlas
+registrations, including Soma-managed primitives and skills. It warns once per
+mismatch; missing registrations are reported only while the package is ACTIVE.
+A manifest without transport declarations gets one warning and skips comparison.
+These diagnostics do not fail startup.
 
 `rbnx boot` writes `<manifest-dir>/rbnx-boot/deployment.lock` before it spawns
 anything. Each package records what the manifest asked for and what that
@@ -96,7 +125,7 @@ or `--sessions` to remove those too.
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Pilot, Vitals, then Liaison. Their `system.<name>`
+Atlas, Executor, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
 manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or
@@ -114,9 +143,32 @@ system:
 
 ## Environment
 
-- `ROBONIX_ATLAS` — atlas endpoint, default `127.0.0.1:50051`.
+- `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
+- `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's
+  `Driver(CMD_INIT)` reply. Default 90.
+- `RBNX_GH_MIRROR` — prefix tried before `https://github.com/` URLs when
+  cloning `url:` packages. Default `https://ghfast.top/`; set it empty to clone
+  from GitHub directly.
+- `ROBONIX_CODEGEN_BIN` — path to the `robonix-codegen` binary that
+  `rbnx codegen` runs. Without it, rbnx looks in `~/.cargo/bin`, the
+  workspace `target/`, and `PATH`, then falls back to `cargo run`.
+
+`rbnx chat` also reads:
+
+- `ROBONIX_LIAISON_ENDPOINT` — Liaison address. Without it, chat discovers
+  Liaison through Atlas and falls back to `127.0.0.1:50081`.
+- `ROBONIX_CHAT_MIC_NODE` / `ROBONIX_CHAT_SPEAKER_NODE` — provider ids of the
+  microphone and speaker to use. They override `~/.robonix/chat.yaml`, which
+  stores the choices made in the chat device picker (Ctrl+A reopens it).
+- `ROBONIX_CHAT_ASR_NODE` / `ROBONIX_CHAT_TTS_NODE` — provider ids of the ASR
+  and TTS services. Unset lets Liaison pick from Atlas.
+- `ROBONIX_CHAT_VOICE_SECONDS` — recording length per voice turn. Unset or 0
+  uses Liaison's default.
+- `ROBONIX_CHAT_VOICE_LANG` — language hint passed to ASR.
+- `ROBONIX_CHAT_VOICE_TTS` — set to `0`, `false`, `no`, or `off` to skip
+  spoken replies.
 
 Package instance settings belong in the deployment manifest's nested
 `config:` mapping. `rbnx boot` serializes that mapping and sends it to the
@@ -152,13 +204,6 @@ SDK uses a complete legacy service pair when present, or a complete shared pair
 when the legacy pair is wholly absent. Partial stubs, zero or multiple runtime
 Drivers, unrelated IDs, and shared-to-legacy fallback all fail startup, so
 config is never silently lost and no provider is promoted without a Driver.
-
-Each primitive, service, and skill entry's `name` is its deploy-time Atlas
-provider id. `rbnx boot` passes it as `RBNX_INSTANCE_NAME`; the SDK uses that
-identity for registration, capability declaration, heartbeat, and lifecycle
-state. Package source keeps its own default id for standalone `rbnx start`.
-Startup waits only for the exact expected id, so an unrelated concurrent
-registration cannot receive another instance's lifecycle config.
 
 ## How it finds the source tree
 

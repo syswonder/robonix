@@ -3,10 +3,10 @@
 # Speech service build phase.
 #
 # Robonix package convention: every Python package gets a uv-managed venv
-# under rbnx-build/. Build phase installs deps + runs codegen + warms
-# every model the runtime needs (ASR Whisper, ASR FunASR streaming, TTS).
-# Runtime (`start:`) only activates the venv and serves; no model
-# downloads at runtime.
+# under rbnx-build/. Build phase installs deps + runs codegen + downloads
+# every model the runtime needs (ASR Whisper, streaming ASR sherpa-onnx
+# paraformer, wake-word KWS, TTS). Runtime (`start:`) only activates the
+# venv and serves; no model downloads at runtime.
 #
 # Layout under rbnx-build/:
 #   rbnx-build/venv/                   per-package Python venv (uv)
@@ -115,15 +115,15 @@ uv pip install --python "$VENV/bin/python" \
 # ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
 # On Jetson (aarch64), PyPI ships a torch built against a CUDA version that
 # does NOT match the JetPack driver (e.g. a cu130 wheel vs the CUDA 12.6
-# driver), so torch.cuda.is_available() is False and FunASR/Whisper silently
-# fall back to CPU — streaming ASR then emits each character with a long lag.
+# driver), so Whisper cannot use the GPU.
 # JetPack already provides a working CUDA torch on the host python; reuse it
 # by symlinking the torch family into this venv (all other deps stay from uv).
 # Generalised: resolve each module's dir from the host python, so it works
 # regardless of where JetPack / editable installs place them.
 # Disable with SPEECH_SKIP_JETSON_TORCH=1.
 if [[ "$USE_JETSON_TORCH" == "1" && "${SPEECH_SKIP_JETSON_TORCH:-}" != "1" ]]; then
-    SP="$SITEPKG"
+    # uv sync may recreate the environment with a different Python minor.
+    SP="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
     if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
         HOSTPY="${SPEECH_HOST_PYTHON:-python3}"
         if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
@@ -174,25 +174,11 @@ export HF_ENDPOINT
 
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
-    MODEL_NAME=sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
-    MODEL_DIR="$BUILD/models/$MODEL_NAME"
-    ARCHIVE="$BUILD/models/$MODEL_NAME.tar.bz2"
-    OFFICIAL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_NAME.tar.bz2"
-    MIRROR_URL="https://ghfast.top/$OFFICIAL_URL"
-    mkdir -p "$BUILD/models"
-    if [[ ! -f "$MODEL_DIR/tokens.txt" ]]; then
-        echo "[build] downloading Speech wake-word model ($MODEL_NAME)"
-        rm -f "$ARCHIVE"
-        if ! curl -fL --retry 3 --connect-timeout 15 -o "$ARCHIVE" \
-            "${SHERPA_KWS_MODEL_URL:-$MIRROR_URL}"; then
-            rm -f "$ARCHIVE"
-            curl -fL --retry 3 --connect-timeout 15 -o "$ARCHIVE" "$OFFICIAL_URL"
-        fi
-        bzip2 -t "$ARCHIVE"
-        tar -xjf "$ARCHIVE" -C "$BUILD/models"
-        rm -f "$ARCHIVE"
-    fi
+    "$PY" "$PKG/scripts/download_models.py" "$BUILD/models" kws
     "$PY" -c 'import sherpa_onnx; print("[build] sherpa-onnx", sherpa_onnx.__version__)'
+    if [[ "$BACKEND" == "local" ]]; then
+        "$PY" "$PKG/scripts/download_models.py" "$BUILD/models" asr
+    fi
 else
     echo "[build] skipping wake-word model download (SKIP_MODEL_DOWNLOAD=1)."
 fi
@@ -201,7 +187,7 @@ if [[ "$BACKEND" == "local" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
     # Whisper is opt-in: it's a 20+ GB pull (whisper-large-v3) that only
     # the one-shot `robonix/system/speech/asr` contract uses. The default
-    # streaming path (FunASR paraformer-zh-streaming, ~500 MB) is what
+    # sherpa-onnx streaming path is what
     # the dialog stack actually invokes. Override with DOWNLOAD_WHISPER=1
     # if a caller for the one-shot ASR contract is in the picture.
     if [[ "${DOWNLOAD_WHISPER:-}" == "1" ]]; then
@@ -215,8 +201,6 @@ if [[ "$BACKEND" == "local" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     else
         echo "[build] skipping Whisper download (set DOWNLOAD_WHISPER=1 to pull the 20 GB one-shot ASR weights)."
     fi
-    echo "[build] downloading FunASR model (paraformer-zh-streaming)…"
-    "$PY" -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')"
 elif [[ "$BACKEND" == "tencent" ]]; then
     echo "[build] Tencent backend: validating lightweight cloud dependencies"
     "$VENV/bin/python" - <<'PY'

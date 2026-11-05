@@ -1,0 +1,14 @@
+# Navigation's global costmap: the grid its planner plans on. 100 marks a
+# lethal cell, -1 an unknown one, and values between are costs that rise
+# toward obstacles. Each message is the whole current grid, in
+# header.frame_id; a consumer combining it with another grid transforms
+# between their frames.
+[contract]
+id      = "robonix/service/navigation/costmap"
+version = "1"
+kind    = "service"
+idl     = "common_interfaces/nav_msgs/msg/OccupancyGrid.msg"
+description = "Global costmap the navigation planner uses, as an occupancy grid in its own frame."
+
+[mode]
+type = "topic_out"

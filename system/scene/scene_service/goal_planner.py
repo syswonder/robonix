@@ -317,6 +317,43 @@ def _ring_cells(center_x: int, center_y: int, radius: int) -> Iterable[tuple[int
 # How much further an approach pose on the robot's side of an object may be
 # than one on the far side before the far side is used instead.
 FAR_SIDE_SLACK_M = 1.0
+# How far from its own cell the robot's free space is looked for.
+ROBOT_SEED_RADIUS_M = 0.5
+
+
+# Navigation's costmap marks a cell 99 where the robot's inscribed circle
+# would touch an obstacle and 100 where the cell itself is one.
+NAV_COSTMAP_INSCRIBED = 99
+
+
+def _nav_cost_ok(costmap, x: float, y: float) -> bool:
+    """Whether Navigation could stand the robot at (x, y): its costmap cell is
+    unknown, outside the costmap, or below the inscribed cost."""
+    width, height, resolution, origin_x, origin_y = _grid_metadata(costmap)
+    gx = math.floor((x - origin_x) / resolution)
+    gy = math.floor((y - origin_y) / resolution)
+    if not (0 <= gx < width and 0 <= gy < height):
+        return True
+    cost = int(_grid_array(costmap, width=width, height=height)[gy, gx])
+    return cost < 0 or cost < NAV_COSTMAP_INSCRIBED
+
+
+def _reachable_free(grid, gx: int, gy: int, max_seed_rings: int):
+    """Known free cells connected to the robot's cell, or None.
+
+    The robot's own cell can read unknown or occupied (inflated, or its own
+    body seen by a sensor), so the region is seeded from the nearest known
+    free cell within `max_seed_rings`.
+    """
+    from scipy import ndimage
+
+    height, width = grid.shape
+    labels, _count = ndimage.label((grid >= 0) & (grid <= 50))
+    for ring in range(max_seed_rings + 1):
+        for x, y in _ring_cells(gx, gy, ring):
+            if 0 <= x < width and 0 <= y < height and labels[y, x]:
+                return labels == labels[y, x]
+    return None
 
 
 def object_goal(
@@ -327,10 +364,45 @@ def object_goal(
     preferred_approach_yaw: float | None,
     minimum_standoff_m: float,
     footprint: RobotFootprint,
+    nav_costmap=None,
+    robot_xy: tuple[float, float] | None = None,
+    _within=None,
 ) -> tuple[float, float, float] | None:
-    """Find the nearest map cell whose real footprint can approach an object."""
+    """Find the nearest map cell whose real footprint can approach an object.
+
+    `nav_costmap`, when given, is Navigation's own costmap in the grid's frame.
+    The map grid can be the lidar's plane alone, while Navigation also marks
+    what its depth camera sees, a table top over free floor for one; a pose
+    that is free on the map but inside Navigation's inscribed cost is a goal
+    it can never reach, so such cells are skipped.
+
+    `robot_xy`, when given, keeps the pose in the known free space the robot
+    can drive to. An object seen on or through a wall has unexplored space
+    behind it, which fits the footprint and can be nearer the object, but no
+    plan reaches it. Only when nothing connected fits is the rest searched.
+    """
     width, height, resolution, origin_x, origin_y = _grid_metadata(grid_msg)
     grid = _grid_array(grid_msg, width=width, height=height)
+    if robot_xy is not None:
+        reachable = _reachable_free(
+            grid,
+            math.floor((robot_xy[0] - origin_x) / resolution),
+            math.floor((robot_xy[1] - origin_y) / resolution),
+            max_seed_rings=math.ceil(ROBOT_SEED_RADIUS_M / resolution),
+        )
+        if reachable is not None:
+            found = object_goal(
+                grid_msg,
+                target_x=target_x,
+                target_y=target_y,
+                preferred_approach_yaw=preferred_approach_yaw,
+                minimum_standoff_m=minimum_standoff_m,
+                footprint=footprint,
+                nav_costmap=nav_costmap,
+                _within=reachable,
+            )
+            if found is not None:
+                return found
     # Unexplored cells are allowed, occupied ones are not; Nav2 decides the rest.
     blocked = grid > 50
     target_gx = math.floor((target_x - origin_x) / resolution)
@@ -353,6 +425,8 @@ def object_goal(
         candidates: list[tuple[bool, float, float, float, float]] = []
         for gx, gy in _ring_cells(target_gx, target_gy, ring):
             if not (0 <= gx < width and 0 <= gy < height):
+                continue
+            if _within is not None and not _within[gy, gx]:
                 continue
             x = origin_x + (gx + 0.5) * resolution
             y = origin_y + (gy + 0.5) * resolution
@@ -384,7 +458,7 @@ def object_goal(
                 origin_x=origin_x,
                 origin_y=origin_y,
                 polygon=candidate,
-            ):
+            ) and (nav_costmap is None or _nav_cost_ok(nav_costmap, x, y)):
                 if not is_far_side:
                     return x, y, yaw
                 far_side, far_side_ring = (x, y, yaw), ring

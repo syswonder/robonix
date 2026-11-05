@@ -17,6 +17,7 @@ could not be carried out.
 from __future__ import annotations
 
 import argparse
+import atexit
 import asyncio
 import json
 import math
@@ -97,6 +98,7 @@ class World:
 
     def __init__(self):
         import rclpy
+        import rclpy.executors
         from nav_msgs.msg import OccupancyGrid
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         from std_msgs.msg import String, UInt32
@@ -114,7 +116,21 @@ class World:
         self.node.create_subscription(OccupancyGrid, "/global_costmap/costmap", lambda m: setattr(self, "costmap", m), latched)
         self.node.create_subscription(String, "/webots/collision", lambda m: self.collisions.append(json.loads(m.data)), 50)
         self.node.create_subscription(UInt32, "/webots/collision_count", lambda m: setattr(self, "count", m.data), latched)
-        threading.Thread(target=rclpy.spin, args=(self.node,), daemon=True).start()
+        self._executor = rclpy.executors.SingleThreadedExecutor()
+        self._executor.add_node(self.node)
+        self._spin = threading.Thread(target=self._executor.spin, daemon=True)
+        self._spin.start()
+        # rclpy left spinning in a daemon thread aborts the interpreter as it
+        # exits (exit code 134 after a clean run), so ROS is shut down first.
+        atexit.register(self.close)
+
+    def close(self):
+        import rclpy
+
+        self._executor.shutdown()
+        self._spin.join(timeout=5)
+        self.node.destroy_node()
+        rclpy.shutdown()
 
     def _on_map(self, msg):
         self.map = msg

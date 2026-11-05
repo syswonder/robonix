@@ -28,15 +28,14 @@ Four Voiceprint RPCs land on the same listener under one Atlas Service:
   * robonix/service/voiceprint/delete    — DeleteEnrolled(...)
       Idempotently removes one enrolled speaker.
 
-State storage is unchanged: a single JSON file (`<data_dir>/enrolled.json`)
-mapping `user_id -> {"name": str, "embedding": [float, ...]}`. No schema
-migration needed from the previous version.
+Enrollment records include model="campplus_zh". Legacy or incompatible
+embeddings are skipped on load; those users must enroll again.
 
 Environment variables consumed at startup:
 
   VOICEPRINT_DATA_DIR    default <pkg>/rbnx-build/data
-  VOICEPRINT_THRESHOLD   default 0.25 (cosine similarity gate)
-  VOICEPRINT_DEVICE      cuda:0 | cpu (auto-detected when unset)
+  VOICEPRINT_THRESHOLD   default 0.55 (cosine similarity gate, CAM++ calibration)
+  VOICEPRINT_MODEL       optional path to the CAM++ ONNX model
 """
 from __future__ import annotations
 
@@ -73,7 +72,7 @@ except Exception as exc:  # noqa: BLE001 - generated modules raise version-speci
     ) from exc
 from robonix_api import Service, Ok, Err, scribe_logger  # noqa: E402
 
-from voiceprint_service.engine import EcapaTdnnEngine
+from voiceprint_service.engine import SpeakerEmbeddingEngine
 
 # Route all stdlib logging through Scribe so `rbnx logs -t voiceprint` sees the
 # full trace and the package owns no log file or stdout sink of its own.
@@ -83,7 +82,8 @@ log = logging.getLogger("voiceprint_service")
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_DIR = _PKG_DIR / "rbnx-build" / "data"
-_DEFAULT_THRESHOLD = 0.25
+_DEFAULT_THRESHOLD = 0.55
+_EMBEDDING_MODEL = "campplus_zh"
 
 
 def _data_dir() -> Path:
@@ -125,7 +125,13 @@ class EnrolledDB:
         with self._lock:
             if self.path.is_file():
                 with self.path.open("r", encoding="utf-8") as fh:
-                    self.data = json.load(fh)
+                    records = json.load(fh)
+                self.data = {}
+                for uid, entry in records.items():
+                    if entry.get("model") != _EMBEDDING_MODEL:
+                        log.warning("Skipping incompatible enrollment %s; re-enroll this user", uid)
+                        continue
+                    self.data[uid] = entry
                 log.info("Loaded %d enrolled users from %s", len(self.data), self.path)
             else:
                 self.data = {}
@@ -157,6 +163,7 @@ class EnrolledDB:
             previous = self.data.get(user_id, missing)
             self.data[user_id] = {
                 "name": user_name,
+                "model": _EMBEDDING_MODEL,
                 "embedding": [float(x) for x in embedding.tolist()],
             }
             try:
@@ -220,6 +227,7 @@ class EnrolledDB:
 
             self.data[user_id] = {
                 "name": user_name,
+                "model": _EMBEDDING_MODEL,
                 "embedding": [float(x) for x in embedding.tolist()],
             }
             try:
@@ -269,17 +277,16 @@ class EnrolledDB:
 # Module-level state populated by lifecycle hooks.
 # ---------------------------------------------------------------------------
 
-_engine: EcapaTdnnEngine | None = None
+_engine: SpeakerEmbeddingEngine | None = None
 _db: EnrolledDB | None = None
 _threshold_value: float = _DEFAULT_THRESHOLD
-_configured_device: str | None = None
-_applied_config: tuple[Path, float, str | None] | None = None
+_applied_config: tuple[Path, float, str] | None = None
 _runtime_lock = threading.RLock()
 
 
 def _configure(cfg: dict) -> None:
     """Validate config and open the enrollment DB without loading the model."""
-    global _db, _threshold_value, _configured_device, _applied_config
+    global _db, _threshold_value, _applied_config
     threshold_raw = (
         cfg["threshold"]
         if "threshold" in cfg
@@ -287,18 +294,10 @@ def _configure(cfg: dict) -> None:
     )
     threshold = _validate_threshold(threshold_raw)
     data_dir = Path(cfg.get("data_dir", str(_data_dir())))
-    device_raw = (
-        cfg["device"]
-        if "device" in cfg
-        else os.environ.get("VOICEPRINT_DEVICE")
-    )
-    if device_raw is None:
-        device = None
-    elif not isinstance(device_raw, str) or not device_raw.strip():
-        raise ValueError("device must be a non-empty string or null")
-    else:
-        device = device_raw.strip()
-    resolved = (data_dir, threshold, device)
+    provider = str(cfg.get("provider", os.environ.get("VOICEPRINT_PROVIDER", "cpu"))).strip()
+    if not provider:
+        raise ValueError("provider must be a non-empty string")
+    resolved = (data_dir, threshold, provider)
 
     with _runtime_lock:
         if _db is not None:
@@ -311,8 +310,8 @@ def _configure(cfg: dict) -> None:
         db = EnrolledDB(data_dir / "enrolled.json")
         _db = db
         _threshold_value = threshold
-        _configured_device = device
         _applied_config = resolved
+        os.environ["VOICEPRINT_PROVIDER"] = provider
         log.info(
             "voiceprint init complete: data_dir=%s threshold=%.2f enrolled=%d",
             data_dir,
@@ -516,7 +515,7 @@ def init(cfg: dict):
 
 @voiceprint.on_activate
 def activate():
-    """Load the ECAPA-TDNN model when the provider becomes active."""
+    """Load the speaker-embedding model when the provider becomes active."""
     global _engine
     with _runtime_lock:
         if _db is None or _applied_config is None:
@@ -524,7 +523,7 @@ def activate():
         if _engine is not None:
             return Ok()
         try:
-            _engine = EcapaTdnnEngine(device=_configured_device)
+            _engine = SpeakerEmbeddingEngine()
             log.info("voiceprint activation complete")
             return Ok()
         except Exception as exc:  # noqa: BLE001

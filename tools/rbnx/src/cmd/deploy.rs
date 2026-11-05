@@ -33,9 +33,9 @@ use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_cli::launch::{
-    PackageRuntimeRecord, ProviderRegistrationSnapshot, RegistrationOutcome,
-    contract_id_to_service_name, resolve_runtime_driver_contract, snapshot_provider_ids,
-    terminate_process_group,
+    CapabilityTransportCheck, PackageRuntimeRecord, ProviderRegistrationSnapshot,
+    RegistrationOutcome, contract_id_to_service_name, resolve_runtime_driver_contract,
+    snapshot_provider_ids, terminate_process_group,
 };
 use robonix_cli::output;
 use serde::Deserialize;
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_prerequisites_build_scene_but_skip_vitals_builtin() {
+    fn boot_prerequisites_build_scene_with_its_selected_manifest() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -299,14 +299,14 @@ package:
   version: 0.1.0
   description: test system package
   license: MulanPSL-2.0
-build: mkdir -p rbnx-build && touch rbnx-build/proof
+build: mkdir -p rbnx-build && echo default > rbnx-build/proof
 start: "true"
 stop: "true"
 "#,
         )
         .expect("test package manifest");
 
-        let deploy = DeployManifest {
+        let mut deploy = DeployManifest {
             system: HashMap::from([
                 ("scene".to_string(), serde_yaml::Value::Null),
                 ("vitals".to_string(), serde_yaml::Value::Null),
@@ -322,6 +322,25 @@ stop: "true"
 
         assert!(scene.join("rbnx-build/proof").is_file());
         assert!(scene.join("rbnx-build/.rbnx-built").is_file());
+        std::fs::remove_dir_all(scene.join("rbnx-build")).expect("reset build state");
+        let selected = "package_manifest.jetson-native.yaml";
+        let native = std::fs::read_to_string(scene.join("package_manifest.yaml"))
+            .expect("default manifest")
+            .replace("echo default", "echo native");
+        std::fs::write(scene.join(selected), native).expect("native manifest");
+        deploy.system.insert(
+            "scene".to_string(),
+            serde_yaml::from_str(&format!("manifest: {selected}\nconfig: {{}}"))
+                .expect("system package selector"),
+        );
+        check_prerequisites(&deploy, &cache_root, &manifest_dir, Some(&temp))
+            .expect("selected system-package prerequisite build");
+        assert_eq!(
+            std::fs::read_to_string(scene.join("rbnx-build/proof"))
+                .expect("selected build proof")
+                .trim(),
+            "native"
+        );
         std::fs::remove_dir_all(temp).expect("remove test directory");
     }
 
@@ -533,7 +552,7 @@ fn check_prerequisites(
     // downloads are a common example).
 
     if let Some(source_root) = robonix_source_path {
-        for name in deploy.system.keys() {
+        for (name, value) in &deploy.system {
             if is_builtin_system(name.as_str()) {
                 continue;
             }
@@ -543,7 +562,10 @@ fn check_prerequisites(
             }
             let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
             if !stamp.exists() {
-                needs_build.insert(name.clone(), (pkg_path, None));
+                let (manifest_override, _) =
+                    robonix_cli::manifest::split_system_package_config(value)
+                        .with_context(|| format!("parse system/{name} package selector"))?;
+                needs_build.insert(name.clone(), (pkg_path, manifest_override));
             }
         }
     }
@@ -885,6 +907,8 @@ struct Spawned {
     /// True only for an explicit legacy selection, permitting a current shared
     /// runtime Driver while the manifest is migrated.
     allow_shared_driver_upgrade: bool,
+    /// Manifest transport comparison for package-managed processes.
+    transport_check: Option<CapabilityTransportCheck>,
     config_json: Option<String>,
     package_dir: Option<PathBuf>,
     stop: Option<String>,
@@ -965,6 +989,7 @@ async fn spawn_system_binary(
         driver_contract: None,
         expected_driver_contract: None,
         allow_shared_driver_upgrade: false,
+        transport_check: None,
         config_json: None,
         package_dir: None,
         stop: None,
@@ -1113,6 +1138,7 @@ async fn spawn_soma_binary(
             driver_contract: None,
             expected_driver_contract: None,
             allow_shared_driver_upgrade: false,
+            transport_check: None,
             config_json: None,
             package_dir: None,
             stop: None,
@@ -1308,6 +1334,10 @@ async fn spawn_package(
         driver_contract: None,
         expected_driver_contract,
         allow_shared_driver_upgrade,
+        transport_check: Some(CapabilityTransportCheck::new(
+            &name,
+            &package_manifest.manifest,
+        )),
         config_json: None,
         package_dir: Some(pkg_path),
         stop,
@@ -1676,6 +1706,7 @@ pub async fn execute(
                         .last_mut()
                         .expect("soma Spawned pushed above")
                         .child;
+                    let mut transport_checks = load_transport_checks(&deploy.primitive, &spawn_env);
                     wait_for_soma_stage1(
                         &mut stage1_atlas,
                         &deploy
@@ -1685,6 +1716,7 @@ pub async fn execute(
                             .collect::<Vec<_>>(),
                         soma_child,
                         &log_dir,
+                        &mut transport_checks,
                     )
                     .await?;
 
@@ -1852,6 +1884,7 @@ pub async fn execute(
                     output::boot_wait(&entry.name, "waiting for registration");
                 }
             }
+            let mut transport_checks = load_transport_checks(&deploy.skill, &spawn_env);
             if let Err(e) = write_stage2_trigger(&mut soma_stage_writer) {
                 failures.push((
                     "system".to_string(),
@@ -1865,6 +1898,7 @@ pub async fn execute(
                     .iter()
                     .map(|entry| entry.name.clone())
                     .collect::<Vec<_>>(),
+                &mut transport_checks,
             )
             .await
             {
@@ -2413,6 +2447,9 @@ async fn init_spawned(
         }
     };
     let provider_id = registration.provider_id.clone();
+    if let Some(check) = sp.transport_check.as_mut() {
+        warn_capability_transports(check, &registration.provider);
+    }
     // The exact-id waiter makes this an internal invariant. Keep the check as
     // defense in depth so a future launcher refactor cannot deliver config to
     // a provider other than the manifest instance.
@@ -2499,6 +2536,7 @@ async fn init_spawned(
     };
 
     if component == "skill" {
+        observe_package_transports(atlas, sp).await;
         // Skills stop at INACTIVE post-INIT; the executor sends
         // CMD_ACTIVATE on first MCP call (lazy-activate).
         output::boot_ok(
@@ -2537,6 +2575,7 @@ async fn init_spawned(
     // got their own spinner lines and OK ticks above. provider_id is the
     // leftmost label so we don't repeat it here.
     let _ = init_state; // intermediate, only kept for the assertion below
+    observe_package_transports(atlas, sp).await;
     output::boot_ok(display_label, &activate_state.to_uppercase());
 
     Ok(())
@@ -2579,11 +2618,79 @@ where
     }
 }
 
+fn warn_capability_transports(
+    check: &mut CapabilityTransportCheck,
+    provider: &atlas_pb::CapabilityProvider,
+) {
+    for warning in check.observe(provider) {
+        output::warning(&warning);
+    }
+}
+
+fn load_transport_checks(
+    entries: &[PackageEntry],
+    env: &PackageSpawnEnv<'_>,
+) -> HashMap<String, CapabilityTransportCheck> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let manifest = resolve_entry_path(entry, env.cache_root, env.manifest_dir).and_then(
+                |path| robonix_cli::manifest::detect_and_load(&path, entry.manifest.as_deref()),
+            );
+            match manifest {
+                Ok(detected) => Some((
+                    entry.name.clone(),
+                    CapabilityTransportCheck::new(&entry.name, &detected.manifest),
+                )),
+                Err(error) => {
+                    output::warning(&format!(
+                        "package '{}': could not read manifest for runtime transport comparison: {error:#}",
+                        entry.name
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+async fn observe_package_transports(atlas: &mut AtlasClient, spawned: &mut Spawned) {
+    let (Some(check), Some(provider_id)) = (
+        spawned.transport_check.as_mut(),
+        spawned.provider_id.as_deref(),
+    ) else {
+        return;
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        atlas.query_capabilities(provider_id, "", atlas_pb::Transport::Unspecified),
+    )
+    .await
+    {
+        Ok(Ok(providers)) => {
+            if let Some(provider) = providers.iter().find(|provider| provider.id == provider_id) {
+                warn_capability_transports(check, provider);
+            } else {
+                output::warning(&format!(
+                    "package '{provider_id}': no Atlas registration available for runtime transport comparison"
+                ));
+            }
+        }
+        Ok(Err(error)) => output::warning(&format!(
+            "package '{provider_id}': could not observe registered capability transports: {error:#}"
+        )),
+        Err(_) => output::warning(&format!(
+            "package '{provider_id}': runtime transport observation timed out after 1s"
+        )),
+    }
+}
+
 async fn wait_for_soma_stage1(
     atlas: &mut AtlasClient,
     primitive_names: &[String],
     soma_child: &mut Child,
     log_dir: &Path,
+    transport_checks: &mut HashMap<String, CapabilityTransportCheck>,
 ) -> Result<()> {
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: usize = 5; // poll atlas every 500 ms
@@ -2687,6 +2794,9 @@ async fn wait_for_soma_stage1(
                 else {
                     continue;
                 };
+                if let Some(check) = transport_checks.get_mut(name) {
+                    warn_capability_transports(check, &provider);
+                }
                 let previous = observed_states.insert(name.clone(), provider.state);
                 if previous != Some(provider.state) {
                     let state = lifecycle_state_label(provider.state);
@@ -2756,7 +2866,11 @@ fn lifecycle_state_label(state: i32) -> &'static str {
     }
 }
 
-async fn wait_for_soma_skills(atlas: &mut AtlasClient, skill_names: &[String]) -> Result<()> {
+async fn wait_for_soma_skills(
+    atlas: &mut AtlasClient,
+    skill_names: &[String],
+    transport_checks: &mut HashMap<String, CapabilityTransportCheck>,
+) -> Result<()> {
     const TIMEOUT: Duration = Duration::from_secs(180);
     if skill_names.is_empty() {
         return Ok(());
@@ -2773,6 +2887,9 @@ async fn wait_for_soma_skills(atlas: &mut AtlasClient, skill_names: &[String]) -
             let Some(provider) = providers.into_iter().find(|provider| provider.id == *name) else {
                 continue;
             };
+            if let Some(check) = transport_checks.get_mut(name) {
+                warn_capability_transports(check, &provider);
+            }
             if observed_states.insert(name.clone(), provider.state) != Some(provider.state) {
                 let state = lifecycle_state_label(provider.state);
                 if provider.state == atlas_pb::LifecycleState::StateInactive as i32
@@ -3187,6 +3304,7 @@ async fn wait_for_registration(
                 driver_contracts.sort();
                 driver_contracts.dedup();
                 return Ok(RegistrationOutcome {
+                    provider: current.clone(),
                     provider_id,
                     provider_kind: current.kind,
                     provider_namespace: current.namespace,

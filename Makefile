@@ -83,7 +83,7 @@ install:
 	@REPO_ROOT="$$(pwd)"; \
 	echo ""; \
 	echo "[make install] registering robonix_source_path → $$REPO_ROOT"; \
-	"$$HOME/.cargo/bin/rbnx" setup "$$REPO_ROOT" || { \
+	"$${CARGO_HOME:-$$HOME/.cargo}/bin/rbnx" setup "$$REPO_ROOT" || { \
 		echo "[make install] WARNING: 'rbnx setup' failed — run it manually:"; \
 		echo "                cd $$REPO_ROOT && rbnx setup"; \
 	}

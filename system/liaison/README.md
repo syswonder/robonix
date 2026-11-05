@@ -51,8 +51,15 @@ User
   `VoiceEvent` state, ASR, voiceprint, Pilot, and TTS progress.
 - `robonix/system/liaison/voice/finish`: ends microphone capture for an
   in-flight voice session and submits the transcript recognized so far.
+- `robonix/system/liaison/handsfree/set_enabled`: enables or disables the
+  robot-local wake-word interaction mode.
+- `robonix/system/liaison/handsfree/status`: reads the wake-word interaction
+  state.
+- `robonix/system/liaison/handsfree/events`: streams events from hands-free
+  voice turns.
 
-All three contracts are registered by the `liaison` provider id.
+All six contracts are registered by the `liaison` provider id, which also
+declares the shared lifecycle Driver contract.
 
 A voice turn normally ends on the ASR backend's own end-of-utterance
 detection. Continuous background noise can keep that from ever firing, which
@@ -113,7 +120,7 @@ robonix-liaison
 | `ROBONIX_LIAISON_SOURCE` | (unset) | Set to `text` to enable the stdin text loop (headless) |
 | `ROBONIX_LIAISON_ACCESS_ENABLED` | `0` | Set to `1` to require access before Pilot/TTS/action |
 | `ROBONIX_LIAISON_ALLOWED_USERS` | (empty) | Comma/space separated ids such as `local:alice,voice:alice` |
-| `ROBONIX_LIAISON_VOICE_THRESHOLD` | `0.25` | Minimum voiceprint confidence for a voice user to pass |
+| `ROBONIX_LIAISON_VOICE_THRESHOLD` | `0.55` | Minimum voiceprint confidence for a voice user to pass |
 | `ROBONIX_LIAISON_VOICE_SAVE_DIR` | (unset) | Directory for captured voice-session audio dumps |
 
 ## TUI Shortcuts
@@ -141,3 +148,6 @@ robonix-liaison
 | 8 | TTS_DONE | TTS finished |
 | 9 | SESSION_DONE | Session ended normally |
 | 10 | ERROR | Error |
+
+Streaming ASR partials carry text deltas. The final event carries the complete
+transcript and replaces the accumulated partials, including recognition revisions.

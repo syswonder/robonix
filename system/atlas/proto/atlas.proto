@@ -26,7 +26,8 @@ package robonix.atlas;
 //                              ^                     |
 //                              +-- CMD_DEACTIVATE ---+
 //
-//   any state --handler fails / raises--> ERROR  (terminal apart from SHUTDOWN)
+//   any state --handler fails / raises--> ERROR
+//   ERROR --CMD_INIT after the fault is fixed--> INACTIVE
 //   any state --CMD_SHUTDOWN / SIGTERM / heartbeat lapse--> TERMINATED
 // ---------------------------------------------------------------------------
 
@@ -338,7 +339,8 @@ message Capability {
 //                       gate on `state == ACTIVE` of the owning CapabilityProvider
 //                       before calling a Capability.
 //   STATE_ERROR       -- last Driver(CMD_*) returned ok=false or
-//                       raised. Terminal apart from CMD_SHUTDOWN.
+//                       raised. A provider leaves it by re-initialising
+//                       to INACTIVE or by shutting down.
 //   STATE_TERMINATED  -- on_shutdown ran (or process exited / heartbeat
 //                       lapsed). Atlas GCs after a brief delay.
 enum LifecycleState {

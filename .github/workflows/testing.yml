@@ -343,8 +343,8 @@ jobs:
     timeout-minutes: 90
     env:
       # ── Build-env fixes for this box (see examples/webots/TROUBLESHOOTING.md) ──
-      # Prefer the GitHub mirror, but fall back to GitHub through the runner's
-      # loopback Clash proxy when the mirror is unavailable.
+      # Prefer the GitHub mirror, and fall back to github.com through the
+      # runner's own network settings when the mirror is unavailable.
       GIT_MIRROR_INSTEADOF: "true"
       # codegen grpcio-tools MUST match the runtime grpcio pinned by packages
       # (1.80.0) or RegisterService fails with a version-skew error.
@@ -362,10 +362,10 @@ jobs:
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
-      # CI should not depend on external Tencent/FunASR credentials or quota.
+      # CI should not depend on external Tencent credentials or quota.
       SPEECH_BACKEND: "mock"
-      # Keep build-time ECAPA verification off the GPU reserved for Webots and Scene.
-      VOICEPRINT_DEVICE: "cpu"
+      # Keep speaker embeddings on CPU; reserve the GPU for Webots and Scene.
+      VOICEPRINT_PROVIDER: "cpu"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
       ROBONIX_SIM_NETWORK: "bridge"
@@ -492,18 +492,17 @@ jobs:
           if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
             echo "::warning::Xid in dmesg — GPU may be degraded"; fi
 
-      - name: Remove containers left by an interrupted run
+      - name: Remove leftovers owned by this run
         run: |
           set -euo pipefail
-          # A runner killed mid-job never reaches its own cleanup, and its
-          # containers keep the GPU, so the next run fails the capacity check.
-          # This runner takes one job at a time and this step runs before this
-          # job starts anything, so every ci-* resource here belongs to a job
-          # that is no longer running.
-          docker ps -aq --filter "name=^ci-" | xargs -r docker rm -f
-          docker images --format '{{.Repository}}:{{.Tag}}' | grep '^ci-' | xargs -r docker rmi || true
-          docker volume ls -q | grep '^ci-' | xargs -r docker volume rm || true
-          docker network ls --format '{{.Name}}' | grep '^ci-' | xargs -r docker network rm || true
+          [[ "$RUN_KEY" =~ ^[0-9]+-[0-9]+-(cg|dm)$ ]] || exit 1
+          # Other GPU groups or users may still own ci-* resources. Leave
+          # their containers and shared image tags intact; capacity failure
+          # is safer than deleting another run's state.
+          owned="^ci-${RUN_KEY}([-_]|$)"
+          docker ps -aq --filter "name=$owned" | xargs -r docker rm -f
+          docker volume ls -q | grep -E "$owned" | xargs -r docker volume rm || true
+          docker network ls --format '{{.Name}}' | grep -E "$owned" | xargs -r docker network rm || true
 
       - name: Wait for runner GPU capacity
         run: |
@@ -559,17 +558,6 @@ jobs:
           # developer workstation, so CI must not mutate ~/.gitconfig.
           git_config="$RUNNER_TEMP/robonix-ci-gitconfig"
           : > "$git_config"
-          # The runner service inherited HTTP_PROXY=127.0.0.1:9981 from a
-          # macOS-forwarding config that was disabled on 2026-08-10. The
-          # listener is still up but forwards nothing, so every clone since has
-          # died with `GnuTLS, handshake failed` — an error that names TLS and
-          # hides the fact that the proxy is a dead end. Drop the inherited
-          # values for this job so the routing decided below is the one that
-          # applies.
-          for stale in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
-            printf '%s=\n' "$stale" >> "$GITHUB_ENV"
-          done
-          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
           if timeout 15s git ls-remote --exit-code \
               "https://ghfast.top/https://github.com/syswonder/robonix.git" \
               HEAD >/dev/null 2>&1; then
@@ -577,34 +565,9 @@ jobs:
               url."https://ghfast.top/https://github.com/".insteadOf \
               "https://github.com/"
             echo "Using ghfast.top for GitHub clones"
-          elif proxy_ok=0
-               # Clash on this runner drops out for stretches at a time. Both
-               # other routes are hard-blocked here — a direct clone and
-               # ghfast.top both come back "Connection reset by peer" — so the
-               # proxy is the only way out and a single failed probe is worth
-               # waiting on rather than treating as absent.
-               for attempt in 1 2 3 4 5 6; do
-                 if timeout 20s git -c 'http.https://github.com/.proxy=http://127.0.0.1:7897' \
-                      ls-remote --exit-code "https://github.com/syswonder/robonix.git" \
-                      HEAD >/dev/null 2>&1; then
-                   proxy_ok=1; break
-                 fi
-                 echo "Clash probe $attempt/6 failed; retrying in 10s"
-                 sleep 10
-               done
-               [ "$proxy_ok" = 1 ]; then
-            git config --file "$git_config" \
-              'http.https://github.com/.proxy' \
-              'http://127.0.0.1:7897'
-            echo "ghfast.top unavailable; using GitHub through Clash at 127.0.0.1:7897"
           else
-            # Both routes are gone. Pointing git at a proxy that is not
-            # listening is worse than not setting one: every clone dies with a
-            # GnuTLS handshake failure against a closed port, which reads like
-            # a TLS problem rather than a missing proxy. Leave git alone and
-            # let it reach github.com directly; if that also fails the error
-            # will at least name the real cause.
-            echo "ghfast.top unavailable and no proxy on 127.0.0.1:7897; going direct"
+            # Reach github.com the way the runner's environment does.
+            echo "ghfast.top unavailable; cloning from github.com"
           fi
           echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
 
@@ -632,6 +595,13 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git submodule update --init --recursive
+
+      - name: Record exact tested source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/sim-logs/tested-source-sha.txt"
+          git show -s --format='%H%nparents: %P%n%s' HEAD > "$RUNNER_TEMP/sim-logs/tested-source.txt"
 
       - name: Configure run isolation
         run: |
@@ -678,6 +648,7 @@ jobs:
               $((26000 + candidate_suffix))
               $((27000 + candidate_suffix))
               $((28000 + candidate_suffix))
+              $((29000 + candidate_suffix))
             )
 
             busy=0
@@ -714,12 +685,13 @@ jobs:
           nav2_port=$((26000 + suffix))
           scene_web_port=$((27000 + suffix))
           soma_port=$((28000 + suffix))
+          audio_port=$((29000 + suffix))
           ros_domain_id=$((90 + (suffix % 100)))
           runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_KEY}"
           rm -rf "$runtime_dir"
           mkdir -p "$runtime_dir"
 
-          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port},${audio_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
@@ -727,6 +699,9 @@ jobs:
             echo "PILOT_PORT=$pilot_port"
             echo "LIAISON_PORT=$liaison_port"
             echo "SOMA_PORT=$soma_port"
+            # The audio bridge defaults to 60002, which other tenants of a
+            # shared runner may hold.
+            echo "AUDIO_CLIENT_LISTEN_PORT=$audio_port"
             echo "FAKE_VLM_PORT=$fake_vlm_port"
             echo "MAPPING_GRPC_PORT=$mapping_port"
             echo "NAV2_DRIVER_PORT=$nav2_port"
@@ -743,6 +718,12 @@ jobs:
             echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_KEY}-nav2"
             echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_KEY}-explore"
             echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_KEY}-scene"
+            # Package images get ci- names too, so a build here never
+            # replaces the images other deployments on the host run.
+            echo "ROBONIX_SCENE_IMAGE=ci-robonix-scene"
+            echo "ROBONIX_MAPPING_IMAGE=ci-robonix-mapping"
+            echo "ROBONIX_NAV2_IMAGE=ci-robonix-nav2"
+            echo "ROBONIX_EXPLORE_IMAGE=ci-robonix-explore"
             echo "ROBONIX_CI_RUNTIME_DIR=$runtime_dir"
             echo "AGENT_MEMORY_DIR=$runtime_dir/agent_memory"
             echo "AGENT_MILVUS_URI=$runtime_dir/agent_milvus.db"
@@ -788,6 +769,17 @@ jobs:
           set -euo pipefail
           python3 testing/simulate_ci.py
 
+      - name: Install Rerun browser acceptance tools
+        run: |
+          set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$ROBONIX_CI_RUNTIME_DIR/playwright-browsers"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+          python3 -m pip install -r testing/requirements-browser.txt
+          # Keep browser binaries per run. Missing host libraries fail this
+          # gate; do not mutate the shared host with an apt dependency install.
+          python3 -m playwright install chromium
+          python3 -m unittest discover -s testing -p browser_test_verify_rerun_ui.py -v
+
       - name: Build Webots deployment
         working-directory: examples/webots
         run: |
@@ -803,29 +795,28 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$SCENE_PERCEPTION_BACKEND" = "concept_graphs" ]; then
-            echo "ROBONIX_SCENE_IMAGE=robonix-scene" >> "$GITHUB_ENV"
             exit 0
           fi
           # DualMap is a layer over the scene image. Tag it by the Dockerfile
           # and the base image it was built from, so it is rebuilt exactly
           # when either changes and reused otherwise (it downloads ~400 MB).
           df=system/scene/docker/Dockerfile.dualmap
-          base_id="$(docker image inspect robonix-scene --format '{{.Id}}')"
-          tag="robonix-scene-dualmap:ci-$( { cat "$df"; echo "$base_id"; } | sha256sum | cut -c1-12)"
+          base_id="$(docker image inspect "$ROBONIX_SCENE_IMAGE" --format '{{.Id}}')"
+          tag="ci-robonix-scene-dualmap:$( { cat "$df"; echo "$base_id"; } | sha256sum | cut -c1-12)"
           if docker image inspect "$tag" >/dev/null 2>&1; then
             echo "reusing $tag"
           else
             # Same mirrors the checkout uses: large GitHub and Hugging Face
             # transfers from this runner get cut off mid-stream.
-            docker build --network=host -f "$df" --build-arg BASE_IMAGE=robonix-scene \
-              --build-arg GITHUB_PREFIX=https://ghfast.top/ --build-arg HF_ENDPOINT=https://hf-mirror.com \
+            docker build --network=host -f "$df" --build-arg BASE_IMAGE="$ROBONIX_SCENE_IMAGE" \
+              --build-arg GITHUB_PREFIX="${RBNX_GH_MIRROR-https://ghfast.top/}" --build-arg HF_ENDPOINT=https://hf-mirror.com \
               -t "$tag" system/scene/docker
           fi
           docker run --rm --entrypoint sh "$tag" -c 'test -d /opt/dualmap/utils'
           # Drop the tags earlier Dockerfiles or base images produced. Usually
           # there are none, which must not fail the step under pipefail.
-          for old in $(docker images robonix-scene-dualmap --format '{{.Tag}}' | grep '^ci-' || true); do
-            [ "$old" = "${tag#*:}" ] || docker rmi "robonix-scene-dualmap:$old" >/dev/null 2>&1 || true
+          for old in $(docker images ci-robonix-scene-dualmap --format '{{.Tag}}' || true); do
+            [ "$old" = "${tag#*:}" ] || docker rmi "ci-robonix-scene-dualmap:$old" >/dev/null 2>&1 || true
           done
           echo "ROBONIX_SCENE_IMAGE=$tag" >> "$GITHUB_ENV"
 
@@ -1252,44 +1243,20 @@ jobs:
           exit "$status"
 
       - name: Drive a fixed mapping loop
-        # Chassis motion is a gRPC contract and the executor only dispatches
-        # MCP, so this drives cmd_vel directly. A scripted rectangle returns to
-        # its start, which makes the saved map comparable between runs and
-        # forces the SLAM graph to close a loop.
+        # Start from a cleared square, since the preceding scenario may leave
+        # the robot beside a wall. Navigation closes four >=1.5 m legs and the
+        # simulator's collision counter must remain unchanged.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: |
-          set -uo pipefail
-          docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS'
-          source /opt/ros/humble/setup.bash
-          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
-          python3 - <<'PY'
-          import math, time
-          import rclpy
-          from geometry_msgs.msg import Twist
-          rclpy.init()
-          node = rclpy.create_node("ci_mapping_loop")
-          pub = node.create_publisher(Twist, "/cmd_vel", 10)
-          time.sleep(2.0)
-
-          def drive(lin, ang, seconds):
-              msg = Twist()
-              msg.linear.x, msg.angular.z = lin, ang
-              end = time.time() + seconds
-              while time.time() < end:
-                  pub.publish(msg)
-                  rclpy.spin_once(node, timeout_sec=0.05)
-              pub.publish(Twist())
-              for _ in range(5):
-                  rclpy.spin_once(node, timeout_sec=0.02)
-
-          for corner in range(4):
-              drive(0.25, 0.0, 6.0)          # 1.5 m leg
-              drive(0.0, 0.5, math.pi / 1.0) # 90 deg turn
-              print(f"corner {corner + 1}/4 done", flush=True)
-          node.destroy_node(); rclpy.shutdown()
-          PY
-          EOS
+          set -euo pipefail
+          docker cp "$GITHUB_WORKSPACE/testing/nav_stress.py" "$ROBONIX_NAV2_CONTAINER:/tmp/nav_stress.py"
+          docker cp "$GITHUB_WORKSPACE/testing/drive_mapping_loop.py" "$ROBONIX_NAV2_CONTAINER:/tmp/drive_mapping_loop.py"
+          docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+            source /opt/ros/humble/setup.bash
+            export $(tr "\0" "\n" < /proc/1/environ | grep -E "^PYTHONPATH=")
+            export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+            timeout --signal=TERM --kill-after=15 900 python3 -u /tmp/drive_mapping_loop.py
+          ' | tee "$RUNNER_TEMP/sim-logs/mapping-loop.txt"
 
       - name: Verify scene map persistence
         # A failed suite is exactly when the saved map matters most, so this
@@ -1309,7 +1276,7 @@ jobs:
             --delete-after \
             --timeout 420 | tee "$RUNNER_TEMP/sim-logs/scene-map-persistence.txt"
 
-      - name: Validate boot/shutdown lifecycle
+      - name: Validate boot/shutdown lifecycle and Rerun WebUI
         # boot → shutdown → re-boot. Proves the runtime keeps
         # state under <manifest-dir>/rbnx-boot/ (not ~/.robonix/), that
         # Soma package children are stopped cleanly, and that the stack
@@ -1328,7 +1295,11 @@ jobs:
           # passes. Mapping and scene data are deliberately preserved because
           # they are runtime state whose reboot recovery this test exercises.
           export ROBONIX_LIFECYCLE_RESET_PATHS="${AGENT_MEMORY_DIR}:${AGENT_MILVUS_URI}:${milvus_lock}"
-          python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
+          python3 "$GITHUB_WORKSPACE/testing/verify_rerun_ui.py" \
+            --base-url "http://127.0.0.1:${SCENE_WEB_PORT}" \
+            --output-dir "$RUNNER_TEMP/sim-logs/rerun-ui" \
+            --timeout 180 --lifecycle-timeout 1800 -- \
+            python3 "$GITHUB_WORKSPACE/testing/validate_lifecycle.py" \
             --rbnx rbnx \
             --manifest robonix_manifest.ci.generated.yaml \
             --server "$ROBONIX_CI_ATLAS" \
@@ -1408,6 +1379,19 @@ jobs:
           scene_url="http://127.0.0.1:${SCENE_WEB_PORT}/api/state"
           state_file="$RUNNER_TEMP/sim-logs/scene-state-post-restart.json"
           scene_ready=0
+          collect_scene_diagnostics() {
+            phase="$1"
+            out="$RUNNER_TEMP/sim-logs/scene-diagnostic"
+            mkdir -p "$out"
+            for endpoint in cost camera objects3d state; do
+              curl -fsS --noproxy '*' --max-time 3 \
+                "http://127.0.0.1:${SCENE_WEB_PORT}/api/${endpoint}" \
+                -o "$out/${endpoint}-${phase}.json" || true
+            done
+            docker logs "$ROBONIX_SCENE_CONTAINER" \
+              >"$out/scene-${phase}.stdout.log" 2>&1 || true
+          }
+          collect_scene_diagnostics reboot
           echo "waiting for a real non-robot scene object after lifecycle restart: ${scene_url}"
           for i in $(seq 1 180); do
             if curl -fsS --max-time 2 "$scene_url" -o "$state_file"; then
@@ -1440,35 +1424,37 @@ jobs:
               fi
             fi
             if [ "$i" -eq 30 ]; then
-              # The mapping loop turns open-loop, so the robot can come back
-              # facing a bare wall and a still camera then sees nothing. One
-              # slow turn in place shows it the room.
-              echo "no object after 60 s; turning the robot once in place"
-              docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS' || true
-          source /opt/ros/humble/setup.bash
-          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
-          python3 - <<'PY'
-          import math, time
-          import rclpy
-          from geometry_msgs.msg import Twist
-          rclpy.init()
-          node = rclpy.create_node("ci_look_around")
-          pub = node.create_publisher(Twist, "/cmd_vel", 10)
-          time.sleep(2.0)
-          msg = Twist()
-          msg.angular.z = 0.4
-          end = time.time() + 2 * math.pi / 0.4
-          while time.time() < end:
-              pub.publish(msg)
-              rclpy.spin_once(node, timeout_sec=0.05)
-          pub.publish(Twist())
-          node.destroy_node(); rclpy.shutdown()
-          PY
-          EOS
+              collect_scene_diagnostics pre-turn
+              # Odometry measures coverage even when simulation runs slower than wall time.
+              echo "no object after 60 s; observing one full turn"
+              timeout --signal=TERM --kill-after=15 210 \
+                docker exec -i "$ROBONIX_SIM_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  python3 -u -
+                ' <"$GITHUB_WORKSPACE/testing/rotate_for_scene.py" \
+                | tee "$RUNNER_TEMP/sim-logs/scene-observation-turn.json"
+            fi
+            if [ "$i" -eq 60 ]; then
+              collect_scene_diagnostics pre-map-preparation
+              # A fresh mapping session needs observed ground before Scene can register objects.
+              # Use the existing navigation loop with its unchanged clearance and zero-contact gates.
+              docker cp "$GITHUB_WORKSPACE/testing/nav_stress.py" "$ROBONIX_NAV2_CONTAINER:/tmp/nav_stress.py"
+              docker cp "$GITHUB_WORKSPACE/testing/drive_mapping_loop.py" "$ROBONIX_NAV2_CONTAINER:/tmp/drive_mapping_loop.py"
+              timeout --signal=TERM --kill-after=15 930 \
+                docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  while IFS= read -r -d "" entry; do
+                    case "$entry" in PYTHONPATH=*) export "$entry" ;; esac
+                  done < /proc/1/environ
+                  export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+                  timeout --signal=TERM --kill-after=15 900 python3 -u /tmp/drive_mapping_loop.py
+                ' | tee "$RUNNER_TEMP/sim-logs/mapping-loop-post-restart.txt"
+              collect_scene_diagnostics post-map-preparation
             fi
             sleep 2
           done
           if [ "$scene_ready" -ne 1 ]; then
+            collect_scene_diagnostics failure
             echo "::error::scene did not expose a non-robot object after lifecycle restart"
             cat "$state_file" || true
             tail -260 "$GITHUB_WORKSPACE/examples/webots/rbnx-boot/logs/scene.log" || true
@@ -1542,6 +1528,41 @@ jobs:
           # Capture the sim/webots container stdout and the in-container ROS
           # logs so a failure leaves a full trace alongside the scribe logs.
           mkdir -p "$RUNNER_TEMP/sim-logs"
+          # Sample raw grids before shutdown; this later interval is not the failed planner tick.
+          diagnostic_status=0
+          if [ -n "${ROBONIX_NAV2_CONTAINER:-}" ]; then
+            timeout --signal=TERM --kill-after=5s 15s docker cp \
+              "$GITHUB_WORKSPACE/testing/capture_nav_diagnostics.py" \
+              "$ROBONIX_NAV2_CONTAINER:/tmp/capture_nav_diagnostics.py" \
+              >"$RUNNER_TEMP/sim-logs/nav-diagnostics-copy.log" 2>&1 || diagnostic_status=$?
+            if [ "$diagnostic_status" -eq 0 ]; then
+              timeout --signal=TERM --kill-after=5s 65s \
+                docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  while IFS= read -r -d "" entry; do
+                    case "$entry" in PYTHONPATH=*) export "$entry" ;; esac
+                  done < /proc/1/environ
+                  export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+                  exec timeout --signal=TERM --kill-after=5s 45s python3 -u \
+                    /tmp/capture_nav_diagnostics.py --duration 15 \
+                    --map-topic /map --global-costmap-topic /global_costmap/costmap \
+                    --pose-topic /robonix/map/pose \
+                    --tf-topic /tf --tf-static-topic /tf_static --clock-topic /clock \
+                    --out /tmp/robonix-nav-diagnostics
+                ' >"$RUNNER_TEMP/sim-logs/nav-diagnostics.log" 2>&1 || diagnostic_status=$?
+              timeout --signal=TERM --kill-after=5s 15s docker cp \
+                "$ROBONIX_NAV2_CONTAINER:/tmp/robonix-nav-diagnostics" \
+                "$RUNNER_TEMP/sim-logs/nav-diagnostics" \
+                >>"$RUNNER_TEMP/sim-logs/nav-diagnostics-copy.log" 2>&1 || diagnostic_status=$?
+            fi
+          else
+            diagnostic_status=1
+            echo "owned Nav2 container unavailable" >"$RUNNER_TEMP/sim-logs/nav-diagnostics.log"
+          fi
+          printf '%s\n' "$diagnostic_status" >"$RUNNER_TEMP/sim-logs/nav-diagnostics.exit.txt"
+          if [ "$diagnostic_status" -ne 0 ]; then
+            echo "::warning::raw navigation diagnostic capture incomplete (status $diagnostic_status)"
+          fi
           docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
           for name in \
             "${ROBONIX_MAPPING_CONTAINER:-ci-${RUN_KEY}-mapping}" \
