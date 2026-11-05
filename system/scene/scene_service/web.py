@@ -761,7 +761,7 @@ def make_app(*, registry: ObjectRegistry,
     clients = MapClients(map_providers)
     navigation = None
     if outdoor_navigation:
-        from outdoor_scene.navigation import SceneNavigation
+        from outdoor_nav.scene import SceneNavigation
         navigation = SceneNavigation(**outdoor_navigation)
     outdoor = OutdoorScene(clients, map_binding, anno_store, map_meta,
                            registry, ops_lock, semantic_hold, navigation=navigation)

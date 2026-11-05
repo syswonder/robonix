@@ -877,7 +877,7 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 `/outdoor` shares the Scene host and port with the indoor viewer. The upper-left Indoor/Outdoor tabs change pages and library filters; loading a map remains explicit. Configure `map_providers.indoor` and `map_providers.outdoor` with the exact Atlas provider IDs of running services. Maps must have unique IDs across those providers; ambiguous ownership is rejected before modifying annotations.
 
-Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. It exposes no motion execution button. Occupancy-based semantic goal tools reject outdoor maps.
+Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. Occupancy-based semantic goal tools reject outdoor maps.
 
 For native ROS manual annotation without perception models, build with `bash scripts/build_annotate.sh` and select `package_manifest.annotate-native.yaml` in the deployment. Set `ROS_SETUP` for a nonstandard ROS installation. Keep `rbnx-build/data` persistent. The default web host is loopback; use SSH forwarding for access from a laptop. This profile uses `web_viewer: off` and the outdoor SVG page; the existing indoor Rerun deployment remains available.
 
@@ -888,17 +888,24 @@ Camera uses the existing Atlas/ROS RGB-D preview by default. To reuse a locally 
 
 ### Outdoor reference execution
 
-`outdoor_navigation` optionally configures the deployed `outdoor_scene.SceneNavigation`
-consumer (bundle, places, run_dir, policy and execution_enabled). The deployment supplies
+`outdoor_navigation` optionally configures the deployed `outdoor_nav.scene.SceneNavigation`
+consumer (run_dir, policy, execution_enabled and
+localization_config_path). The deployment supplies
 that Python module and includes the consumed navigation contracts in Scene's generated
 bindings. The default has no execution consumer. Read-only profiles set
 `execution_enabled: false`; browser requests cannot enable it.
 
-The existing outdoor page previews weighted routes, supports exact off-road goals and
-an off-road cost slider, then explicitly submits a preview for execution. Execution
+New recorded maps follow confirmed road edges with ordered gait intervals; start and
+goal snap within 2 m of a measured road. Loading a map rebinds localization
+through its existing Driver using the saved origin, map ID and content version.
+Execution is blocked until the live reference matches. Execution
 replans from the fresh localized robot position, forwards the complete reference and
 its same-route gait intervals, and displays readiness, task and gait feedback. A map
 identity change invalidates previews. Cancellation remains pending until the navigation
-service reports a terminal state. The original background is display-only, never a
-sensor obstacle layer. No new posture, usage-mode or manual takeover controls are added.
+service reports a terminal state. No new posture, usage-mode or manual takeover controls are added.
 
+
+The navigation service stops before gait changes and waits for fresh confirmation;
+timeouts appear as failed tasks in Scene. Stairs segments pause local avoidance
+under the deployment policy, then restore it on flat sections. Capture and resume
+are refused during active navigation. These integrations require field validation.

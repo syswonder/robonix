@@ -82,6 +82,22 @@ def test_capture_position_visible_without_binding_to_another_map(scene):
     assert client.get('/api/outdoor/state').json()['capture_pose'] is None
 
 
+def test_capture_and_resume_reject_active_navigation(scene, monkeypatch):
+    from types import SimpleNamespace
+    from scene_service.outdoor import OutdoorScene
+    previous=OutdoorScene.__init__
+    def init(self,*args,**kwargs):
+        previous(self,*args,**kwargs)
+        self.navigation=SimpleNamespace(execution_enabled=True,status=lambda:{'task':{'state':'navigating'}})
+    monkeypatch.setattr(OutdoorScene,'__init__',init)
+    from scene_service.web import make_app
+    client=TestClient(make_app(registry=ObjectRegistry(),map_providers={'outdoor':'outdoor-map'}))
+    for action in ('start','resume'):
+        response=client.post('/api/outdoor/capture',json={'action':action,'new_map':True})
+        assert response.status_code==400
+        assert 'confirm stop' in response.json()['detail']
+
+
 def test_collision_and_external_version_change_hide_stale_semantics(scene):
     client,backend,binding,annotations,calls=scene
     backend['collision']=True

@@ -16,14 +16,14 @@
   <div class="od-top"><h1 data-i18n="outdoor.title">Outdoor map</h1><a href="/maps?map_type=outdoor" data-i18n="outdoor.library">Map library</a></div>
   <div class="od-note" id="od-status"></div><div class="od-alert" id="od-error" hidden role="status"></div>
   <div class="od-tabs" role="tablist"><button data-mode="view" data-i18n="outdoor.view">View</button><button data-mode="capture" data-i18n="outdoor.capture">Capture</button><button data-mode="merge" data-i18n="outdoor.merge">Merge</button><button data-mode="plan" data-i18n="outdoor.plan">Plan</button></div>
-  <div class="od-content"><div class="od-map"><svg id="od-svg" viewBox="-10 -10 20 20" aria-label="Outdoor route map"><g id="od-background"></g><g id="od-preference"></g><g id="od-sensors"></g><g id="od-quality"></g><g id="od-roads"></g><g id="od-draft"></g><g id="od-regions"></g><g id="od-route"></g><g id="od-markers"></g><g id="od-conflicts"></g><g id="od-hits"></g><g id="od-joins"></g></svg><div class="od-controls"><button data-command="zoom-in">＋</button><button data-command="zoom-out">－</button><button data-command="fit">⛶</button></div><div class="od-legend"><span><i></i><b data-i18n="outdoor.flat">Flat</b></span><span><i style="border-color:#bb9fe9"></i><b data-i18n="outdoor.stairs">Stairs</b></span><span><i style="border-color:#e5b45e;border-top-style:dashed"></i><b data-i18n="outdoor.low">Lower accuracy</b></span><span><i style="border-color:#8b95a4"></i><b data-i18n="outdoor.unknown">Unknown</b></span></div></div><aside class="od-panel" id="od-panel"></aside></div>
+  <div class="od-content"><div class="od-map"><svg id="od-svg" viewBox="-10 -10 20 20" aria-label="Outdoor route map"><g id="od-sensors"></g><g id="od-quality"></g><g id="od-roads"></g><g id="od-draft"></g><g id="od-regions"></g><g id="od-route"></g><g id="od-markers"></g><g id="od-conflicts"></g><g id="od-hits"></g><g id="od-joins"></g></svg><div class="od-controls"><button data-command="zoom-in">＋</button><button data-command="zoom-out">－</button><button data-command="fit">⛶</button></div><div class="od-legend"><span><i></i><b data-i18n="outdoor.flat">Flat</b></span><span><i style="border-color:#bb9fe9"></i><b data-i18n="outdoor.stairs">Stairs</b></span><span><i style="border-color:#e5b45e;border-top-style:dashed"></i><b data-i18n="outdoor.low">Lower accuracy</b></span><span><i style="border-color:#8b95a4"></i><b data-i18n="outdoor.unknown">Unknown</b></span></div></div><aside class="od-panel" id="od-panel"></aside></div>
   <div class="od-note" data-i18n="outdoor.reference">Position marks the GNSS antenna; heading is unavailable.</div>
 </section>
 <script>
 document.addEventListener('DOMContentLoaded',()=>{
  const root=document.getElementById('outdoor-app'), $=s=>root.querySelector(s), svg=$('#od-svg'), panel=$('#od-panel');
  const tr=k=>t('outdoor.'+k), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- let offroadCost=50,blocked=[],requestId=null,preferenceCache=null,sensorLayer=null;
+ let blocked=[],requestId=null,sensorLayer=null;
  let state=null,mode='view',selected=null,merge=null,decisions={},choices={},goal=null,start=null,selectStart=false,route=null,saved=null,view=[-10,-10,20,20],fitted=false,showGait=true,showQuality=true,busy=false,drawKind=null,vertices=[];
  const button=(cmd,label,disabled=false)=>`<button data-command="${cmd}" ${disabled?'disabled':''}>${esc(tr(label))}</button>`;
  const field=(key,value)=>`<span>${esc(tr(key))}</span><span>${esc(value)}</span>`;
@@ -42,34 +42,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   }
   return result;
  }
- function preferenceImage(m){
-  if(!m?.grid||!m.road_widths_m)return null;
-  const key=m.version+JSON.stringify(blocked),g=m.grid,res=.5,ox=g.origin[0],oy=g.origin[1];
-  if(preferenceCache?.key!==key){
-   const width=Math.ceil(g.width*g.resolution/res),height=Math.ceil(g.height*g.resolution/res),values=new Float32Array(width*height).fill(1);
-   for(const road of m.network.roads){if(blocked.includes(road.id))continue;const radius=m.road_widths_m[road.id]/2;
-    for(let i=1;i<road.points.length;i++){const a=road.points[i-1],b=road.points[i],dx=b.x-a.x,dy=b.y-a.y,n=dx*dx+dy*dy;
-     for(let row=Math.max(0,Math.floor((Math.min(a.y,b.y)-radius-oy)/res));row<Math.min(height,Math.ceil((Math.max(a.y,b.y)+radius-oy)/res));row++)
-      for(let col=Math.max(0,Math.floor((Math.min(a.x,b.x)-radius-ox)/res));col<Math.min(width,Math.ceil((Math.max(a.x,b.x)+radius-ox)/res));col++){
-       const x=ox+(col+.5)*res,y=oy+(row+.5)*res,t=n?Math.max(0,Math.min(1,((x-a.x)*dx+(y-a.y)*dy)/n)):0;
-       values[row*width+col]=Math.min(values[row*width+col],Math.min(1,Math.hypot(x-a.x-t*dx,y-a.y-t*dy)/radius));
-      }
-    }
-   }
-   preferenceCache={key,width,height,values};
-  }
-  const cache=preferenceCache;if(cache.cost===offroadCost)return cache;
-  const canvas=document.createElement('canvas');canvas.width=cache.width;canvas.height=cache.height;const context=canvas.getContext('2d'),image=context.createImageData(cache.width,cache.height);
-  for(let row=0;row<cache.height;row++)for(let col=0;col<cache.width;col++){
-   const cost=cache.values[row*cache.width+col]*offroadCost,index=((cache.height-1-row)*cache.width+col)*4;
-   image.data[index]=230;image.data[index+1]=160;image.data[index+2]=60;image.data[index+3]=Math.round(cost/100*110);
-  }
-  context.putImageData(image,0,0);cache.cost=offroadCost;cache.url=canvas.toDataURL();return cache;
- }
  function draw(){svg.setAttribute('viewBox',view.join(' '));const stroke=view[2]/300, dot=stroke*2;
-  const map=snapshot(),background=map?.background,heat=mode==='plan'?preferenceImage(map):null;
-  $('#od-background').innerHTML=background?`<image href="/api/outdoor/background" x="${background.x}" y="${background.y}" width="${background.width}" height="${background.height}"/>`:'';
-  $('#od-preference').innerHTML=heat?`<image href="${heat.url}" x="${map.grid.origin[0]}" y="${-(map.grid.origin[1]+heat.height*.5)}" width="${heat.width*.5}" height="${heat.height*.5}"/>`:'';
   $('#od-sensors').innerHTML=sensorLayer?`<image href="data:image/png;base64,${sensorLayer.png_b64}" x="${sensorLayer.origin_x}" y="${-(sensorLayer.origin_y+sensorLayer.height*sensorLayer.resolution)}" width="${sensorLayer.width*sensorLayer.resolution}" height="${sensorLayer.height*sensorLayer.resolution}" opacity=".45"/>`:'';
   $('#od-roads').innerHTML=roads().map(r=>`<path class="od-road" d="${line(r.points)}" stroke-width="${stroke}" style="stroke:${blocked.includes(r.id)?'#e58e88':showGait?({stairs:'#bb9fe9',flat:'#75a0c3'}[r.gait]||'#8b95a4'):'#75a0c3'}"/>`).join('');
   $('#od-quality').innerHTML=showQuality?roads().filter(r=>r.low_accuracy).map(r=>`<path d="${line(r.points)}" fill="none" stroke="#e5b45e" stroke-width="${stroke*2}" stroke-dasharray="${stroke} ${stroke*2}"/>`).join(''):'';
@@ -81,7 +54,7 @@ document.addEventListener('DOMContentLoaded',()=>{
    const r=merge.network.roads.find(r=>r.id===c.old_road),points=section(r.points,c.start_m,c.end_m);
    return `<path d="${line(points)}" fill="none" stroke="${c.gait_conflict?'#ed947f':'#e5b45e'}" stroke-width="${stroke*2}" stroke-dasharray="${stroke} ${stroke}" pointer-events="none"/>`;
   }).join(''):'';
-  $('#od-route').innerHTML=route?`<path d="${line(route.reference_path)}" fill="none" stroke="#e8f2ff" stroke-width="${stroke/2}" stroke-dasharray="${stroke*2} ${stroke}"/>`:'';
+  $('#od-route').innerHTML=route?`<path d="${line(route.reference_path)}" fill="none" stroke="#e8f2ff" stroke-width="${stroke/2}" stroke-dasharray="${stroke*2} ${stroke}"/>`+route.reference_path.map((p,i)=>`<circle cx="${p.x}" cy="${-p.y}" r="${dot/2}" fill="#e8f2ff"><title>${i+1}</title></circle>${i%Math.max(1,Math.ceil(route.reference_path.length/30))===0?`<text x="${p.x+dot}" y="${-p.y-dot}" fill="#e8f2ff" font-size="${dot*2}">${i+1}</text>`:''}`).join(''):'';
   const pose=mode==='capture'?state?.capture_pose:(state?.is_active?state.status.pose:null), markers=[];
   if(pose){markers.push(`<circle cx="${pose.x}" cy="${-pose.y}" r="${dot}" fill="#87aff5" stroke="#d4e3ff" stroke-width="${stroke/2}"/>`);if(Number.isFinite(pose.yaw))markers.push(`<path d="M ${pose.x} ${-pose.y} l ${Math.cos(pose.yaw)*dot*3} ${-Math.sin(pose.yaw)*dot*3}" stroke="#87aff5" stroke-width="${stroke}"/>`)}
   for(const [p,color]of[[goal,'#c2ead8'],[start,'#84a9ee']])if(p)markers.push(`<circle cx="${p.x}" cy="${-p.y}" r="${dot}" fill="${color}"/>`);
@@ -101,13 +74,15 @@ ${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<
   return `<h2>${esc(tr('plan'))}</h2><p>${esc(state.is_active?tr('chooseGoal'):tr('different'))}</p>
    <div class="od-fields">${field('start',start?tr('manual'):tr('current'))}${field('goal',goal?goal.x.toFixed(2)+', '+goal.y.toFixed(2):tr('notSelected'))}${route?field('length',route.length_m.toFixed(1)+' '+tr('meters')):''}</div>
    <label>${esc(tr('destination'))}<select id="od-place"><option value="">—</option>${(state.places||[]).map((p,i)=>`<option value="${i}" ${p.enabled?'':'disabled'}>${esc(p.name)}</option>`).join('')}</select></label>
-   <label>${esc(tr('offroadCost'))}: <b id="od-cost-value">${offroadCost}</b><input id="od-cost" type="range" min="1" max="99" value="${offroadCost}" style="width:100%"></label>
+   <p>${esc(tr('measuredPlanning'))}</p>
    <div class="od-row">${button('select-start','chooseStart',!state.is_active)}${button('current','usePosition',!state.is_active)}</div>
    ${button('plan','preview',!goal||!state.is_active)}<div class="od-row">${button('execute','execute',!route||!nav.ready)}${button('cancel-task','cancelTask',!active)}</div>
    <div id="od-route-note">${route&&!route.gait_annotations_available?esc(tr('unmarkedGait')):''}</div>
    ${route&&(route.low_accuracy||route.intervals.some(i=>i.gait==='unknown'))?`<div class="od-box od-warning">${esc(tr('routeWarning'))}</div>`:''}
    <div class="od-box">${esc(tr(nav.ready?'navigationReady':'navigationWaiting'))}${task?'<br>'+esc(tr('taskState'))+': '+esc(task.state):''}${nav.not_ready_reasons?.length?'<br>'+esc(nav.not_ready_reasons.join(', ')):''}${nav.detail?'<br>'+esc(nav.detail):''}</div>
-   ${gait&&!gait.confirmed?`<div class="od-box od-warning">${esc(tr('gaitRetry'))} · ${gait.attempts||0}<br>${esc(gait.reason||'')}</div>`:''}
+   ${gait&&!gait.confirmed?`<div class="od-box od-warning" role="status">${esc(tr(gait.failed?'gaitFailed':'gaitRetry'))} · ${gait.attempts||0}<br>${esc(tr(gait.reason||'unknown'))}</div>`:''}
+   ${active&&nav.local_avoidance_enabled===false?`<div class="od-box od-warning">${esc(tr('stairsAvoidancePaused'))}</div>`:''}
+   ${task?.reason?`<div class="od-box od-warning" role="status">${esc(task.reason)}</div>`:''}
    ${route?`<div class="od-box">${route.intervals.map(i=>esc(tr(i.gait))+' · '+esc(tr(i.grade))).filter((v,i,a)=>i===0||v!==a[i-1]).join('<br>')}</div>`:''}<p>${esc(tr('navigation'))}</p>`;
  }
 
@@ -125,7 +100,7 @@ ${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<
   else if(command==='apply'){await request('/api/outdoor/apply_merge',{preview_id:merge.preview_id,decisions,choices});merge=null}
   else if(command==='save'){saved=$('#od-name').value.trim();await request('/api/maps/save',{map_id:saved,map_type:'outdoor'})}
   else if(command==='load-saved'){await request('/api/maps/load',{map_id:saved,map_type:'outdoor'});mode='view';saved=null}
-  else if(command==='plan'){const m=snapshot();route=await request('/api/outdoor/plan_route',{map_id:m.map_id,version:m.version,goal,road_offroad_cost:offroadCost,blocked_road_ids:blocked,...(start?{start}:{})});requestId=crypto.randomUUID().replaceAll('-','')}
+  else if(command==='plan'){const m=snapshot();route=await request('/api/outdoor/plan_route',{map_id:m.map_id,version:m.version,goal,blocked_road_ids:blocked,...(start?{start}:{})});requestId=crypto.randomUUID().replaceAll('-','')}
   else if(command==='execute'){if(!route)return;if(!confirm(tr('confirmExecute')))return;const result=await request('/api/outdoor/execute',{preview_id:route.preview_id,request_id:requestId});route=result.route}
   else if(command==='cancel-task'){await request('/api/outdoor/cancel',{run_id:state.navigation.task.task_id})}
   else if(command==='toggle-block'){blocked=blocked.includes(selected)?blocked.filter(id=>id!==selected):[...blocked,selected];route=null;requestId=null}
@@ -138,8 +113,7 @@ ${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<
   await refresh();render();
  }catch(e){error(e.message)}finally{busy=false}}
  root.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.mode){mode=b.dataset.mode;drawKind=null;vertices=[];render()}else if(b.dataset.command)act(b.dataset.command);else if(b.dataset.decision){decisions[b.dataset.decision]=b.dataset.value;render()}else if(b.dataset.choice){choices[b.dataset.choice]=b.dataset.value;render()}});
- root.addEventListener('input',e=>{if(e.target.id!=='od-cost')return;offroadCost=Number(e.target.value);route=null;requestId=null;$('#od-cost-value').textContent=offroadCost;const execute=root.querySelector('[data-command=execute]');if(execute)execute.disabled=true;if($('#od-route-note'))$('#od-route-note').textContent=tr('repreview');draw()});
- root.addEventListener('change',e=>{if(e.target.id==='od-cost'){render();return}if(e.target.id==='od-place'&&e.target.value!==''){const place=state.places[Number(e.target.value)];if(place?.enabled){goal={x:place.x,y:place.y};route=null;requestId=null;render()}return}if(e.target.id==='od-gait')showGait=e.target.checked;if(e.target.id==='od-quality-toggle')showQuality=e.target.checked;draw()});
+ root.addEventListener('change',e=>{if(e.target.id==='od-place'&&e.target.value!==''){const place=state.places[Number(e.target.value)];if(place?.enabled){goal={x:place.x,y:place.y};route=null;requestId=null;render()}return}if(e.target.id==='od-gait')showGait=e.target.checked;if(e.target.id==='od-quality-toggle')showQuality=e.target.checked;draw()});
  const world=e=>{const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const q=p.matrixTransform(svg.getScreenCTM().inverse());return{x:q.x,y:-q.y}};
 
  let drag=null,moved=false;

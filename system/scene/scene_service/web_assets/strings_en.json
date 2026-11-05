@@ -232,11 +232,20 @@
   "outdoor.navigationReady": "Navigation ready",
   "outdoor.navigationWaiting": "Navigation not ready",
   "outdoor.taskState": "Task state",
-  "outdoor.gaitRetry": "Gait unconfirmed; retrying",
+  "outdoor.gaitRetry": "Stopped: waiting for gait confirmation",
   "outdoor.unmarkedGait": "No gait annotations: keep the operator-selected gait.",
   "outdoor.destination": "Existing destinations",
   "outdoor.blockRoad": "Close this road",
   "outdoor.unblockRoad": "Reopen this road",
   "outdoor.repreview": "Cost changed; preview again.",
-  "outdoor.confirmExecute": "Confirm the area is safe and execute this route?"
+  "outdoor.confirmExecute": "Confirm the area is safe and execute this route?",
+  "outdoor.gaitFailed": "Gait switching failed; stopped",
+  "outdoor.measuredPlanning": "Follow confirmed survey edges; goals snap to roads and disconnected roads stay separate.",
+  "outdoor.stairsAvoidancePaused": "Stairs: local avoidance paused until leaving. Emergency stop and localization/feedback guards remain active.",
+  "outdoor.gait_switch_timeout": "Gait switch timed out; inspect feedback and start a new task",
+  "outdoor.stopping_before_gait_switch": "Waiting for measured stop",
+  "outdoor.waiting_for_eligible_state": "Waiting for chassis eligibility",
+  "outdoor.gait_feedback_stale": "Gait feedback is stale",
+  "outdoor.gait_not_confirmed_retrying": "Waiting for actual gait feedback",
+  "outdoor.unknown_route_gait": "Unknown route gait; inspect the map"
 }
