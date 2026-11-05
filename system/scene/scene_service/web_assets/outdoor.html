@@ -16,13 +16,14 @@
   <div class="od-top"><h1 data-i18n="outdoor.title">Outdoor map</h1><a href="/maps?map_type=outdoor" data-i18n="outdoor.library">Map library</a></div>
   <div class="od-note" id="od-status"></div><div class="od-alert" id="od-error" hidden role="status"></div>
   <div class="od-tabs" role="tablist"><button data-mode="view" data-i18n="outdoor.view">View</button><button data-mode="capture" data-i18n="outdoor.capture">Capture</button><button data-mode="merge" data-i18n="outdoor.merge">Merge</button><button data-mode="plan" data-i18n="outdoor.plan">Plan</button></div>
-  <div class="od-content"><div class="od-map"><svg id="od-svg" viewBox="-10 -10 20 20" aria-label="Outdoor route map"><g id="od-quality"></g><g id="od-roads"></g><g id="od-draft"></g><g id="od-regions"></g><g id="od-route"></g><g id="od-markers"></g><g id="od-conflicts"></g><g id="od-hits"></g><g id="od-joins"></g></svg><div class="od-controls"><button data-command="zoom-in">＋</button><button data-command="zoom-out">－</button><button data-command="fit">⛶</button></div><div class="od-legend"><span><i></i><b data-i18n="outdoor.flat">Flat</b></span><span><i style="border-color:#bb9fe9"></i><b data-i18n="outdoor.stairs">Stairs</b></span><span><i style="border-color:#e5b45e;border-top-style:dashed"></i><b data-i18n="outdoor.low">Lower accuracy</b></span><span><i style="border-color:#8b95a4"></i><b data-i18n="outdoor.unknown">Unknown</b></span></div></div><aside class="od-panel" id="od-panel"></aside></div>
+  <div class="od-content"><div class="od-map"><svg id="od-svg" viewBox="-10 -10 20 20" aria-label="Outdoor route map"><g id="od-background"></g><g id="od-preference"></g><g id="od-sensors"></g><g id="od-quality"></g><g id="od-roads"></g><g id="od-draft"></g><g id="od-regions"></g><g id="od-route"></g><g id="od-markers"></g><g id="od-conflicts"></g><g id="od-hits"></g><g id="od-joins"></g></svg><div class="od-controls"><button data-command="zoom-in">＋</button><button data-command="zoom-out">－</button><button data-command="fit">⛶</button></div><div class="od-legend"><span><i></i><b data-i18n="outdoor.flat">Flat</b></span><span><i style="border-color:#bb9fe9"></i><b data-i18n="outdoor.stairs">Stairs</b></span><span><i style="border-color:#e5b45e;border-top-style:dashed"></i><b data-i18n="outdoor.low">Lower accuracy</b></span><span><i style="border-color:#8b95a4"></i><b data-i18n="outdoor.unknown">Unknown</b></span></div></div><aside class="od-panel" id="od-panel"></aside></div>
   <div class="od-note" data-i18n="outdoor.reference">Position marks the GNSS antenna; heading is unavailable.</div>
 </section>
 <script>
 document.addEventListener('DOMContentLoaded',()=>{
  const root=document.getElementById('outdoor-app'), $=s=>root.querySelector(s), svg=$('#od-svg'), panel=$('#od-panel');
  const tr=k=>t('outdoor.'+k), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ let offroadCost=50,blocked=[],requestId=null,preferenceCache=null,sensorLayer=null;
  let state=null,mode='view',selected=null,merge=null,decisions={},choices={},goal=null,start=null,selectStart=false,route=null,saved=null,view=[-10,-10,20,20],fitted=false,showGait=true,showQuality=true,busy=false,drawKind=null,vertices=[];
  const button=(cmd,label,disabled=false)=>`<button data-command="${cmd}" ${disabled?'disabled':''}>${esc(tr(label))}</button>`;
  const field=(key,value)=>`<span>${esc(tr(key))}</span><span>${esc(value)}</span>`;
@@ -41,8 +42,36 @@ document.addEventListener('DOMContentLoaded',()=>{
   }
   return result;
  }
+ function preferenceImage(m){
+  if(!m?.grid||!m.road_widths_m)return null;
+  const key=m.version+JSON.stringify(blocked),g=m.grid,res=.5,ox=g.origin[0],oy=g.origin[1];
+  if(preferenceCache?.key!==key){
+   const width=Math.ceil(g.width*g.resolution/res),height=Math.ceil(g.height*g.resolution/res),values=new Float32Array(width*height).fill(1);
+   for(const road of m.network.roads){if(blocked.includes(road.id))continue;const radius=m.road_widths_m[road.id]/2;
+    for(let i=1;i<road.points.length;i++){const a=road.points[i-1],b=road.points[i],dx=b.x-a.x,dy=b.y-a.y,n=dx*dx+dy*dy;
+     for(let row=Math.max(0,Math.floor((Math.min(a.y,b.y)-radius-oy)/res));row<Math.min(height,Math.ceil((Math.max(a.y,b.y)+radius-oy)/res));row++)
+      for(let col=Math.max(0,Math.floor((Math.min(a.x,b.x)-radius-ox)/res));col<Math.min(width,Math.ceil((Math.max(a.x,b.x)+radius-ox)/res));col++){
+       const x=ox+(col+.5)*res,y=oy+(row+.5)*res,t=n?Math.max(0,Math.min(1,((x-a.x)*dx+(y-a.y)*dy)/n)):0;
+       values[row*width+col]=Math.min(values[row*width+col],Math.min(1,Math.hypot(x-a.x-t*dx,y-a.y-t*dy)/radius));
+      }
+    }
+   }
+   preferenceCache={key,width,height,values};
+  }
+  const cache=preferenceCache;if(cache.cost===offroadCost)return cache;
+  const canvas=document.createElement('canvas');canvas.width=cache.width;canvas.height=cache.height;const context=canvas.getContext('2d'),image=context.createImageData(cache.width,cache.height);
+  for(let row=0;row<cache.height;row++)for(let col=0;col<cache.width;col++){
+   const cost=cache.values[row*cache.width+col]*offroadCost,index=((cache.height-1-row)*cache.width+col)*4;
+   image.data[index]=230;image.data[index+1]=160;image.data[index+2]=60;image.data[index+3]=Math.round(cost/100*110);
+  }
+  context.putImageData(image,0,0);cache.cost=offroadCost;cache.url=canvas.toDataURL();return cache;
+ }
  function draw(){svg.setAttribute('viewBox',view.join(' '));const stroke=view[2]/300, dot=stroke*2;
-  $('#od-roads').innerHTML=roads().map(r=>`<path class="od-road" d="${line(r.points)}" stroke-width="${stroke}" style="stroke:${showGait?({stairs:'#bb9fe9',flat:'#75a0c3'}[r.gait]||'#8b95a4'):'#75a0c3'}"/>`).join('');
+  const map=snapshot(),background=map?.background,heat=mode==='plan'?preferenceImage(map):null;
+  $('#od-background').innerHTML=background?`<image href="/api/outdoor/background" x="${background.x}" y="${background.y}" width="${background.width}" height="${background.height}"/>`:'';
+  $('#od-preference').innerHTML=heat?`<image href="${heat.url}" x="${map.grid.origin[0]}" y="${-(map.grid.origin[1]+heat.height*.5)}" width="${heat.width*.5}" height="${heat.height*.5}"/>`:'';
+  $('#od-sensors').innerHTML=sensorLayer?`<image href="data:image/png;base64,${sensorLayer.png_b64}" x="${sensorLayer.origin_x}" y="${-(sensorLayer.origin_y+sensorLayer.height*sensorLayer.resolution)}" width="${sensorLayer.width*sensorLayer.resolution}" height="${sensorLayer.height*sensorLayer.resolution}" opacity=".45"/>`:'';
+  $('#od-roads').innerHTML=roads().map(r=>`<path class="od-road" d="${line(r.points)}" stroke-width="${stroke}" style="stroke:${blocked.includes(r.id)?'#e58e88':showGait?({stairs:'#bb9fe9',flat:'#75a0c3'}[r.gait]||'#8b95a4'):'#75a0c3'}"/>`).join('');
   $('#od-quality').innerHTML=showQuality?roads().filter(r=>r.low_accuracy).map(r=>`<path d="${line(r.points)}" fill="none" stroke="#e5b45e" stroke-width="${stroke*2}" stroke-dasharray="${stroke} ${stroke*2}"/>`).join(''):'';
   const draft=state?.draft?.network?.roads||[];let live=state?.status.live_track||[];let livePaths=[];for(const p of live){if(!livePaths.length||livePaths.at(-1).at(-1).segment!==p.segment)livePaths.push([]);livePaths.at(-1).push(p)}
   $('#od-draft').innerHTML=(mode==='capture'||mode==='merge'?[...draft.map(r=>r.points),...livePaths].map(p=>`<path d="${line(p)}" fill="none" stroke="#72dec7" stroke-width="${stroke}" stroke-dasharray="${stroke*2} ${stroke*2}"/>`).join(''):'');
@@ -54,25 +83,39 @@ document.addEventListener('DOMContentLoaded',()=>{
   }).join(''):'';
   $('#od-route').innerHTML=route?`<path d="${line(route.reference_path)}" fill="none" stroke="#e8f2ff" stroke-width="${stroke/2}" stroke-dasharray="${stroke*2} ${stroke}"/>`:'';
   const pose=mode==='capture'?state?.capture_pose:(state?.is_active?state.status.pose:null), markers=[];
-  if(pose)markers.push(`<circle cx="${pose.x}" cy="${-pose.y}" r="${dot}" fill="#87aff5" stroke="#d4e3ff" stroke-width="${stroke/2}"/>`);
+  if(pose){markers.push(`<circle cx="${pose.x}" cy="${-pose.y}" r="${dot}" fill="#87aff5" stroke="#d4e3ff" stroke-width="${stroke/2}"/>`);if(Number.isFinite(pose.yaw))markers.push(`<path d="M ${pose.x} ${-pose.y} l ${Math.cos(pose.yaw)*dot*3} ${-Math.sin(pose.yaw)*dot*3}" stroke="#87aff5" stroke-width="${stroke}"/>`)}
   for(const [p,color]of[[goal,'#c2ead8'],[start,'#84a9ee']])if(p)markers.push(`<circle cx="${p.x}" cy="${-p.y}" r="${dot}" fill="${color}"/>`);
   if(vertices.length)markers.push(`<path d="${line(vertices)}" fill="none" stroke="#eed18e" stroke-width="${stroke/2}"/>`);
   $('#od-markers').innerHTML=markers.join('');
   $('#od-regions').innerHTML=(state?.annotations||[]).map(a=>a.kind==='region'?`<polygon points="${a.points.map(p=>p[0]+','+-p[1]).join(' ')}" fill="#7ba5e426" stroke="${a.stale?'#dfba69':'#769bce'}" stroke-width="${stroke/3}"><title>${esc(a.name)}</title></polygon>`:`<circle cx="${a.points[0][0]}" cy="${-a.points[0][1]}" r="${dot}" fill="#d9c290"><title>${esc(a.name)}</title></circle>`).join('');
  }
  function renderView(s,session,recording,map){const r=roads().find(r=>r.id===selected);return `<h2>${esc(tr('view'))}</h2><p>${esc(state.is_active?tr('chooseRoad'):map?tr('different'):tr('noMap'))}</p>${r?`<div class="od-fields">${field('length',r.length_m.toFixed(1)+' '+tr('meters'))}${field('gait',tr(r.gait))}${field('grade',tr(r.grade))}${field('direction',tr('both'))}${field('source',r.sources.join(', '))}</div>`:''}
-<div class="od-rule"></div><label><input type="checkbox" id="od-gait" ${showGait?'checked':''}> ${esc(tr('gaitLayer'))}</label><label><input type="checkbox" id="od-quality-toggle" ${showQuality?'checked':''}> ${esc(tr('qualityLayer'))}</label><p>${esc(tr('lowHint'))}</p>
+${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<div class="od-rule"></div><label><input type="checkbox" id="od-gait" ${showGait?'checked':''}> ${esc(tr('gaitLayer'))}</label><label><input type="checkbox" id="od-quality-toggle" ${showQuality?'checked':''}> ${esc(tr('qualityLayer'))}</label><p>${esc(tr('lowHint'))}</p>
 <h3>${esc(tr('annotations'))}</h3><div class="od-row">${button('mark-region','markRegion',!state.is_active)}${button('mark-poi','markPoi',!state.is_active)}</div><a href="/regions?map_type=outdoor">${esc(tr('editRegions'))}</a>${drawKind?`<p>${esc(tr(drawKind==='region'?'regionHint':'poiHint'))}</p>${button('cancel-draw','cancel')}`:''}`;}
  function renderCapture(s,session,recording,map){return `<h2>${esc(tr('capture'))}</h2><div class="od-fields">${field('session',tr(session.state||'idle'))}${field('points',s.point_count||0)}${field('grade',tr(s.position_grade||'unknown'))}${field('receiverQuality',s.receiver_quality??'—')}${field('gait',tr(s.gait||'unknown')+(s.gait_code==null?'':' · 0x'+Number(s.gait_code).toString(16)))}</div>${!s.position_valid?`<div class="od-box od-warning">${esc(tr('invalidPosition'))}</div>`:''}${session.error?`<div class="od-box od-warning">${esc(session.error)}</div>`:''}
 <h3>${esc(tr('ready'))}</h3>${['fix','rtk_status','gait'].map(k=>`<div class="od-fields"><span>${esc(k)}</span><span>${esc(tr(s.inputs?.[k]?.fresh?'fresh':'stale'))}</span></div>`).join('')}
 <div class="od-rule"></div>${recording?`<div class="od-row">${button(session.state==='paused'?'resume':'pause',session.state==='paused'?'resume':'pause')}${button('stop','stop')}</div><button class="od-wide" data-command="cancel-recording">${esc(tr('cancelRecording'))}</button>`:`<div class="od-row">${button('new','new',!!s.draft_ready||!s.ready)}${button('append','append',!state.is_active||!!s.draft_ready||!s.ready)}</div>`}${s.draft_ready?`<div class="od-row">${button('review','generate')}${button('discard','discard')}</div>`:''}<p>${esc(tr('raw'))}</p>`;}
  function renderMerge(s,session,recording,map){return `<h2>${esc(tr('merge'))}</h2><p>${esc(tr('review'))}</p>${button('preview-merge','generate',!s.draft_ready)}${merge?merge.candidates.map((c,i)=>`<div class="od-box"><b>${esc(tr('connection'))} ${i+1}</b><small> ${c.distance_m.toFixed(2)} m</small><div class="od-row"><button data-decision="${esc(c.id)}" data-value="connect" class="${decisions[c.id]==='connect'?'primary':''}">${esc(tr('connect'))}</button><button data-decision="${esc(c.id)}" data-value="separate" class="${decisions[c.id]==='separate'?'primary':''}">${esc(tr('separate'))}</button></div></div>`).join('')+merge.conflicts.map((c,i)=>`<div class="od-box"><b>${esc(tr('overlap'))} ${i+1}</b><p>${esc(tr(merge.network.roads.find(r=>r.id===c.old_road).gait))} → ${esc(tr(merge.network.roads.find(r=>r.id===c.new_road).gait))}</p><small>${esc(c.old_road)} / ${esc(c.new_road)}</small><div class="od-row"><button data-choice="${esc(c.id)}" data-value="old" class="${choices[c.id]==='old'?'primary':''}">${esc(tr('old'))}</button><button data-choice="${esc(c.id)}" data-value="new" class="${choices[c.id]==='new'?'primary':''}">${esc(tr('newGait'))}</button></div></div>`).join('')+button('apply','apply',merge.candidates.some(c=>!decisions[c.id])||merge.conflicts.some(c=>!choices[c.id])):''}${state.draft?.merge_reviewed?`<div class="od-box">${esc(tr('reviewed'))}</div><label>${esc(tr('name'))}<input type="text" id="od-name" value="outdoor-${Date.now().toString(36)}"></label>${button('save','save')}`:''}${saved?`<p>${esc(tr('saved'))}</p>${button('load-saved','load')}`:''}`;}
- function renderPlan(s,session,recording,map){return `<h2>${esc(tr('plan'))}</h2><p>${esc(state.is_active?tr('chooseGoal'):tr('different'))}</p><div class="od-fields">${field('start',start?tr('manual'):tr('current'))}${field('goal',goal?tr('manual'):tr('notSelected'))}${route?field('length',route.length_m.toFixed(1)+' '+tr('meters')):''}</div><div class="od-row">${button('select-start','chooseStart',!state.is_active)}${button('current','usePosition',!state.is_active)}</div>${button('plan','preview',!goal||!state.is_active)}${route&&(route.low_accuracy||route.intervals.some(i=>i.gait==='unknown'))?`<div class="od-box od-warning">${esc(tr('routeWarning'))}</div>`:''}${route?`<div class="od-box">${route.intervals.map(i=>esc(tr(i.gait))+' · '+esc(tr(i.grade))).filter((v,i,a)=>i===0||v!==a[i-1]).join('<br>')}</div>`:''}<p>${esc(tr('navigation'))}</p>`;}
+ function renderPlan(s,session,recording,map){
+  const nav=state.navigation||{},task=nav.task,gait=nav.gait_status||task?.gait_status,active=task&&!['succeeded','failed','canceled'].includes(task.state);
+  return `<h2>${esc(tr('plan'))}</h2><p>${esc(state.is_active?tr('chooseGoal'):tr('different'))}</p>
+   <div class="od-fields">${field('start',start?tr('manual'):tr('current'))}${field('goal',goal?goal.x.toFixed(2)+', '+goal.y.toFixed(2):tr('notSelected'))}${route?field('length',route.length_m.toFixed(1)+' '+tr('meters')):''}</div>
+   <label>${esc(tr('destination'))}<select id="od-place"><option value="">—</option>${(state.places||[]).map((p,i)=>`<option value="${i}" ${p.enabled?'':'disabled'}>${esc(p.name)}</option>`).join('')}</select></label>
+   <label>${esc(tr('offroadCost'))}: <b id="od-cost-value">${offroadCost}</b><input id="od-cost" type="range" min="1" max="99" value="${offroadCost}" style="width:100%"></label>
+   <div class="od-row">${button('select-start','chooseStart',!state.is_active)}${button('current','usePosition',!state.is_active)}</div>
+   ${button('plan','preview',!goal||!state.is_active)}<div class="od-row">${button('execute','execute',!route||!nav.ready)}${button('cancel-task','cancelTask',!active)}</div>
+   <div id="od-route-note">${route&&!route.gait_annotations_available?esc(tr('unmarkedGait')):''}</div>
+   ${route&&(route.low_accuracy||route.intervals.some(i=>i.gait==='unknown'))?`<div class="od-box od-warning">${esc(tr('routeWarning'))}</div>`:''}
+   <div class="od-box">${esc(tr(nav.ready?'navigationReady':'navigationWaiting'))}${task?'<br>'+esc(tr('taskState'))+': '+esc(task.state):''}${nav.not_ready_reasons?.length?'<br>'+esc(nav.not_ready_reasons.join(', ')):''}${nav.detail?'<br>'+esc(nav.detail):''}</div>
+   ${gait&&!gait.confirmed?`<div class="od-box od-warning">${esc(tr('gaitRetry'))} · ${gait.attempts||0}<br>${esc(gait.reason||'')}</div>`:''}
+   ${route?`<div class="od-box">${route.intervals.map(i=>esc(tr(i.gait))+' · '+esc(tr(i.grade))).filter((v,i,a)=>i===0||v!==a[i-1]).join('<br>')}</div>`:''}<p>${esc(tr('navigation'))}</p>`;
+ }
+
  function render(){if(!state)return;const s=state.status,session=s.session||{},recording=['recording','paused'].includes(session.state),map=snapshot();if(recording)mode='capture';root.querySelectorAll('[data-mode]').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.disabled=recording&&b.dataset.mode!=='capture'});
   panel.innerHTML=({view:renderView,capture:renderCapture,merge:renderMerge,plan:renderPlan})[mode](s,session,recording,map);
   draw();
  }
- async function refresh(){try{const next=await request('/api/outdoor/state'),previous=state;state=next;if(previous?.map?.version!==next.map?.version||previous?.map?.map_id!==next.map?.map_id){goal=start=route=null;fitted=false}$('#od-status').textContent=(state.status.example_data||state.map?.example_data?tr('example')+' · ':'')+tr('map')+': '+(snapshot()?.map_id||'—')+' · '+tr('session')+': '+tr(state.status.session?.state||'idle')+' · '+tr('points')+': '+(state.status.point_count||0);if(!previous||previous.is_active!==next.is_active||previous.map?.version!==next.map?.version||previous.map?.map_id!==next.map?.map_id||previous.status.receiver_quality!==next.status.receiver_quality||previous.status.gait_code!==next.status.gait_code||previous.status.position_valid!==next.status.position_valid||previous.status.ready!==next.status.ready||previous.status.session?.state!==next.status.session?.state||previous.status.draft_ready!==next.status.draft_ready)render();else draw();if(!fitted)fit();return next}catch(e){if(state){state.status.pose=null;state.is_active=false;render()}error(e.message)}}
+ async function refresh(){try{const next=await request('/api/outdoor/state'),previous=state;state=next;if(previous?.map?.version!==next.map?.version||previous?.map?.map_id!==next.map?.map_id){goal=start=route=null;requestId=null;blocked=[];fitted=false}$('#od-status').textContent=(state.status.example_data||state.map?.example_data?tr('example')+' · ':'')+tr('map')+': '+(snapshot()?.map_id||'—')+' · '+tr('session')+': '+tr(state.status.session?.state||'idle')+' · '+tr('points')+': '+(state.status.point_count||0);if(!previous||previous.is_active!==next.is_active||previous.map?.version!==next.map?.version||previous.map?.map_id!==next.map?.map_id||previous.status.receiver_quality!==next.status.receiver_quality||previous.status.gait_code!==next.status.gait_code||previous.status.position_valid!==next.status.position_valid||previous.status.ready!==next.status.ready||previous.status.session?.state!==next.status.session?.state||previous.status.draft_ready!==next.status.draft_ready||JSON.stringify(previous.navigation)!==JSON.stringify(next.navigation))render();else draw();if(!fitted)fit();return next}catch(e){if(state){state.status.pose=null;state.is_active=false;render()}error(e.message)}}
  async function act(command){if(busy)return;busy=true;error('');try{
   if(['new','append'].includes(command)){if(command==='new'&&snapshot()&&!confirm(tr('confirmNew')))return;await request('/api/outdoor/capture',{action:'start',new_map:command==='new'});mode='capture';merge=null;}
   else if(['pause','resume','stop'].includes(command)){await request('/api/outdoor/capture',{action:command});if(command==='stop')mode='merge'}
@@ -82,9 +125,12 @@ document.addEventListener('DOMContentLoaded',()=>{
   else if(command==='apply'){await request('/api/outdoor/apply_merge',{preview_id:merge.preview_id,decisions,choices});merge=null}
   else if(command==='save'){saved=$('#od-name').value.trim();await request('/api/maps/save',{map_id:saved,map_type:'outdoor'})}
   else if(command==='load-saved'){await request('/api/maps/load',{map_id:saved,map_type:'outdoor'});mode='view';saved=null}
-  else if(command==='plan'){const m=snapshot();route=await request('/api/outdoor/plan_route',{map_id:m.map_id,version:m.version,goal,...(start?{start}:{})})}
+  else if(command==='plan'){const m=snapshot();route=await request('/api/outdoor/plan_route',{map_id:m.map_id,version:m.version,goal,road_offroad_cost:offroadCost,blocked_road_ids:blocked,...(start?{start}:{})});requestId=crypto.randomUUID().replaceAll('-','')}
+  else if(command==='execute'){if(!route)return;if(!confirm(tr('confirmExecute')))return;const result=await request('/api/outdoor/execute',{preview_id:route.preview_id,request_id:requestId});route=result.route}
+  else if(command==='cancel-task'){await request('/api/outdoor/cancel',{run_id:state.navigation.task.task_id})}
+  else if(command==='toggle-block'){blocked=blocked.includes(selected)?blocked.filter(id=>id!==selected):[...blocked,selected];route=null;requestId=null}
   else if(command==='select-start'){selectStart=true;return}
-  else if(command==='current'){start=null;selectStart=false}
+  else if(command==='current'){start=null;selectStart=false;route=null;requestId=null}
   else if(command==='mark-region'||command==='mark-poi'){drawKind=command==='mark-region'?'region':'poi';vertices=[]}
   else if(command==='cancel-draw'){drawKind=null;vertices=[]}
   else if(command==='fit'){fit();return}
@@ -92,15 +138,16 @@ document.addEventListener('DOMContentLoaded',()=>{
   await refresh();render();
  }catch(e){error(e.message)}finally{busy=false}}
  root.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.mode){mode=b.dataset.mode;drawKind=null;vertices=[];render()}else if(b.dataset.command)act(b.dataset.command);else if(b.dataset.decision){decisions[b.dataset.decision]=b.dataset.value;render()}else if(b.dataset.choice){choices[b.dataset.choice]=b.dataset.value;render()}});
- root.addEventListener('change',e=>{if(e.target.id==='od-gait')showGait=e.target.checked;if(e.target.id==='od-quality-toggle')showQuality=e.target.checked;draw()});
+ root.addEventListener('input',e=>{if(e.target.id!=='od-cost')return;offroadCost=Number(e.target.value);route=null;requestId=null;$('#od-cost-value').textContent=offroadCost;const execute=root.querySelector('[data-command=execute]');if(execute)execute.disabled=true;if($('#od-route-note'))$('#od-route-note').textContent=tr('repreview');draw()});
+ root.addEventListener('change',e=>{if(e.target.id==='od-cost'){render();return}if(e.target.id==='od-place'&&e.target.value!==''){const place=state.places[Number(e.target.value)];if(place?.enabled){goal={x:place.x,y:place.y};route=null;requestId=null;render()}return}if(e.target.id==='od-gait')showGait=e.target.checked;if(e.target.id==='od-quality-toggle')showQuality=e.target.checked;draw()});
  const world=e=>{const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const q=p.matrixTransform(svg.getScreenCTM().inverse());return{x:q.x,y:-q.y}};
- function projected(p,r){let best=null;for(let i=1;i<r.points.length;i++){const a=r.points[i-1],b=r.points[i],dx=b.x-a.x,dy=b.y-a.y,n=dx*dx+dy*dy,t=n?Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/n)):0,q={x:a.x+t*dx,y:a.y+t*dy},d=Math.hypot(q.x-p.x,q.y-p.y);if(!best||d<best.d)best={...q,d}}return{x:best.x,y:best.y}}
+
  let drag=null,moved=false;
  svg.addEventListener('pointerdown',e=>{if(e.button!==0)return;drag={x:e.clientX,y:e.clientY,view:[...view]};moved=false});window.addEventListener('pointermove',e=>{if(!drag||drawKind)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.hypot(dx,dy)>5)moved=true;if(moved){const k=drag.view[2]/svg.clientWidth;view=[drag.view[0]-dx*k,drag.view[1]-dy*k,...drag.view.slice(2)];draw()}});window.addEventListener('pointerup',()=>drag=null);
- svg.addEventListener('click',e=>{if(moved)return;const p=world(e);if(drawKind){vertices.push(p);draw();if(drawKind==='poi')finishDrawing();return}if(e.target.dataset.join){decisions[e.target.dataset.join]='connect';render();return}if(e.target.dataset.road===undefined)return;const r=roads()[Number(e.target.dataset.road)];if(mode==='view'){selected=r.id;render()}else if(mode==='plan'&&state.is_active){const q=projected(p,r);if(selectStart){start=q;selectStart=false}else goal=q;route=null;render()}});
+ svg.addEventListener('click',e=>{if(moved)return;const p=world(e);if(drawKind){vertices.push(p);draw();if(drawKind==='poi')finishDrawing();return}if(e.target.dataset.join){decisions[e.target.dataset.join]='connect';render();return}if(mode==='plan'&&state.is_active){if(selectStart){start=p;selectStart=false}else goal=p;route=null;requestId=null;render();return}if(e.target.dataset.road===undefined)return;const r=roads()[Number(e.target.dataset.road)];if(mode==='view'){selected=r.id;render()}});
  async function finishDrawing(){if(!drawKind||!state.is_active)return;if(drawKind==='region'&&vertices.length<3)return;const name=prompt(tr('annotationName'));if(!name)return;try{await request('/api/regions',{kind:drawKind,name,points:vertices.map(p=>[p.x,p.y]),map_id:snapshot().map_id,version:snapshot().version});drawKind=null;vertices=[];await refresh();render()}catch(e){error(e.message)}}
  svg.addEventListener('dblclick',e=>{if(drawKind){e.preventDefault();finishDrawing()}});document.addEventListener('keydown',e=>{if(e.key==='Escape'){drawKind=null;vertices=[];render()}if(e.key==='Enter'&&drawKind){e.preventDefault();finishDrawing()}});
  function zoom(f){const cx=view[0]+view[2]/2,cy=view[1]+view[3]/2,w=Math.max(2,Math.min(50000,view[2]*f)),h=w*view[3]/view[2];view=[cx-w/2,cy-h/2,w,h];draw()}svg.addEventListener('wheel',e=>{e.preventDefault();zoom(e.deltaY>0?1.1:1/1.1)},{passive:false});
- async function poll(){await refresh();setTimeout(poll,1000)}poll();
+ async function poll(){await refresh();try{const scene=await request('/api/state');sensorLayer=scene.occupancy||scene.occupancy_grid||null}catch(e){sensorLayer=null}setTimeout(poll,1000)}poll();
 });
 </script>

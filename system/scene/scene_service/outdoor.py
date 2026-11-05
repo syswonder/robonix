@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Scene's outdoor map facade; geometry stays in its map service."""
 import asyncio
+from collections import OrderedDict
+import time
+import uuid
 
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 
 class OutdoorScene:
-    def __init__(self, clients, binding, annotations, meta, registry, lock, hold):
+    def __init__(self, clients, binding, annotations, meta, registry, lock, hold, navigation=None):
         self.clients, self.binding, self.annotations, self.meta = clients, binding, annotations, meta
         self.registry, self.lock, self.hold = registry, lock, hold
+        self.navigation = navigation
+        self.previews = OrderedDict()
 
     async def idle(self):
         state = await asyncio.to_thread(self.clients.outdoor, "status")
         if not state.get("ok"):
             raise ValueError("Cannot confirm outdoor recording state: " + state.get("detail", "unavailable"))
+        if self.navigation and self.navigation.execution_enabled:
+            nav = await asyncio.to_thread(self.navigation.status)
+            task = nav.get("task") or {}
+            if task.get("state") in ("accepted","planning","navigating","replanning","canceling"):
+                raise ValueError("Cancel navigation and confirm stop before changing maps")
         session = state.get("session") or {}
         if session.get("state") in ("recording", "paused"):
             raise ValueError("Finish outdoor recording before changing maps")
@@ -93,25 +103,91 @@ class OutdoorScene:
         capture_pose = status.get("pose") if collecting else None
         if not matches:
             status["pose"] = None
+        navigation = {"available":False,"ready":False}
+        if self.navigation:
+            try:
+                navigation = await asyncio.to_thread(self.navigation.status)
+                navigation["available"] = True
+                pose = navigation.get("pose")
+                if (matches and pose and pose.get("age_s",99.) < 1.
+                        and navigation.get("coordinate_reference_matches_map")
+                        and snapshot.get("origin_wgs84") == navigation.get("coordinate_reference",{}).get("origin_wgs84")):
+                    status["pose"] = pose
+            except Exception as error:
+                navigation["detail"] = str(error)
         return JSONResponse(dict(ok=status.get("ok", False), status=status, map=snapshot,
             draft=draft, capture_pose=capture_pose, is_active=matches, binding=dict(self.binding),
+            navigation=navigation,
+            places=self.navigation.places.snapshot()["places"] if self.navigation and snapshot.get("legacy_bundle_sha256")==self.navigation.version else [],
             annotations=self.annotations.list_json() if matches and self.annotations else []))
 
     async def operation(self, request):
         op = request.path_params["op"]
-        if op not in ("capture", "preview_merge", "apply_merge", "plan_route"):
+        if op not in ("capture", "preview_merge", "apply_merge", "plan_route", "execute", "cancel"):
             return JSONResponse(dict(ok=False, detail="Unknown outdoor operation"), status_code=404)
         try:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Expected an object")
             async with self.lock:
-                result = await asyncio.to_thread(self.clients.outdoor, op, body)
-                if result.get("ok") and op == "capture" and body.get("action") == "start" and body.get("new_map"):
-                    self.hold["reason"] = "An outdoor draft is being collected; load a saved map before editing semantics"
+                if op == "execute":
+                    result = await self.execute(body)
+                elif op == "cancel":
+                    if not self.navigation:
+                        raise ValueError("Outdoor execution is not configured")
+                    result = {"ok":True,"task":await asyncio.to_thread(self.navigation.cancel,body.get("run_id"))}
+                else:
+                    if op == "plan_route" and self.navigation and not body.get("start"):
+                        try:
+                            nav = await asyncio.to_thread(self.navigation.status)
+                            if nav.get("coordinate_reference_matches_map") and nav.get("pose",{}) and 0 <= nav["pose"].get("age_s",99.) < 1.:
+                                body = {**body,"start":{k:nav["pose"][k] for k in ("x","y")}}
+                        except Exception:
+                            pass  # Mapping can still preview from its own fresh GNSS input.
+                    result = await asyncio.to_thread(self.clients.outdoor, op, body)
+                    if result.get("ok") and op == "plan_route":
+                        token = uuid.uuid4().hex
+                        self.previews[token] = (time.monotonic(),dict(body),dict(result))
+                        while len(self.previews)>16:self.previews.popitem(last=False)
+                        result["preview_id"] = token
+                    if result.get("ok") and op == "capture" and body.get("action") == "start" and body.get("new_map"):
+                        self.hold["reason"] = "An outdoor draft is being collected; load a saved map before editing semantics"
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
         except (ValueError, KeyError) as error:
             return JSONResponse(dict(ok=False, detail=str(error)), status_code=400)
+
+    async def execute(self, body):
+        if not self.navigation:
+            raise ValueError("Outdoor execution is not configured")
+        token = body.get("preview_id")
+        if token not in self.previews:
+            raise ValueError("Preview this goal again before execution")
+        created, payload, planned = self.previews[token]
+        if time.monotonic()-created>120.:
+            raise ValueError("Preview expired; preview this goal again")
+        current = await asyncio.to_thread(self.clients.outdoor,"get_map")
+        if (not current.get("ok") or current["map_id"]!=planned["map_id"]
+                or current["version"]!=planned["version"]):
+            raise ValueError("Loaded map changed; preview again")
+        state = await asyncio.to_thread(self.clients.outdoor,"status")
+        if (state.get("session") or {}).get("state") in ("recording","paused"):
+            raise ValueError("Finish recording before navigation")
+        nav = await asyncio.to_thread(self.navigation.status)
+        if not nav.get("ready") or not nav.get("pose"):
+            raise ValueError("Navigation is not ready: "+str(nav.get("not_ready_reasons",[])))
+        payload = {**payload,"start":{k:nav["pose"][k] for k in ("x","y")}}
+        route = await asyncio.to_thread(self.clients.outdoor,"plan_route",payload)
+        if not route.get("ok"):
+            raise ValueError(route.get("detail","Planning failed"))
+        source = {"preview_id":token,"map_id":planned["map_id"],"version":planned["version"],
+                  "goal":planned["goal"],"road_offroad_cost":planned.get("road_offroad_cost")}
+        accepted = await asyncio.to_thread(self.navigation.submit_reference,route,body.get("request_id"),source)
+        return {"ok":True,**accepted,"route":{**route,**accepted,"preview_id":token}}
+
+    async def background(self, request):
+        if not self.navigation:
+            return JSONResponse({"ok":False},status_code=404)
+        return FileResponse(self.navigation.bundle_path.parent/"basemap.svg",media_type="image/svg+xml")
 
     async def save(self, map_id, body):
         await self.idle()
@@ -164,4 +240,5 @@ class OutdoorScene:
             return HTMLResponse(page())
         return [Route("/outdoor", outdoor_page, methods=["GET"]),
                 Route("/api/outdoor/state", self.state, methods=["GET"]),
+                Route("/api/outdoor/background", self.background, methods=["GET"]),
                 Route("/api/outdoor/{op}", self.operation, methods=["POST"])]

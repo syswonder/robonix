@@ -885,3 +885,20 @@ For native ROS manual annotation without perception models, build with `bash scr
 Camera and Logs are shared by the Indoor and Outdoor tabs. Their links preserve `map_type` across navigation and editor frames; Outdoor hides the indoor 3D/2D viewer links. Switching pages never loads a map.
 
 Camera uses the existing Atlas/ROS RGB-D preview by default. To reuse a locally running four-camera viewer, set Scene `camera_viewer_port` to its loopback HTTP port (for example `8080`). Scene forwards its page, snapshots, camera status, battery and image settings through `/camera-viewer/` on the same Scene origin. This compatibility input starts no driver and provides no perception/model inference. Unset it or use `0` for the standard ROS camera preview.
+
+### Outdoor reference execution
+
+`outdoor_navigation` optionally configures the deployed `outdoor_scene.SceneNavigation`
+consumer (bundle, places, run_dir, policy and execution_enabled). The deployment supplies
+that Python module and includes the consumed navigation contracts in Scene's generated
+bindings. The default has no execution consumer. Read-only profiles set
+`execution_enabled: false`; browser requests cannot enable it.
+
+The existing outdoor page previews weighted routes, supports exact off-road goals and
+an off-road cost slider, then explicitly submits a preview for execution. Execution
+replans from the fresh localized robot position, forwards the complete reference and
+its same-route gait intervals, and displays readiness, task and gait feedback. A map
+identity change invalidates previews. Cancellation remains pending until the navigation
+service reports a terminal state. The original background is display-only, never a
+sensor obstacle layer. No new posture, usage-mode or manual takeover controls are added.
+
