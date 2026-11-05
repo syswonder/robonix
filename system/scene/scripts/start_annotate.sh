@@ -7,6 +7,9 @@ source "${ROS_SETUP:-/opt/ros/${ROS_DISTRO:-humble}/setup.bash}"
 source "$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash"
 set -u
 export PYTHONPATH="$PKG:$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:$(rbnx path robonix-api):${PYTHONPATH:-}"
+if [[ -n "${OUTDOOR_DEPLOY_ROOT:-}" ]]; then
+  export PYTHONPATH="$OUTDOOR_DEPLOY_ROOT:$OUTDOOR_DEPLOY_ROOT/packages/service-map-outdoor-rbnx:$OUTDOOR_DEPLOY_ROOT/packages/service-navigation-outdoor-rbnx:$PYTHONPATH"
+fi
 export SCENE_GRAPH_ENABLED=false SCENE_OBJECT_WATCHDOG=0
 export SCENE_PROFILE=annotate SCENE_WEB_VIEWER=off SCENE_OBJECT_MEMORY_ENABLED=false
 export SCENE_ANNOTATIONS_DIR="$PKG/rbnx-build/data/annotations"
