@@ -880,3 +880,8 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. It exposes no motion execution button. Occupancy-based semantic goal tools reject outdoor maps.
 
 For native ROS manual annotation without perception models, build with `bash scripts/build_annotate.sh` and select `package_manifest.annotate-native.yaml` in the deployment. Set `ROS_SETUP` for a nonstandard ROS installation. Keep `rbnx-build/data` persistent. The default web host is loopback; use SSH forwarding for access from a laptop. This profile uses `web_viewer: off` and the outdoor SVG page; the existing indoor Rerun deployment remains available.
+
+
+Camera and Logs are shared by the Indoor and Outdoor tabs. Their links preserve `map_type` across navigation and editor frames; Outdoor hides the indoor 3D/2D viewer links. Switching pages never loads a map.
+
+Camera uses the existing Atlas/ROS RGB-D preview by default. To reuse a locally running four-camera viewer, set Scene `camera_viewer_port` to its loopback HTTP port (for example `8080`). Scene forwards its page, snapshots, camera status, battery and image settings through `/camera-viewer/` on the same Scene origin. This compatibility input starts no driver and provides no perception/model inference. Unset it or use `0` for the standard ROS camera preview.

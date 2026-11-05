@@ -87,10 +87,14 @@ class OutdoorScene:
                    and self.binding.get("map_id") == snapshot.get("map_id")
                    and self.binding.get("version") == snapshot.get("version")
                    and not self.hold.get("reason"))
+        # A new recording has coordinates before it has a saved map identity.
+        # Keep its position separate from the position on the active Scene map.
+        collecting = (status.get("session") or {}).get("state") in ("recording", "paused")
+        capture_pose = status.get("pose") if collecting else None
         if not matches:
             status["pose"] = None
         return JSONResponse(dict(ok=status.get("ok", False), status=status, map=snapshot,
-            draft=draft, is_active=matches, binding=dict(self.binding),
+            draft=draft, capture_pose=capture_pose, is_active=matches, binding=dict(self.binding),
             annotations=self.annotations.list_json() if matches and self.annotations else []))
 
     async def operation(self, request):

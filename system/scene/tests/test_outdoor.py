@@ -28,6 +28,7 @@ def scene(tmp_path, monkeypatch):
             if not backend['available']:
                 return dict(ok=False,detail='disconnected')
             return dict(ok=True,map_id=backend['map']['map_id'],version=backend['map']['version'],generation=1,
+                        pose=backend.get('pose'),
                         session=dict(state='recording' if backend['recording'] else 'finished'))
         if op=='get_map':
             return dict(ok=True,**backend['map'])
@@ -64,6 +65,21 @@ def test_recording_and_unknown_state_block_switches(scene):
     backend.update(recording=False,available=False)
     assert client.post('/api/maps/load',json=dict(map_id='inside',map_type='indoor')).status_code==409
     assert not any(op=='load_map' for _,op,_,_ in calls)
+
+
+def test_capture_position_visible_without_binding_to_another_map(scene):
+    client,backend,binding,annotations,calls=scene
+    backend.update(recording=True,pose=dict(x=2.,y=3.))
+    state=client.get('/api/outdoor/state').json()
+    assert not state['is_active']
+    assert state['status']['pose'] is None
+    assert state['capture_pose']==backend['pose']
+    assert state['annotations']==[]
+    assert binding['map_type']=='indoor'
+    backend['recording']=False
+    assert client.get('/api/outdoor/state').json()['capture_pose'] is None
+    backend.update(recording=True,pose=None)
+    assert client.get('/api/outdoor/state').json()['capture_pose'] is None
 
 
 def test_collision_and_external_version_change_hide_stale_semantics(scene):
