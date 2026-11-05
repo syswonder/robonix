@@ -195,6 +195,7 @@ service:
     branch: main
     config:
       params_file: config/nav2_params.yaml
+      bt_xml_file: config/navigate_to_pose.xml
       use_sim_time: true
       action_wait_s: 240.0
       # Keep startup behavior at the controller's existing 0.26 m/s ceiling;
