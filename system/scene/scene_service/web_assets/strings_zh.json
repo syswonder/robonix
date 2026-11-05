@@ -225,5 +225,18 @@
   "outdoor.invalidPosition": "当前定位不能用于建图。接口有数据，不代表定位有效；到室外后等待固定解、浮点解或差分解。",
   "outdoor.cancelRecording": "取消录制（保留原始数据）",
   "outdoor.confirmCancelRecording": "取消本次录制？保留原始数据，不生成地图。",
-  "outdoor.interrupted": "已中断"
+  "outdoor.interrupted": "已中断",
+  "outdoor.execute": "执行路线",
+  "outdoor.cancelTask": "取消导航",
+  "outdoor.offroadCost": "路外代价",
+  "outdoor.navigationReady": "导航已就绪",
+  "outdoor.navigationWaiting": "导航未就绪",
+  "outdoor.taskState": "任务状态",
+  "outdoor.gaitRetry": "步态未确认，持续重试",
+  "outdoor.unmarkedGait": "此地图没有步态标注，保持人工选定步态。",
+  "outdoor.destination": "原有地点",
+  "outdoor.blockRoad": "封闭此道路",
+  "outdoor.unblockRoad": "恢复此道路",
+  "outdoor.repreview": "代价已变化，请重新预览。",
+  "outdoor.confirmExecute": "确认场地安全并执行此路线？"
 }

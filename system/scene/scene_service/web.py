@@ -729,7 +729,8 @@ def make_app(*, registry: ObjectRegistry,
              object_views: Any = None,
              rerun_sink: Any = None,
              map_providers: Optional[dict] = None,
-             camera_viewer_port: int = 0) -> Starlette:
+             camera_viewer_port: int = 0,
+             outdoor_navigation: Optional[dict] = None) -> Starlette:
     """The Scene web app: the pages, /api/state, region CRUD and the map
     library façade over robonix/service/map.
 
@@ -758,8 +759,12 @@ def make_app(*, registry: ObjectRegistry,
     from .map_clients import MapClients
     from .outdoor import OutdoorScene
     clients = MapClients(map_providers)
+    navigation = None
+    if outdoor_navigation:
+        from outdoor_scene.navigation import SceneNavigation
+        navigation = SceneNavigation(**outdoor_navigation)
     outdoor = OutdoorScene(clients, map_binding, anno_store, map_meta,
-                           registry, ops_lock, semantic_hold)
+                           registry, ops_lock, semantic_hold, navigation=navigation)
     # Retain the default facade for existing single-provider deployments/tests.
     def _map_rpc(op, payload=None, timeout_s=20.0):
         if map_providers:
@@ -1931,6 +1936,16 @@ def make_app(*, registry: ObjectRegistry,
         # Last: as a two-segment catch-all it would shadow POST /api/regions.
         Route("/{service}/{method}", rerun_grpc, methods=["POST", "OPTIONS"]),
     ]
+    async def outdoor_costmap(request):
+        payload = await asyncio.to_thread(occupancy_payload,hub)
+        if hub is not None and hub.has("occupancy_grid"):
+            message,_,_ = hub.latest("occupancy_grid")
+            if message is not None and message.header.frame_id != "map":
+                payload = None
+        return JSONResponse({"ok":True,"occupancy":payload})
+
+    routes.insert(0,Route("/api/outdoor/costmap",outdoor_costmap,methods=["GET"]))
+
     def outdoor_page():
         return _shell_page("/outdoor", _asset("outdoor.html"), "scene — outdoor map")
     routes = outdoor.routes(outdoor_page) + routes

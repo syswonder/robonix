@@ -225,5 +225,18 @@
   "outdoor.invalidPosition": "Position is unusable for mapping. Fresh input streams do not guarantee a usable fix.",
   "outdoor.cancelRecording": "Cancel recording (keep raw data)",
   "outdoor.confirmCancelRecording": "Cancel this recording? Raw data will be kept; no map will be generated.",
-  "outdoor.interrupted": "Interrupted"
+  "outdoor.interrupted": "Interrupted",
+  "outdoor.execute": "Execute route",
+  "outdoor.cancelTask": "Cancel navigation",
+  "outdoor.offroadCost": "Off-road cost",
+  "outdoor.navigationReady": "Navigation ready",
+  "outdoor.navigationWaiting": "Navigation not ready",
+  "outdoor.taskState": "Task state",
+  "outdoor.gaitRetry": "Gait unconfirmed; retrying",
+  "outdoor.unmarkedGait": "No gait annotations: keep the operator-selected gait.",
+  "outdoor.destination": "Existing destinations",
+  "outdoor.blockRoad": "Close this road",
+  "outdoor.unblockRoad": "Reopen this road",
+  "outdoor.repreview": "Cost changed; preview again.",
+  "outdoor.confirmExecute": "Confirm the area is safe and execute this route?"
 }

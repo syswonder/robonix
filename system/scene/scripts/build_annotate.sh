@@ -16,3 +16,7 @@ cd "$PKG/rbnx-build/codegen/ros2_idl"
 CMAKE_BUILD_PARALLEL_LEVEL=4 colcon build --packages-select map \
   --cmake-args "-DPython3_EXECUTABLE=$PY" "-DPYTHON_EXECUTABLE=$PY"
 touch "$PKG/rbnx-build/.rbnx-built"
+
+if [[ -n "${OUTDOOR_DEPLOY_ROOT:-}" ]]; then
+  bash "$OUTDOOR_DEPLOY_ROOT/scripts/build_scene_bindings.sh" "$PKG" "$PY"
+fi
