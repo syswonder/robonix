@@ -778,6 +778,7 @@ jobs:
           # Keep browser binaries per run. Missing host libraries fail this
           # gate; do not mutate the shared host with an apt dependency install.
           python3 -m playwright install chromium
+          python3 -m unittest discover -s testing -p browser_test_verify_rerun_ui.py -v
 
       - name: Build Webots deployment
         working-directory: examples/webots

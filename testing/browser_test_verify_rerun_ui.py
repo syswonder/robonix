@@ -7,16 +7,88 @@ import asyncio
 import json
 import sys
 import threading
+import socket
+import struct
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import rerun as rr
 from PIL import Image, ImageDraw
 
-from verify_rerun_ui import run, validate_pixels, validate_recording
+from verify_rerun_ui import capture, run, validate_pixels, validate_recording
 
 
 class RerunUIEvidenceTests(unittest.TestCase):
+    def test_focus_retries_only_connection_resets(self):
+        from playwright.async_api import Error, async_playwright
+
+        for resets, status, calls, succeeds in ((1, 200, 2, True),
+                                                (3, 200, 3, False),
+                                                (0, 503, 1, False)):
+            with self.subTest(resets=resets, status=status):
+                requests = []
+
+                class Handler(BaseHTTPRequestHandler):
+                    def do_POST(self):
+                        size = int(self.headers["Content-Length"])
+                        requests.append(json.loads(self.rfile.read(size)))
+                        if len(requests) <= resets:
+                            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                                       struct.pack("ii", 1, 0))
+                            self.close_connection = True
+                            return
+                        body = b'{"ok":true}'
+                        self.send_response(status)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+
+                    def log_message(self, *args):
+                        pass
+
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                async def check():
+                    async with async_playwright() as api:
+                        origin = f"http://127.0.0.1:{server.server_port}"
+                        request = await api.request.new_context(base_url=origin)
+                        canvas = SimpleNamespace(wait_for=AsyncMock(), screenshot=AsyncMock())
+                        frame = SimpleNamespace(locator=lambda _: canvas,
+                            evaluate=AsyncMock(side_effect=[None, {"id": "recording"}]))
+                        download = SimpleNamespace(save_as=AsyncMock())
+                        downloaded = asyncio.get_running_loop().create_future()
+                        downloaded.set_result(download)
+                        pending = AsyncMock()
+                        pending.__aenter__.return_value = SimpleNamespace(value=downloaded)
+                        page = SimpleNamespace(url=origin, request=request,
+                            expect_download=lambda **_: pending, screenshot=AsyncMock())
+                        proof = {"object": {"id": "chair"}, "object_color": [50, 100, 150]}
+                        try:
+                            with (tempfile.TemporaryDirectory() as directory,
+                                  patch("verify_rerun_ui.api_body", AsyncMock(return_value=b'{}')),
+                                  patch("verify_rerun_ui.recording_proof", AsyncMock(return_value=proof)),
+                                  patch("verify_rerun_ui.validate_pixels", return_value={})):
+                                if succeeds:
+                                    self.assertEqual(await capture(page, frame, Path(directory),
+                                                                   "before", "3d"), proof)
+                                else:
+                                    with self.assertRaises((Error, RuntimeError)):
+                                        await capture(page, frame, Path(directory), "before", "3d")
+                        finally:
+                            await request.dispose()
+
+                try:
+                    asyncio.run(check())
+                    self.assertEqual(requests, [{"object_id": "chair"}] * calls)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join()
+
     def test_real_browser_pageerror_is_recorded_and_prevents_child(self):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):

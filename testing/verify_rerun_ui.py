@@ -392,7 +392,8 @@ async def capture(page, frame, output: Path, label: str, view: str) -> dict:
     proof = await recording_proof(recording, scene_path, view, state["id"])
     await page.screenshot(path=str(output / f"{label}-{view}-unfocused.png"))
     if view == "3d":
-        focus = await page.request.post("/api/viewer/focus", data={"object_id": proof["object"]["id"]})
+        focus = await page.request.post("/api/viewer/focus",
+                                        data={"object_id": proof["object"]["id"]}, max_retries=2)
         if focus.status != 200 or not (await focus.json()).get("ok"):
             raise RuntimeError("Scene's existing object focus action failed")
         await asyncio.sleep(1)
