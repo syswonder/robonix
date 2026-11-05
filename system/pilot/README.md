@@ -112,6 +112,8 @@ Streaming waits for complete `message_updates` and `rtdl_parent_task_id` before 
 
 A turn waits while a tree of an open task runs and replans when a tree ends; it ends when every task is closed, or when an open task waits for the user. Trees belong to the session, not to the turn: a tree still running when a turn ends keeps reporting, the next turn takes in what it reported, and a stop with no active turn cancels it.
 
+Pilot preserves each `do.bind` name when expanding RTDL into a Plan. Executor stores the successful result in that tree's execution context; later arguments and conditions can reference it with `{"var":"name","path":["field"]}`.
+
 Pilot rejects identical capability calls while their earlier nodes are unfinished, including during verification. A terminal node releases its call for recovery before its parent tree completes; identical unfinished siblings remain protected.
 
 Pilot's standing prompt is deployment-independent. It does not hard-code Scene, memory, chassis, or another provider family's semantics; those come from the current Atlas capability catalog and the provider documentation loaded through `read_capability_doc` when needed. A provider appearing, disappearing, or reconnecting therefore does not rewrite the standing system prefix.
@@ -172,6 +174,11 @@ Pilot parses RTDL incrementally and submits complete nodes to Executor through `
 
 Pilot forwards `VERIFYING` node states for live visibility but does not put them in LLM history or `BatchResult`. Once verification finishes, the final leaf result is written to history exactly once; a final failure triggers replanning immediately. `BatchResult` contains only the latest final state for each node.
 
+The dispatch record in planning history lists RTDL node definitions, including
+`do` nodes under a `repeat` whose count is zero. It is not evidence that those
+capabilities ran. Pilot records each successful `repeat` operator's completed
+iteration count separately; use leaf feedback to identify calls that ran.
+
 A failed leaf requests recovery once: its parent failures and the tree's completion do not request the same recovery again. If a leaf fails while the model is still generating or submitting nodes, Pilot cancels that unfinished attempt, retains its execution results, and replans from the failure feedback. A later successful sibling still requests a planning round at completion, and requested cancellation completion still triggers its follow-up.
 
 Parallel example:
@@ -203,6 +210,15 @@ Pilot accepts it only when it does not contradict the task state. When a task
 update keeps a task `in_progress` and nothing runs — neither this session's trees
 nor any plan in Executor's active-plan snapshot — the model claims the task is
 advancing while nothing will run, so the reply is rejected
-(`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
-the turn ends with what the model said. An empty sequence with no task update is
-an answer or a question to the user.
+and the model gets a corrective round; if it repeats,
+the turn ends with what the model said. The per-round reminder states the
+pairing rule: an empty sequence goes with `task_update: null` or
+`status: "done"`, or stands while a running tree is waited on.
+
+## RTDL conditions and loops
+
+RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.
+
+Variables are isolated per plan; loops update the same binding each iteration. Bound calls wait for verification even under overlap mode, and loop iterations wait for all descendant verification. Parallel siblings must be independent; their results may be consumed after the join. Repeat counts are 0–10000 and while requires a 1–10000 iteration limit. A while condition still true at the limit fails. See [the protocol](../pilot/rtdl_protocol.md) for the complete grammar.
+During streamed generation, Pilot submits completed ordinary nodes as soon as they are safe to dispatch. It submits an `if`, `repeat`, or `while` subtree after its full JSON object closes; Executor can then evaluate its condition or repeat its body without relying on later model output.
+The `[pilot/rtdl]` plan tree logs include repeat counts, while limits, condition expressions and do binding names. Expressions and binding names use bounded previews. `[pilot/forest]` logs every Executor node-state event at info level and summarizes the completed plan. Compare the planned fields and forest events with Executor's `[executor/rtdl]` records to check what actually ran.

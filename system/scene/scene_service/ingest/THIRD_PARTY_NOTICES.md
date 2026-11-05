@@ -35,9 +35,9 @@ SOFTWARE.
 
 Source: https://github.com/mlfoundations/open_clip/blob/3ff1faf10b60be27252be7f6c84ce7c8c5e14ec8/LICENSE
 
-Copyright (c) 2012-2021 Gabriel Ilharco, Mitchell Wortsman, 
-Nicholas Carlini, Rohan Taori, Achal Dave, Vaishaal Shankar, 
-John Miller, Hongseok Namkoong, Hannaneh Hajishirzi, Ali Farhadi, 
+Copyright (c) 2012-2021 Gabriel Ilharco, Mitchell Wortsman,
+Nicholas Carlini, Rohan Taori, Achal Dave, Vaishaal Shankar,
+John Miller, Hongseok Namkoong, Hannaneh Hajishirzi, Ali Farhadi,
 Ludwig Schmidt
 
 Permission is hereby granted, free of charge, to any person obtaining

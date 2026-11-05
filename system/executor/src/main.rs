@@ -16,6 +16,8 @@ mod active_plans;
 mod capability_execution;
 mod config;
 mod dispatch;
+mod execution_context;
+mod expression;
 mod grpc_server;
 mod pb;
 mod plan_input;

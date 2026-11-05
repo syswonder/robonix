@@ -19,7 +19,7 @@ pub struct NodeEventContext {
     pub plan_id: String,
     /// Position of the node in the plan's node arena.
     pub node_index: u32,
-    /// RTDL node kind distinguishing sequence, parallel, and capability calls.
+    /// RTDL node kind distinguishing operators and capability calls.
     pub node_kind: u32,
     /// Stable node identity used to correlate state updates.
     pub op_id: String,
@@ -117,6 +117,9 @@ pub(crate) async fn send_operator_state(
     let op = match node.node_kind {
         RTDL_SEQUENCE => "sequence",
         RTDL_PARALLEL => "parallel",
+        3 => "if",
+        4 => "repeat",
+        5 => "while",
         _ => "operator",
     };
     let detail = format!(
