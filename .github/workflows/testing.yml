@@ -1424,31 +1424,31 @@ jobs:
             fi
             if [ "$i" -eq 30 ]; then
               collect_scene_diagnostics pre-turn
-              # The mapping loop turns open-loop, so the robot can come back
-              # facing a bare wall and a still camera then sees nothing. One
-              # slow turn in place shows it the room.
-              echo "no object after 60 s; turning the robot once in place"
-              docker exec -i "$ROBONIX_SIM_CONTAINER" bash <<'EOS' || true
-          source /opt/ros/humble/setup.bash
-          export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
-          python3 - <<'PY'
-          import math, time
-          import rclpy
-          from geometry_msgs.msg import Twist
-          rclpy.init()
-          node = rclpy.create_node("ci_look_around")
-          pub = node.create_publisher(Twist, "/cmd_vel", 10)
-          time.sleep(2.0)
-          msg = Twist()
-          msg.angular.z = 0.4
-          end = time.time() + 2 * math.pi / 0.4
-          while time.time() < end:
-              pub.publish(msg)
-              rclpy.spin_once(node, timeout_sec=0.05)
-          pub.publish(Twist())
-          node.destroy_node(); rclpy.shutdown()
-          PY
-          EOS
+              # Odometry measures coverage even when simulation runs slower than wall time.
+              echo "no object after 60 s; observing one full turn"
+              timeout --signal=TERM --kill-after=15 210 \
+                docker exec -i "$ROBONIX_SIM_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  python3 -u -
+                ' <"$GITHUB_WORKSPACE/testing/rotate_for_scene.py" \
+                | tee "$RUNNER_TEMP/sim-logs/scene-observation-turn.json"
+            fi
+            if [ "$i" -eq 60 ]; then
+              collect_scene_diagnostics pre-map-preparation
+              # A fresh mapping session needs observed ground before Scene can register objects.
+              # Use the existing navigation loop with its unchanged clearance and zero-contact gates.
+              docker cp "$GITHUB_WORKSPACE/testing/nav_stress.py" "$ROBONIX_NAV2_CONTAINER:/tmp/nav_stress.py"
+              docker cp "$GITHUB_WORKSPACE/testing/drive_mapping_loop.py" "$ROBONIX_NAV2_CONTAINER:/tmp/drive_mapping_loop.py"
+              timeout --signal=TERM --kill-after=15 930 \
+                docker exec "$ROBONIX_NAV2_CONTAINER" bash -c '
+                  source /opt/ros/humble/setup.bash
+                  while IFS= read -r -d "" entry; do
+                    case "$entry" in PYTHONPATH=*) export "$entry" ;; esac
+                  done < /proc/1/environ
+                  export ZENOH_SESSION_CONFIG_URI=/tmp/robonix_zenoh_session.json5
+                  timeout --signal=TERM --kill-after=15 900 python3 -u /tmp/drive_mapping_loop.py
+                ' | tee "$RUNNER_TEMP/sim-logs/mapping-loop-post-restart.txt"
+              collect_scene_diagnostics post-map-preparation
             fi
             sleep 2
           done
