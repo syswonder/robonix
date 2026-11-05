@@ -232,3 +232,7 @@ Robonix drivers (e.g. `tiago_chassis`, `tiago_camera`, `tiago_lidar`,
 the same DDS graph as Webots. The entrypoint ends with `wait` (instead
 of the previous `exec python3 -m tiago_bridge.node`) so Compose treats
 the container as live for as long as the Webots launch is alive.
+
+`bash start.sh --detach` returns after live sensor and optional browser-stream
+readiness checks and RViz setup. The default follows simulator logs in the
+foreground. Use `bash stop.sh` to stop the simulator in either mode.
