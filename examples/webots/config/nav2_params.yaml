@@ -356,7 +356,9 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner/NavfnPlanner"
-      tolerance: 0.5
+      # Leave room for the controller's 0.25 m goal tolerance within the
+      # Scene verifier's 0.5 m arrival limit.
+      tolerance: 0.1
       use_astar: false
       allow_unknown: true
 
