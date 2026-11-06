@@ -47,7 +47,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('#od-roads').innerHTML=roads().map(r=>`<path class="od-road" d="${line(r.points)}" stroke-width="${stroke}" style="stroke:${blocked.includes(r.id)?'#e58e88':showGait?({stairs:'#bb9fe9',flat:'#75a0c3'}[r.gait]||'#8b95a4'):'#75a0c3'}"/>`).join('');
   $('#od-quality').innerHTML=showQuality?roads().filter(r=>r.low_accuracy).map(r=>`<path d="${line(r.points)}" fill="none" stroke="#e5b45e" stroke-width="${stroke*2}" stroke-dasharray="${stroke} ${stroke*2}"/>`).join(''):'';
   const draft=state?.draft?.network?.roads||[];let live=state?.status.live_track||[];let livePaths=[];for(const p of live){if(!livePaths.length||livePaths.at(-1).at(-1).segment!==p.segment)livePaths.push([]);livePaths.at(-1).push(p)}
-  $('#od-draft').innerHTML=(mode==='capture'||mode==='merge'?[...draft.map(r=>r.points),...livePaths].map(p=>`<path d="${line(p)}" fill="none" stroke="#72dec7" stroke-width="${stroke}" stroke-dasharray="${stroke*2} ${stroke*2}"/>`).join(''):'');
+  $('#od-draft').innerHTML=(mode==='capture'||mode==='merge'?draft.map(r=>`<path d="${line(r.points)}" fill="none" stroke="${showGait?({stairs:'#bb9fe9',flat:'#75a0c3'}[r.gait]||'#8b95a4'):'#75a0c3'}" stroke-width="${stroke}" stroke-dasharray="${stroke*2} ${stroke*2}"><title>${esc(tr(r.gait))}</title></path>`).join('')+livePaths.map(p=>`<path d="${line(p)}" fill="none" stroke="#72dec7" stroke-width="${stroke}" stroke-dasharray="${stroke*2} ${stroke*2}"/>`).join(''):'');
   $('#od-hits').innerHTML=roads().map((r,i)=>`<path class="od-hit" data-road="${i}" d="${line(r.points)}" stroke-width="${stroke*6}"/>`).join('');
   $('#od-joins').innerHTML=mode==='merge'&&merge?merge.candidates.map((c,i)=>`<circle data-join="${esc(c.id)}" cx="${c.point_a.x}" cy="${-c.point_a.y}" r="${dot*1.5}" fill="${decisions[c.id]==='connect'?'#628f78':'#9b7941'}" stroke="#e9c37c" stroke-width="${stroke/3}"><title>${esc(tr('connection'))} ${i+1}</title></circle>`).join(''):'';
   $('#od-conflicts').innerHTML=mode==='merge'&&merge?merge.conflicts.map(c=>{
@@ -74,7 +74,7 @@ ${r?button('toggle-block',blocked.includes(r.id)?'unblockRoad':'blockRoad'):''}<
   return `<h2>${esc(tr('plan'))}</h2><p>${esc(state.is_active?tr('chooseGoal'):tr('different'))}</p>
    <div class="od-fields">${field('start',start?tr('manual'):tr('current'))}${field('goal',goal?goal.x.toFixed(2)+', '+goal.y.toFixed(2):tr('notSelected'))}${route?field('length',route.length_m.toFixed(1)+' '+tr('meters')):''}</div>
    <label>${esc(tr('destination'))}<select id="od-place"><option value="">—</option>${(state.places||[]).map((p,i)=>`<option value="${i}" ${p.enabled?'':'disabled'}>${esc(p.name)}</option>`).join('')}</select></label>
-   <p>${esc(tr('measuredPlanning'))}</p>
+   <p>${esc(tr('measuredPlanning'))}</p>${route?.approach?`<div class="od-box od-warning">${esc(tr('approachHint'))}${route.approach.length_m.toFixed(1)}</div>`:''}
    <div class="od-row">${button('select-start','chooseStart',!state.is_active)}${button('current','usePosition',!state.is_active)}</div>
    ${button('plan','preview',!goal||!state.is_active)}<div class="od-row">${button('execute','execute',!route||!nav.ready)}${button('cancel-task','cancelTask',!active)}</div>
    <div id="od-route-note">${route&&!route.gait_annotations_available?esc(tr('unmarkedGait')):''}</div>
