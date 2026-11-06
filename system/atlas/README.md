@@ -55,6 +55,33 @@ against an Atlas process. The tests cover provider declaration, Query, Connect,
 channel cleanup, optional delay presence, the old-stub declaration error, and
 reads with old response types.
 
+## Client execution channels
+
+Enable the Rust library's `mcp` feature to use
+`AtlasClient::connect_channel(consumer_id, provider_id, contract_id, Transport::Mcp)`.
+It returns an initialized `client::channel::Channel` with `call(JSON)`,
+`status()`, `cancel()`, and `close()` async methods. Calls return decoded JSON
+objects. Use `connect_channel` for MCP executions. The original
+`connect_capability` tuple interface remains available for compatibility.
+Business traffic flows directly between client and provider; Atlas RPCs are unchanged.
+
+A channel starts one execution. For async capabilities, the client resolves
+both `/status` and `/cancel`, retains the main allocation, and allocates each
+companion independently. `close()` requests cancellation and waits up to five
+seconds for a valid terminal status, polling every two seconds.
+`close_with_timeout(Duration)` changes that wait. Neither cancellation acceptance
+nor losing a caller confirms termination. Errors include the retained allocation
+ID; `get_channel(id)` retrieves its handle from any clone of the same client.
+`is_terminal()` reports confirmed completion and `is_closed()` reports release.
+Uncertain work is retained in memory without automatic business-request retries.
+
+Each client holds at most 256 allocations, reserving two for companion calls.
+Companions can also use unused business slots. A protocol failure without a
+response retains its own allocation; capacity exhaustion is reported. Setup failure
+releases allocated resources; a cleanup failure remains recoverable by ID.
+HTTP MCP `rpc` contracts are supported. gRPC/ROS 2 execution channels
+and provider concurrency arbitration are separate changes.
+
 ## Namespace diagnostics
 
 A provider's namespace is its primary grouping for discovery and operator

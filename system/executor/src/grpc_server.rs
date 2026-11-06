@@ -130,11 +130,7 @@ impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
         &self,
         _request: Request<crate::pb::executor::CancelAllRequest>,
     ) -> Result<Response<CancelAllResponse>, Status> {
-        let mut atlas = self.atlas.clone();
-        let success = self
-            .runtime
-            .cancel_all_plans(&self.provider_id, &mut atlas)
-            .await;
+        let success = self.runtime.cancel_all_plans().await;
         Ok(Response::new(CancelAllResponse { success }))
     }
 }
@@ -162,7 +158,6 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
         request: Request<crate::pb::executor::ControlPlanRequest>,
     ) -> Result<Response<ControlPlanResponse>, Status> {
         let request = request.into_inner();
-        let mut atlas = self.atlas.clone();
         let response = match request.action.as_str() {
             "cancel" => {
                 let wait_ms = if request.wait_ms == 0 {
@@ -172,7 +167,7 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
                 };
                 let (completed, message) = self
                     .runtime
-                    .cancel_plan_control(&request.plan_id, wait_ms, &self.provider_id, &mut atlas)
+                    .cancel_plan_control(&request.plan_id, wait_ms)
                     .await;
                 ControlPlanResponse {
                     success: true,
@@ -187,10 +182,8 @@ impl RobonixSystemExecutorControlPlan for ExecutorServiceImpl {
                 } else {
                     request.wait_ms
                 };
-                let (target_count, completed) = self
-                    .runtime
-                    .cancel_all_plans_except(&self.provider_id, &mut atlas, None, wait_ms)
-                    .await;
+                let (target_count, completed) =
+                    self.runtime.cancel_all_plans_except(None, wait_ms).await;
                 ControlPlanResponse {
                     success: true,
                     completed,

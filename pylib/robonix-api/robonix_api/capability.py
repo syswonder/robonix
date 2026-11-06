@@ -428,6 +428,21 @@ class _ProviderBase:
         self._channels.append(ch)
         return ch
 
+    def connect_channel(
+        self,
+        provider: CapabilityProvider | Capability,
+        contract_id: str,
+        transport: Transport | str | int,
+    ) -> Channel:
+        ch = ATLAS.connect_channel(
+            consumer_id=self.id,
+            provider_id=provider.id if isinstance(provider, CapabilityProvider) else provider.provider_id,
+            contract_id=contract_id,
+            transport=transport,
+        )
+        self._channels.append(ch)
+        return ch
+
     # -- Layer 1: subprocess + ROS sentinel --------------------------------
 
     def spawn(
@@ -940,9 +955,14 @@ class _ProviderBase:
             self._stopping.set()
 
     def _teardown(self) -> None:
+        retained = []
         for ch in self._channels:
-            ch.close()
-        self._channels.clear()
+            try:
+                ch.close()
+            except Exception:
+                log.exception("Channel %s could not close", ch.channel_id)
+                retained.append(ch)
+        self._channels = retained
         self._spawn.shutdown_all()
         if self._driver_server is not None:
             try:

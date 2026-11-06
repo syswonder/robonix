@@ -2,7 +2,7 @@
 // Author: wheatfox <wheatfox17@icloud.com>
 //! Execute one RTDL do node, including async polling and result verification.
 use crate::active_plans::PlanRuntime;
-use crate::dispatch::{async_poll, async_registry};
+use crate::dispatch::{self, async_poll};
 use crate::pb::executor::RtdlEvent;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
@@ -124,17 +124,17 @@ pub(crate) async fn execute_call(
         &runtime,
     )
     .await;
-    let async_group = match before {
+    let external_channel = match before {
         Err(error) => Err(format!("result verification unavailable: {error}")),
         Ok(()) if runtime.is_cancelled(&node.plan_id).await => Err("plan canceled".to_string()),
         Ok(()) if call.provider_id == provider_id => Ok(None),
-        Ok(()) => {
-            async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id)
-                .await
-        }
+        Ok(()) => dispatch::connect_channel(call, &provider_id, &mut atlas)
+            .await
+            .map(Some)
+            .map_err(|error| format!("{error:#}")),
     };
 
-    let (mut result, mut state) = match async_group {
+    let (mut result, mut state) = match external_channel {
         Err(error) => {
             let r = CapabilityCallResult {
                 call_id: call.call_id.clone(),
@@ -146,10 +146,7 @@ pub(crate) async fn execute_call(
             };
             (r, RtdlNodeStateEnum::Failed as u32)
         }
-        Ok(Some(group)) => {
-            async_poll::run_until_terminal(call, &group, &provider_id, &mut atlas, &node, &runtime)
-                .await
-        }
+        Ok(Some(channel)) => async_poll::run_until_terminal(call, &channel, &node, &runtime).await,
         Ok(None) => {
             let r =
                 crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime, &node.plan_id)
@@ -480,7 +477,7 @@ mod tests {
         let atlas_addr = reserve_address();
         let atlas_server =
             tokio::spawn(serve_atlas(Arc::new(AtlasRegistry::default()), atlas_addr));
-        let mut atlas = AtlasClient::connect_with_retry(
+        let atlas = AtlasClient::connect_with_retry(
             format!("http://{atlas_addr}"),
             50,
             Duration::from_millis(10),
@@ -489,9 +486,7 @@ mod tests {
         .expect("connect test Atlas");
         let runtime = PlanRuntime::default();
         runtime.register_plan("p").await.unwrap();
-        runtime
-            .cancel_plan_control("p", 0, "executor", &mut atlas)
-            .await;
+        runtime.cancel_plan_control("p", 0).await;
         assert!(runtime.is_cancelled("p").await);
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");

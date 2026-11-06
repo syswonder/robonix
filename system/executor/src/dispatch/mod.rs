@@ -1,31 +1,11 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// dispatch/mod.rs — route a CapabilityCall to its provider.
-//
-// Two paths:
-//   1. provider_id == executor's own provider_id → run an in-process builtin
-//      (file ops / shell). The contract_id leaf names the operation.
-//   2. else → ConnectCapability(provider_id, contract_id, MCP) on atlas →
-//      MCP call to the returned endpoint → DisconnectCapability.
-//
-// Skills sit at INACTIVE after `rbnx boot`. Right before dispatching
-// to one, the executor sends Driver(CMD_ACTIVATE) on its `*/driver`
-// capability to flip it to ACTIVE — that's where the skill actually
-// allocates its hot resources (frontier loop / nav subscribers / VLA
-// worker / …). We track which skill provider_ids we've already activated in
-// this executor process; subsequent calls skip the CMD_ACTIVATE RPC to
-// keep latency flat (sticky policy). A future eviction algorithm
-// (EXECUTOR_EVICTION_POLICY=deactivate) will drive CMD_DEACTIVATE.
-//
-// The grpc dispatch helper exists for future non-MCP contracts but is not
-// on the LLM-callable path today.
+//! Route capabilities to in-process builtins or client-owned MCP execution.
 
 pub mod async_poll;
-pub mod async_registry;
 pub mod builtin;
 pub mod grpc;
-pub mod mcp;
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -83,9 +63,7 @@ pub async fn dispatch(
     dispatch_with_timeout(call, self_provider_id, atlas, runtime, plan_id, None).await
 }
 
-/// Dispatch one call with an optional MCP deadline while always releasing its
-/// Atlas channel. Verification uses this to bound a verifier that stops
-/// responding without leaking the ConnectCapability record.
+/// Bound verifier waiting without releasing an execution that may still be active.
 pub async fn dispatch_with_timeout(
     call: &CapabilityCall,
     self_provider_id: &str,
@@ -95,42 +73,71 @@ pub async fn dispatch_with_timeout(
     timeout: Option<Duration>,
 ) -> CapabilityCallResult {
     if call.provider_id == self_provider_id {
-        return builtin::execute(call, runtime, self_provider_id, atlas, plan_id).await;
+        return builtin::execute(call, runtime, atlas, plan_id).await;
     }
 
-    if let Err(e) = ensure_skill_active(atlas, &call.provider_id).await {
-        return error_result(call, format!("Driver(CMD_ACTIVATE) failed: {e:#}"));
+    let channel = match connect_channel(call, self_provider_id, atlas).await {
+        Ok(channel) => channel,
+        Err(error) => return error_result(call, format!("{error:#}")),
+    };
+    let execute = async {
+        let output = channel.call(serde_json::from_str(&call.args_json)?).await?;
+        channel.close().await?;
+        Ok::<_, anyhow::Error>(output.to_string())
+    };
+    let outcome = match timeout {
+        Some(duration) => tokio::time::timeout(duration, execute)
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r),
+        None => execute.await,
+    };
+    match outcome {
+        Ok(output) => CapabilityCallResult {
+            call_id: call.call_id.clone(),
+            provider_id: call.provider_id.clone(),
+            contract_id: call.contract_id.clone(),
+            success: true,
+            output,
+            error: String::new(),
+        },
+        Err(error) => {
+            let cleanup = if channel.is_terminal() {
+                channel.close().await.err()
+            } else {
+                None
+            };
+            error_result(
+                call,
+                format!(
+                    "{error:#}; execution channel {}; cleanup: {cleanup:?}",
+                    channel.channel_id
+                ),
+            )
+        }
     }
+}
 
-    let (channel_id, endpoint, _params) = match atlas
-        .connect_capability(
-            self_provider_id,
+pub async fn connect_channel(
+    call: &CapabilityCall,
+    consumer_id: &str,
+    atlas: &mut AtlasClient,
+) -> Result<robonix_atlas::client::channel::Channel> {
+    anyhow::ensure!(
+        serde_json::from_str::<serde_json::Value>(&call.args_json)?.is_object(),
+        "MCP request must be a JSON object"
+    );
+    ensure_skill_active(atlas, &call.provider_id)
+        .await
+        .context("Driver(CMD_ACTIVATE) failed")?;
+    atlas
+        .connect_channel(
+            consumer_id,
             &call.provider_id,
             &call.contract_id,
             atlas_pb::Transport::Mcp,
         )
         .await
-    {
-        Ok(triple) => triple,
-        Err(e) => {
-            return error_result(call, format!("ConnectCapability failed: {e:#}"));
-        }
-    };
-
-    let result = match timeout {
-        Some(duration) => match tokio::time::timeout(duration, mcp::execute(call, &endpoint)).await
-        {
-            Ok(result) => result,
-            Err(_) => error_result(
-                call,
-                format!("MCP call timed out after {}s", duration.as_secs()),
-            ),
-        },
-        None => mcp::execute(call, &endpoint).await,
-    };
-
-    let _ = atlas.disconnect_capability(&channel_id).await;
-    result
 }
 
 /// If `provider_id` is a skill that hasn't been activated in this process

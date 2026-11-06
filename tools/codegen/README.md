@@ -22,6 +22,12 @@ Contract reference generation also records `[contract].llm_callable` as
 whether Pilot may show implementations to its planning model. The field
 defaults to `true` and does not alter generated transport stubs.
 
+Each generated MCP module includes `_SRV_TYPES`, mapping its IDL service names
+to the generated request and response classes. The Python Atlas client uses
+this table with `ContractDescriptor.io_srv_type` for `connect_channel` calls.
+Existing message classes and their serialization methods keep their names.
+Regenerate with `rbnx codegen -p <package> --mcp` when adopting the new entry point.
+
 ## Build
 
 From the repo root:

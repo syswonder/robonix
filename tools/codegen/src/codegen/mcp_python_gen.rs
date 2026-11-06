@@ -593,6 +593,18 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path, verbose: bool) -> Result
             let _ = writeln!(out);
         }
 
+        let _ = writeln!(out, "_SRV_TYPES = {{");
+        for srv in resolver.ordered_srvs() {
+            if &srv.package == package {
+                let _ = writeln!(
+                    out,
+                    "    {:?}: ({}, {}),",
+                    srv.name, srv.request.name, srv.response.name
+                );
+            }
+        }
+        let _ = writeln!(out, "}}");
+
         let filename = format!("{}_mcp.py", package);
         let filepath = out_dir.join(&filename);
         fs::write(&filepath, &out)

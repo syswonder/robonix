@@ -4,8 +4,8 @@
 
 Runs where a Robonix provider runs (the nav2 container in the Webots example):
 it needs rclpy for /map and the simulator's collision topic, robonix_api for
-Atlas, grpc for the skill's Driver, and fastmcp for the tools. Every call goes
-through Robonix as a consumer would make it: explore is activated over its
+Atlas, grpc for the skill's Driver, and generated MCP types for the tools.
+Every call goes through Robonix as a consumer would make it: explore is activated over its
 Driver the way the executor does, and both explore and navigate are called as
 MCP tools resolved through Atlas.
 
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import atexit
-import asyncio
 import json
 import math
 import random
@@ -28,7 +27,7 @@ import time
 from collections import deque
 
 CONSUMER = "nav-stress"
-TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "TIMEOUT"}
+TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CANCELLED", "TIMEOUT"}
 
 
 def log(msg: str) -> None:
@@ -71,25 +70,6 @@ def activate(provider_id: str) -> None:
     # Field 1 (ok) is a varint; an ok=false reply leaves it out entirely.
     if not reply.startswith(b"\x08\x01") and b"active" not in reply:
         raise RuntimeError(f"Driver(CMD_ACTIVATE) on {provider_id} refused: {reply!r}")
-
-
-class Tools:
-    def __init__(self, url: str):
-        from fastmcp import Client
-
-        self._client = Client(url)
-
-    def __call__(self, tool: str, **args) -> dict:
-        async def go():
-            async with self._client as c:
-                result = await c.call_tool(tool, args)
-                text = result.content[0].text if result.content else "{}"
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    return {"raw": text}
-
-        return asyncio.run(go())
 
 
 # ── ROS ──────────────────────────────────────────────────────────────────────
@@ -175,11 +155,11 @@ def goal_pose(x: float, y: float, yaw: float) -> dict:
     }
 
 
-def wait_terminal(status, run_id: str, timeout_s: float) -> dict:
-    deadline = time.time() + timeout_s
+def wait_terminal(channel, timeout_s: float) -> dict:
+    deadline = time.monotonic() + timeout_s
     last = {}
-    while time.time() < deadline:
-        last = status(run_id=run_id) or {}
+    while (remaining := deadline - time.monotonic()) > 0:
+        last = channel.status(timeout=min(30, remaining)).to_dict()
         if str(last.get("state", "")).upper() in TERMINAL:
             return last
         time.sleep(1.0)
@@ -197,24 +177,35 @@ def main() -> int:
     ap.add_argument("--out", default="", help="write the summary JSON here too")
     a = ap.parse_args()
 
+    from robonix_api import ATLAS
+
     world = World()
     try:
-        _, nav_url = endpoint("robonix/service/navigation/navigate", "mcp")
-        nav = Tools(nav_url)
-        explore_id, explore_url = endpoint("robonix/skill/explore/explore", "mcp")
-        explore = Tools(explore_url)
+        nav = ATLAS.find_unique_capability(
+            contract_id="robonix/service/navigation/navigate", transport="mcp",
+        )
+        if a.explore_s > 0:
+            explore = ATLAS.find_unique_capability(
+                contract_id="robonix/skill/explore/explore", transport="mcp",
+            )
     except Exception as e:  # noqa: BLE001
         log(f"cannot resolve the tools: {e}")
         return 2
 
     if a.explore_s > 0:
-        activate(explore_id)
-        r = explore("explore", area_hint="", timeout_s=a.explore_s, max_speed_m_s=0.0)
-        log(f"explore: {r}")
-        if not r.get("accepted"):
-            return 2
-        end = wait_terminal(lambda **k: explore("status", **k), r.get("run_id", ""), a.explore_s + 60)
-        log(f"explore finished: {end.get('state')} area={end.get('area_m2')} frontiers={end.get('frontiers_left')}")
+        activate(explore.provider_id)
+        with ATLAS.connect_channel(
+            consumer_id=CONSUMER, provider_id=explore.provider_id,
+            contract_id=explore.contract_id, transport="mcp",
+        ) as channel:
+            r = channel.call({
+                "area_hint": "", "timeout_s": a.explore_s, "max_speed_m_s": 0.0,
+            }, timeout=30).to_dict()
+            log(f"explore: {r}")
+            if not r.get("accepted"):
+                return 2
+            end = wait_terminal(channel, a.explore_s + 60)
+            log(f"explore finished: {end.get('state')} area={end.get('area_m2')} frontiers={end.get('frontiers_left')}")
 
     for _ in range(60):
         if world.costmap is not None or world.map is not None:
@@ -238,13 +229,15 @@ def main() -> int:
         yaw = rng.uniform(-math.pi, math.pi)
         before = len(world.collisions)
         t0 = time.time()
-        r = nav("navigate", goal=goal_pose(x, y, yaw))
-        if not r.get("accepted"):
-            end = {"state": "REJECTED", "detail": r.get("detail", "")}
-        else:
-            end = wait_terminal(lambda **k: nav("status", **k), r.get("run_id", ""), a.goal_timeout)
-            if end.get("state") == "TIMEOUT_LOCAL":
-                nav("cancel", run_id=r.get("run_id", ""))
+        with ATLAS.connect_channel(
+            consumer_id=CONSUMER, provider_id=nav.provider_id,
+            contract_id=nav.contract_id, transport="mcp",
+        ) as channel:
+            r = channel.call({"goal": goal_pose(x, y, yaw)}, timeout=30).to_dict()
+            if not r.get("accepted"):
+                end = {"state": "REJECTED", "detail": r.get("detail", "")}
+            else:
+                end = wait_terminal(channel, a.goal_timeout)
         hits = world.collisions[before:]
         row = {
             "goal": [round(x, 2), round(y, 2), round(yaw, 2)],

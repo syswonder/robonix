@@ -13,6 +13,9 @@ use robonix_scribe::{debug, warn};
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
+#[cfg(feature = "mcp")]
+pub mod channel;
+
 /// Wrapped `pb::atlas_client::AtlasClient` with helpers.
 ///
 /// Cheap to clone — the inner generated client wraps a `Channel`, which
@@ -20,7 +23,11 @@ use tonic::transport::{Channel, Endpoint};
 /// tasks rather than wrapping in a `Mutex`.
 #[derive(Clone)]
 pub struct AtlasClient {
+    /// Generated control-plane client shared with execution handles.
     inner: pb::atlas_client::AtlasClient<Channel>,
+    /// Live executions shared across clones, including work whose caller timed out.
+    #[cfg(feature = "mcp")]
+    channels: std::sync::Arc<channel::Channels>,
 }
 
 impl AtlasClient {
@@ -34,6 +41,8 @@ impl AtlasClient {
             .with_context(|| format!("connect to Atlas at '{}'", normalized))?;
         Ok(Self {
             inner: pb::atlas_client::AtlasClient::new(channel),
+            #[cfg(feature = "mcp")]
+            channels: Default::default(),
         })
     }
 
@@ -381,6 +390,17 @@ impl AtlasClient {
     /// grpc, rclrs for ros2, fastmcp for mcp, …).
     /// Returns `(channel_id, endpoint, params)`.
     pub async fn connect_capability(
+        &mut self,
+        consumer_id: &str,
+        provider_id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+    ) -> Result<(String, String, pb::TransportParams)> {
+        self.allocate_channel(consumer_id, provider_id, contract_id, transport)
+            .await
+    }
+
+    async fn allocate_channel(
         &mut self,
         consumer_id: &str,
         provider_id: &str,

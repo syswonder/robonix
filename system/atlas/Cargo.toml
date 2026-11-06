@@ -9,6 +9,9 @@ description = "Robonix Atlas: control-plane registry for capability instances an
 name = "robonix-atlas"
 path = "src/main.rs"
 
+[features]
+mcp = ["dep:rmcp", "dep:reqwest"]
+
 [dependencies]
 clap.workspace = true
 robonix-scribe.workspace = true
@@ -27,6 +30,8 @@ uuid.workspace = true
 # introspection. Atlas only links against the parser submodule (no
 # code generation at runtime).
 robonix-codegen.workspace = true
+rmcp = { workspace = true, optional = true, features = ["transport-streamable-http-client-reqwest"] }
+reqwest = { workspace = true, optional = true }
 
 [build-dependencies]
 protoc-bin-vendored.workspace = true

@@ -74,7 +74,6 @@ use crate::pb::pilot::CapabilityCall;
 pub async fn execute(
     call: &CapabilityCall,
     runtime: &PlanRuntime,
-    self_provider_id: &str,
     atlas: &mut AtlasClient,
     plan_id: &str,
 ) -> CapabilityCallResult {
@@ -84,9 +83,7 @@ pub async fn execute(
         .map(|(_, leaf)| leaf)
         .unwrap_or(call.contract_id.as_str());
     if op == "cancel_plan" {
-        return runtime
-            .cancel_plan_builtin(call, self_provider_id, atlas)
-            .await;
+        return runtime.cancel_plan_builtin(call).await;
     }
     if op == "get_plan_status" {
         return runtime.get_plan_status_builtin(call).await;

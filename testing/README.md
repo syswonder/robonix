@@ -11,6 +11,18 @@ plans, and produced the expected runtime outputs on the simulated robot.
 This is the harness behind `.github/workflows/testing.yml` (the self-hosted GPU
 job). You can also run it by hand against any booted deploy.
 
+## Navigation stress test
+
+Run `python3 testing/nav_stress.py --help` for navigation stress options.
+It needs ROS 2, Atlas, the skill Driver, and generated MCP modules from the
+navigation and exploration packages on `PYTHONPATH`. Regenerate those modules
+with the current codegen before running.
+
+Each explore or navigate execution holds an `ATLAS.connect_channel` allocation
+until a terminal status is confirmed. A local timeout closes the channel by
+requesting cancellation and waiting for termination. If termination cannot be
+confirmed, the script fails and reports the retained channel ID.
+
 ## What is real vs substituted
 
 | Area | CI behavior | Why |

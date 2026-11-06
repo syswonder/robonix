@@ -374,7 +374,12 @@ mod tests {
     #[tokio::test]
     async fn missing_verifier_provider_fails_closed_over_atlas() {
         let atlas_addr = reserve_address();
-        let registry = Arc::new(AtlasRegistry::default());
+        let contracts =
+            robonix_atlas::contract_registry::ContractRegistry::load_from_capabilities_dir(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
+            )
+            .unwrap();
+        let registry = Arc::new(AtlasRegistry::with_contracts(contracts));
         let atlas_server = tokio::spawn(serve_atlas(registry, atlas_addr));
         let mut atlas = AtlasClient::connect_with_retry(
             format!("http://{atlas_addr}"),
