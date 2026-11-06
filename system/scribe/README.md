@@ -15,6 +15,26 @@ Scribe provides a process-local logging facade:
 - `info!`, `warn!`, `error!`, and `debug!` macros write structured records.
 - Each record goes to stderr and to a per-tag JSON-lines file.
 
+Rust Scribe reads wall timestamps through the in-process Chronos clock library;
+logging does not require a running Chronos service. Unverified Linux time is
+accepted. Simulation pauses and resets do not change log dates. A successful
+reading with unavailable wall-clock quality retains its
+timestamp and adds the quality reason to `msg`. If the read fails or its value
+cannot fit the unsigned timestamp, Scribe writes the original level, tag,
+message, and error directly to stderr, even for a file-only level, and skips
+the structured file record. It neither fills in zero nor retries through a
+different clock. Fully filtered messages still produce no output.
+
+Clock-failure stderr records escape control characters and retain their level
+when forwarded through `ingest`, including when the receiving process only
+accepts Error records. The forwarded message keeps the original tag and clock
+error; its structured timestamp belongs to the receiving process.
+
+`LogRecord::now(...)` now returns `std::io::Result<LogRecord>`; callers that
+construct records directly must handle errors. The logging functions and
+macros retain their existing signatures. Clock reads currently require Linux;
+unsupported platforms follow the same explicit error path.
+
 There is no central Scribe daemon, query API, replay service, retention policy,
 or Sentinel audit integration on `dev` yet.
 
@@ -57,3 +77,6 @@ described by the architecture docs: Atlas lifecycle events, Executor RTDL
 events, Sentinel rule decisions, component health, query, and replay. That is
 not the current implementation, so new docs should not describe Scribe as an
 available replay/audit service yet.
+
+Run `cargo test -p robonix-scribe --test clock_failures` on Linux with `cc`
+for isolated clock-failure tests of stderr and structured log output.
