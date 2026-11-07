@@ -13,6 +13,10 @@ import time
 from pathlib import Path
 
 
+def _serialize_objects(objects):
+    return objects.to_serializable() if hasattr(objects, "to_serializable") else list(objects)
+
+
 def export_map_objects(
     map_objects,
     exp_name: str,
@@ -26,8 +30,8 @@ def export_map_objects(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
-        "objects": map_objects.to_serializable(),
-        "bg_objects": bg_objects.to_serializable() if bg_objects is not None else [],
+        "objects": _serialize_objects(map_objects),
+        "bg_objects": _serialize_objects(bg_objects) if bg_objects is not None else [],
         "clip_model": clip_model,
         "clip_pretrained": clip_pretrained,
         "exported_at": time.time(),

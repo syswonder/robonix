@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Inference selection shared by deployment and the ConceptGraphs runtime."""
+"""Model selection shared by deployment and the perception runtimes."""
 from __future__ import annotations
 
 import os
@@ -22,17 +22,32 @@ def inference_backend() -> str:
     return name
 
 
-def model_defaults(profile=None, weights_dir=None) -> dict[str, str]:
+def model_profile(profile=None):
+    selected = (profile or os.environ.get("SCENE_PROFILE") or "lite").strip().lower()
+    if selected not in ("lite", "full", "annotate"):
+        raise ValueError(f"Model preparation requires lite, full or annotate, got {selected!r}")
+    return "lite" if selected == "annotate" else selected
+
+
+def model_defaults(profile=None, weights_dir=None, *, backend=None) -> dict[str, str]:
     """Canonical model locations, without deployment path overrides."""
-    profile = (profile or os.environ.get("SCENE_PROFILE") or "lite").strip().lower()
-    if profile == "annotate":
-        profile = "lite"  # Build dependencies remain available with recognition disabled.
-    if profile not in ("lite", "full"):
-        raise ValueError(f"Model inference requires lite or full, got {profile!r}")
+    profile = model_profile(profile)
     root = Path(weights_dir) if weights_dir else Path("/opt/models")
     if weights_dir is None and not root.is_dir():
         root = Path(__file__).resolve().parents[1] / "docker/_weights"
     full = root / "full"
+    mapper = (backend or os.environ.get("SCENE_PERCEPTION_BACKEND") or "concept_graphs").strip().lower()
+    if mapper == "dualmap":
+        return {
+            "yolo": str(root / "yolov8l-world.pt"),
+            "sam": str(root / "mobile_sam.pt"),
+            "clip_model": "MobileCLIP-S2",
+            "clip_pretrained": str(root / "dualmap/mobileclip_s2_datacompdr.bin"),
+            "fastsam": str(root / "dualmap/FastSAM-s.pt"),
+            "replica_clip_pretrained": str(root / "open_clip_pytorch_model.bin"),
+        }
+    if mapper != "concept_graphs":
+        raise ValueError(f"Unknown perception backend: {mapper}")
     return {
         "yolo": str(root / "yolov8l-world.pt"),
         "sam": str(full / "sam_l.pt" if profile == "full" else root / "mobile_sam.pt"),
@@ -42,11 +57,12 @@ def model_defaults(profile=None, weights_dir=None) -> dict[str, str]:
     }
 
 
-def model_config(profile=None, weights_dir=None) -> dict[str, str]:
+def model_config(profile=None, weights_dir=None, *, backend=None) -> dict[str, str]:
     """Resolve the same model selection for export, Torch and TensorRT."""
-    models = model_defaults(profile, weights_dir)
-    selected = (profile or os.environ.get("SCENE_PROFILE") or "lite").strip().lower()
-    if selected == "full" and os.environ.get("SCENE_MODELS_DIR"):
+    models = model_defaults(profile, weights_dir, backend=backend)
+    selected = model_profile(profile)
+    mapper = (backend or os.environ.get("SCENE_PERCEPTION_BACKEND") or "concept_graphs").strip().lower()
+    if mapper == "concept_graphs" and selected == "full" and os.environ.get("SCENE_MODELS_DIR"):
         for key in ("sam", "clip_pretrained"):
             models[key] = str(Path(os.environ["SCENE_MODELS_DIR"]) / Path(models[key]).name)
     for key, variable in (("yolo", "SCENE_YOLO_WORLD_WEIGHTS"),
@@ -54,21 +70,31 @@ def model_config(profile=None, weights_dir=None) -> dict[str, str]:
                           ("clip_model", "SCENE_CLIP_MODEL"),
                           ("clip_pretrained", "SCENE_CLIP_PRETRAINED")):
         models[key] = os.environ.get(variable) or models[key]
+    if mapper == "dualmap":
+        models["replica_clip_pretrained"] = os.environ.get("SCENE_DUALMAP_EXPORT_CLIP") or models["replica_clip_pretrained"]
+        for key, name in (("yolo", "YOLO"), ("sam", "SAM"), ("clip_pretrained", "MOBILECLIP"),
+                          ("fastsam", "FASTSAM")):
+            models[key] = os.environ.get(f"SCENE_DUALMAP_{name}_WEIGHTS", "").strip() or models[key]
     return models
 
 
+def export_model_names(models):
+    optional = (("fastsam", "fastsam"), ("replica_clip_pretrained", "replica"))
+    return ("yolo", "sam", "clip") + tuple(name for key, name in optional if key in models)
+
+
 def validate_tensorrt_config(*, profile=None, backend=None) -> None:
-    if (profile or os.environ.get("SCENE_PROFILE", "")).strip().lower() not in ("", "lite", "full"):
-        raise ValueError("TensorRT requires SCENE_PROFILE=lite or full")
-    if (backend or os.environ.get("SCENE_PERCEPTION_BACKEND", "")).strip().lower() not in ("", "concept_graphs"):
-        raise ValueError("TensorRT requires SCENE_PERCEPTION_BACKEND=concept_graphs")
+    model_profile(profile)
+    mapper = (backend or os.environ.get("SCENE_PERCEPTION_BACKEND", "")).strip().lower()
+    if mapper not in ("", "concept_graphs", "dualmap"):
+        raise ValueError("TensorRT requires concept_graphs or dualmap")
     if os.environ.get("SCENE_CG_FORCE_CPU", "").strip().lower() in ("1", "true", "yes"):
         raise ValueError("TensorRT requires CUDA; unset SCENE_CG_FORCE_CPU")
 
 
 def model_metadata(models_dir, *, profile=None, clip_model=None) -> dict:
     """Read export settings; unidentified legacy exports are Lite only."""
-    selected_profile = (profile or os.environ.get("SCENE_PROFILE") or "lite").strip().lower()
+    selected_profile = model_profile(profile)
     selected_clip = clip_model or model_config(selected_profile)["clip_model"]
     path = Path(models_dir) / "model-config.json"
     if path.exists():

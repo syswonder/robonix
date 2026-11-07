@@ -95,6 +95,9 @@ def save_npz(path: str, **kw) -> None:
 def cmp_log(name: str, a: np.ndarray, b: np.ndarray) -> None:
     a, b = a.astype(np.float64), b.astype(np.float64)
     cos = float((a * b).sum() / (np.linalg.norm(a) * np.linalg.norm(b)))
+    if a.ndim == 2:
+        cos = float(np.min(np.sum(a * b, axis=-1) /
+                           (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))))
     log(f"  {name}: cos={cos:.6f} maxabs={np.abs(a - b).max():.3e}")
     if not np.isfinite(cos) or cos < 0.999:
         raise ValueError(f"{name}: export wrapper differs from the source model")
@@ -253,7 +256,7 @@ def export_sam_decoder(weights: str) -> None:
     """Export the box-prompt decoder; the target builds a static K=1 TRT engine.
 
     Takes the image embedding from the sam-encoder engine plus K boxes in
-    encoder-input pixels, returns the model's single-mask logits.  The upstream
+    encoder-input pixels, returns single-mask logits and the complete quality head.  The upstream
     predict_masks broadcasts the image embedding with torch.repeat_interleave
     on a dynamic repeat, which exports as a data-dependent op — the batching
     here is plain expand (ONNX Expand, K-dynamic) and the per-token
@@ -272,6 +275,11 @@ def export_sam_decoder(weights: str) -> None:
             self.pe = pe
             self.dec = dec
             self.register_buffer("image_pe", pe.get_dense_pe())  # (1,256,64,64)
+
+        @staticmethod
+        def project(mlp, features):
+            # TensorRT 10.3 miscompiles consecutive GEMV; keep two rows through the MLP.
+            return mlp(features.unsqueeze(1).expand(-1, 2, -1)).mean(dim=1)
 
         def forward(self, image_embeddings, boxes):
             k = boxes.shape[0]
@@ -296,12 +304,13 @@ def export_sam_decoder(weights: str) -> None:
             src = src.transpose(1, 2).view(b, c, h, w)
             upscaled = self.dec.output_upscaling(src)
             hyper = torch.stack(
-                [self.dec.output_hypernetworks_mlps[i](mask_tokens_out[:, i, :])
+                [self.project(self.dec.output_hypernetworks_mlps[i], mask_tokens_out[:, i, :])
                  for i in range(self.dec.num_mask_tokens)], dim=1)
             bb, cc, hh, ww = upscaled.shape
             masks = (hyper @ upscaled.view(bb, cc, hh * ww)).view(bb, -1, hh, ww)
-            iou_pred = self.dec.iou_prediction_head(hs[:, 0, :])
-            return masks[:, 0:1], iou_pred[:, 0:1]
+            iou_pred = self.project(self.dec.iou_prediction_head, hs[:, 0, :])
+            # Keep quality columns intact so pruning cannot recreate a one-column GEMV.
+            return masks[:, 0:1], iou_pred
 
     torch.manual_seed(0)
     im = torch.randn(1, 3, *pe.input_image_size)
@@ -317,15 +326,14 @@ def export_sam_decoder(weights: str) -> None:
     # sanity: wrapper vs the ultralytics prompt path on the first box set
     with torch.no_grad():
         sparse, dense = pe(points=None, boxes=box_sets[0], masks=None)
-        masks_up, iou_up = dec(
+        masks_up, iou_up = dec.predict_masks(
             image_embeddings=torch.from_numpy(enc_ref),
             image_pe=pe.get_dense_pe(),
             sparse_prompt_embeddings=sparse,
             dense_prompt_embeddings=dense,
-            multimask_output=False,
         )
     log("sam-decoder parity (torch wrapper vs ultralytics forward):")
-    cmp_log("masks", masks_up.numpy(), refs[0][0].numpy())
+    cmp_log("masks", masks_up[:, 0:1].numpy(), refs[0][0].numpy())
     cmp_log("iou", iou_up.numpy(), refs[0][1].numpy())
 
     wrap = DecWrapper(pe, dec).eval()
@@ -350,25 +358,35 @@ def export_sam_decoder(weights: str) -> None:
 # ── open_clip visual and text towers ────────────────────
 def export_clip(openclip_bin: str, model_name: str) -> None:
     import open_clip
+    from scene_service.ingest.perception_models import create_clip_model
 
-    model, _, _ = open_clip.create_model_and_transforms(
-        model_name, pretrained=openclip_bin)
-    model.eval()
+    model, _, _ = create_clip_model(model_name, openclip_bin)
 
     preprocess = open_clip.get_model_preprocess_cfg(model)
     size = preprocess["size"]
     size = (size, size) if isinstance(size, int) else tuple(size)
     if len(size) != 2 or size[0] != size[1]:
         raise ValueError("TensorRT CLIP requires a square image input")
-    if preprocess.get("resize_mode", "shortest") != "shortest" or preprocess.get("interpolation", "bicubic") != "bicubic":
-        raise ValueError("TensorRT CLIP requires shortest-side bicubic preprocessing")
+    if preprocess.get("resize_mode", "shortest") != "shortest" or preprocess.get("interpolation", "bicubic") not in ("bicubic", "bilinear"):
+        raise ValueError("TensorRT CLIP requires shortest-side bicubic or bilinear preprocessing")
     tokenizer = open_clip.get_tokenizer(model_name)
     if type(tokenizer).__name__ != "SimpleTokenizer" or tokenizer.vocab_size != 49408:
         raise ValueError("TensorRT CLIP requires the OpenAI BPE tokenizer")
     torch.manual_seed(0)
-    im = torch.randn(8, 3, *size)
+    pixels = torch.rand(8, 3, *size)
+    pixels[0].zero_()
+    pixels[1].fill_(1)
+    mean = torch.tensor(preprocess["mean"]).view(1, 3, 1, 1)
+    std = torch.tensor(preprocess["std"]).view(1, 3, 1, 1)
+    im = (pixels - mean) / std
     with torch.no_grad():
         ref = model.visual(im).numpy()
+    # Explicit attention preserves the source scaling across inference backends.
+    for module in model.visual.modules():
+        if getattr(module, "fused_attn", False):
+            module.fused_attn = False
+    with torch.no_grad():
+        cmp_log("clip-visual attention", model.visual(im).numpy(), ref)
     path = f"{OUT}/clip-visual.onnx"
     with torch.no_grad():
         export_graph(
@@ -378,6 +396,17 @@ def export_clip(openclip_bin: str, model_name: str) -> None:
     save_npz(f"{OUT}/clip-visual.npz", images=im.numpy(), ref=ref)
     log(f"clip-visual {os.path.getsize(path) / 2**20:.0f}MB")
 
+    context, feature_dim = export_text(model, tokenizer)
+    update_metadata(clip_model=model_name, clip_image_size=size[0],
+                    clip_interpolation=preprocess.get("interpolation", "bicubic"),
+                    clip_mean=list(preprocess["mean"]), clip_std=list(preprocess["std"]),
+                    clip_feature_dim=feature_dim,
+                    clip_context_length=context, clip_batch_size=int(im.shape[0]))
+
+
+def export_text(model, tokenizer, name="clip-text"):
+    if type(tokenizer).__name__ != "SimpleTokenizer" or tokenizer.vocab_size != 49408:
+        raise ValueError("Export requires the OpenAI BPE tokenizer")
     texts = ["a photo of a chair", "a white table", "a laptop on a desk",
              "a green plant", "a red mug", "a door", "a trash bin", "a monitor"]
     tok = tokenizer(texts).int()
@@ -396,45 +425,90 @@ def export_clip(openclip_bin: str, model_name: str) -> None:
             return self.m.encode_text(tokens)
 
     tw = TextWrap(model).eval()
-    path = f"{OUT}/clip-text.onnx"
+    path = f"{OUT}/{name}.onnx"
     with torch.no_grad():
         export_graph(
             tw, (tok,), path, opset_version=17, dynamo=False,
             input_names=["tokens"], output_names=["text_feats"],
             dynamic_axes={"tokens": {0: "n"}, "text_feats": {0: "n"}},
         )
-    save_npz(f"{OUT}/clip-text.npz", tokens=tok.numpy(), ref=ref,
+    save_npz(f"{OUT}/{name}.npz", tokens=tok.numpy(), ref=ref,
              tokens1=tok1.numpy(), ref1=ref1)
-    log(f"clip-text {os.path.getsize(path) / 2**20:.0f}MB")
-    update_metadata(clip_model=model_name, clip_image_size=size[0],
-                    clip_mean=list(preprocess["mean"]), clip_std=list(preprocess["std"]),
-                    clip_feature_dim=int(ref.shape[-1]),
-                    clip_context_length=int(tok.shape[1]), clip_batch_size=int(im.shape[0]))
+    log(f"{name} {os.path.getsize(path) / 2**20:.0f}MB")
+    return int(tok.shape[1]), int(ref.shape[-1])
+
+
+def export_replica(weights):
+    import open_clip
+    from scene_service.ingest.perception_models import create_clip_model
+
+    model, _, _ = create_clip_model("ViT-B-32", weights)
+    context, width = export_text(model, open_clip.get_tokenizer("ViT-B-32"), "replica-text")
+    update_metadata(replica_text=True, replica_clip_model="ViT-B-32",
+                    replica_clip_pretrained=str(Path(weights).resolve()),
+                    replica_context_length=context, replica_feature_dim=width)
+
+
+def export_fastsam(weights: str) -> None:
+    from ultralytics import FastSAM
+
+    model = FastSAM(weights).model.float().eval()
+    model.fuse(verbose=False)
+    head = model.model[-1]
+    head.export, head.dynamic, head.format = True, True, "onnx"
+    torch.manual_seed(0)
+    images = torch.rand(1, 3, 768, 1024)
+    portrait = torch.rand(1, 3, 1024, 768)
+    with torch.no_grad():
+        predictions, prototypes = model(images)
+        predictions1, prototypes1 = model(portrait)
+        export_graph(
+            model, (images,), f"{OUT}/fastsam.onnx", opset_version=17, dynamo=False,
+            input_names=["images"], output_names=["predictions", "prototypes"],
+            dynamic_axes={"images": {2: "height", 3: "width"},
+                          "predictions": {2: "anchors"},
+                          "prototypes": {2: "mask_height", 3: "mask_width"}},
+        )
+    class_end = 4 + int(head.nc)
+    save_npz(f"{OUT}/fastsam.npz", images=images.numpy(), boxes=predictions[:, :4].numpy(),
+             scores=predictions[:, 4:class_end].numpy(), coefficients=predictions[:, class_end:].numpy(),
+             prototypes=prototypes.numpy(), images1=portrait.numpy(), boxes1=predictions1[:, :4].numpy(),
+             scores1=predictions1[:, 4:class_end].numpy(), coefficients1=predictions1[:, class_end:].numpy(),
+             prototypes1=prototypes1.numpy())
 
 
 def main() -> None:
     global OUT
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--profile", default=os.environ.get("SCENE_PROFILE") or "lite", choices=("lite", "full"))
+    ap.add_argument("--profile", default=os.environ.get("SCENE_PROFILE") or "lite", choices=("lite", "full", "annotate"))
     ap.add_argument("--yolo-weights")
     ap.add_argument("--sam-weights")
     ap.add_argument("--clip-bin")
     ap.add_argument("--clip-model")
-    ap.add_argument("--only", choices=("yolo", "sam", "clip"))
+    ap.add_argument("--fastsam-weights")
+    ap.add_argument("--replica-clip-bin")
+    ap.add_argument("--only", choices=("yolo", "sam", "clip", "fastsam", "replica"))
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
     OUT = args.out
     os.makedirs(OUT, exist_ok=True)
-    from scene_service.inference_config import model_config
+    from scene_service.inference_config import model_config, model_profile
 
+    args.profile = model_profile(args.profile)
     models = model_config(args.profile)
     args.yolo_weights = args.yolo_weights or models["yolo"]
     args.sam_weights = args.sam_weights or models["sam"]
     args.clip_bin = args.clip_bin or models["clip_pretrained"]
     args.clip_model = args.clip_model or models["clip_model"]
+    args.fastsam_weights = args.fastsam_weights or models.get("fastsam")
+    args.replica_clip_bin = args.replica_clip_bin or models.get("replica_clip_pretrained")
+    weights = [args.yolo_weights, args.sam_weights, args.clip_bin]
+    if args.fastsam_weights:
+        weights.append(args.fastsam_weights)
+    if args.replica_clip_bin:
+        weights.append(args.replica_clip_bin)
     identity = {"profile": args.profile, "clip_model": args.clip_model,
-                "weights": [str(Path(p).resolve()) for p in
-                            (args.yolo_weights, args.sam_weights, args.clip_bin)]}
+                "weights": [str(Path(p).resolve()) for p in weights]}
     metadata = Path(OUT) / "model-config.json"
     if metadata.exists():
         previous = json.loads(metadata.read_text())
@@ -443,6 +517,8 @@ def main() -> None:
     elif any(Path(OUT).glob("*.onnx")):
         raise ValueError("Unidentified exports exist; use a separate output directory")
     update_metadata(**identity)
+    if args.fastsam_weights:
+        update_metadata(fastsam=True, fastsam_image_size=1024)
 
     def done(name: str) -> bool:
         return (os.path.isfile(f"{OUT}/{name}.onnx") and os.path.isfile(f"{OUT}/{name}.npz"))
@@ -467,6 +543,10 @@ def main() -> None:
         export_clip(args.clip_bin, args.clip_model)
     else:
         log("clip exports present, skip")
+    if args.fastsam_weights and args.only in (None, "fastsam") and not done("fastsam"):
+        export_fastsam(args.fastsam_weights)
+    if args.replica_clip_bin and args.only in (None, "replica") and not done("replica-text"):
+        export_replica(args.replica_clip_bin)
     log(f"all exports done in {time.time() - t0:.0f}s -> {OUT}")
 
 

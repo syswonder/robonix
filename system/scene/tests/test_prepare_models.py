@@ -114,7 +114,7 @@ def test_prepare_keeps_previous_generation_across_repeated_builds(tmp_path, monk
 
 
 @pytest.mark.parametrize('setting,value', [
-    ('SCENE_PROFILE', 'annotate'), ('SCENE_PERCEPTION_BACKEND', 'dualmap'),
+    ('SCENE_PROFILE', 'unknown'), ('SCENE_PERCEPTION_BACKEND', 'unknown'),
     ('SCENE_CG_FORCE_CPU', '1'),
 ])
 def test_unsupported_tensorrt_config_fails_before_preparation(monkeypatch, setting, value):
@@ -125,7 +125,7 @@ def test_unsupported_tensorrt_config_fails_before_preparation(monkeypatch, setti
     monkeypatch.setenv(setting, value)
     monkeypatch.setattr(prepare, 'prepare', Mock(side_effect=AssertionError('must not prepare')))
     monkeypatch.setattr(sys, 'argv', ['prepare'])
-    with pytest.raises(ValueError, match='TensorRT'):
+    with pytest.raises(ValueError):
         prepare.main()
 
 
@@ -203,3 +203,23 @@ def test_full_never_reuses_baked_lite_exports(tmp_path, monkeypatch):
     for call in execute.call_args_list:
         command = call.args[0]
         assert command[command.index("--profile") + 1] == "full"
+
+
+def test_identical_engine_reused_across_model_sets_and_regated(tmp_path, monkeypatch):
+    import types
+    prepare = load_prepare()
+    old = tmp_path / 'old'
+    old.mkdir()
+    (old / 'matching.trt').write_bytes(b'verified engine')
+    cache = tmp_path / 'new'
+    monkeypatch.setitem(sys.modules, 'scene_service.ingest.perception_engines', types.SimpleNamespace(
+        trt_model_names=lambda _: ('shared-model',), engine_file=lambda name, models, directory: str(Path(directory) / 'matching.trt')))
+    execute = Mock()
+    monkeypatch.setattr(prepare.subprocess, 'run', execute)
+    prepare.build_engines(tmp_path / 'models', cache_dir=cache)
+    assert (old / 'matching.trt').stat().st_ino == (cache / 'matching.trt').stat().st_ino
+    assert '--verify' in execute.call_args.args[0]
+    (cache / 'matching.trt').unlink()
+    prepare.build_engines(tmp_path / 'models', check=True, cache_dir=cache)
+    assert not list(cache.iterdir())
+    assert '--check' in execute.call_args.args[0]

@@ -77,3 +77,27 @@ def test_unmatched_detection_is_appended_without_copying():
         agg_sim=np.array([[-np.inf]], np.float32))
     assert result is objects
     assert result[-1] is detection
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+def test_export_preserves_objects_and_background(tmp_path, serialized):
+    import gzip
+    import pickle
+    from scene_service.ingest.cg_export import export_map_objects
+
+    objects = [{"class_name": "chair", "num_detections": 2}]
+    background = [{"class_name": "floor"}]
+    if serialized:
+        class MapObjects(list):
+            def to_serializable(self):
+                return [{**obj, "converted": True} for obj in self]
+        objects, background = MapObjects(objects), MapObjects(background)
+    path = export_map_objects(objects, "scene", tmp_path, "ViT-B-32", "checkpoint", background)
+    with gzip.open(path, "rb") as stream:
+        payload = pickle.load(stream)
+    assert payload["object_count"] == 1
+    assert payload["clip_model"] == "ViT-B-32"
+    assert payload["objects"][0]["class_name"] == "chair"
+    assert payload["bg_objects"][0]["class_name"] == "floor"
+    assert ("converted" in payload["objects"][0]) is serialized
+    assert ("converted" in payload["bg_objects"][0]) is serialized

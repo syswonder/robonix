@@ -49,7 +49,8 @@ jobs:
       - name: Install focused Scene test dependencies
         run: >-
           python3 -m pip install pytest "numpy>=1.26,<2" "scipy>=1.11"
-          httpx Pillow regex starlette uvicorn ./pylib/robonix-api
+          httpx Pillow regex starlette uvicorn "opencv-python-headless>=4.8,<4.12"
+          ./pylib/robonix-api
       - name: Test Scene logic that needs no service stack
         run: >-
           python3 -m pytest -q
@@ -61,7 +62,15 @@ jobs:
           system/scene/tests/test_identity.py
           system/scene/tests/test_perception_dualmap.py
           system/scene/tests/test_perception_concept_graphs.py
+          system/scene/tests/test_perception_models.py
+          system/scene/tests/test_prepare_dualmap.py
+          system/scene/tests/test_prepare_models.py
+          system/scene/tests/test_build_engines.py
+          system/scene/tests/test_prepare_viewer.py
+          system/scene/tests/test_inference_config.py
           system/scene/tests/test_perception_engines.py::test_yolo_nms_keeps_only_the_best_class_per_anchor
+          system/scene/tests/test_perception_engines.py::test_instance_masks_keep_coefficients_aligned_and_discard_empty_masks
+          system/scene/tests/test_perception_engines.py::test_instance_segmentation_derives_class_count_from_the_prototypes
 
       - name: Test Scene map save and load facade
         env:

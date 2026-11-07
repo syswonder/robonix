@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import json
 import sys
 import time
 import tempfile
@@ -61,13 +62,14 @@ def yolo_score_stage(feats: np.ndarray, e: np.ndarray, scales, biases, ns) -> np
 def check(out_name: str, got: np.ndarray, ref: np.ndarray, kind: str) -> str:
     a, b = got.astype(np.float64), ref.astype(np.float64)
     cos = float((a * b).sum() / (np.linalg.norm(a) * np.linalg.norm(b)))
+    if kind == "emb":
+        norms = np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1)
+        cos = float(np.min(np.sum(a * b, axis=-1) / norms))
     mx = float(np.abs(a - b).max())
     if kind == "boxes":
         ok, thr = cos >= 0.999 and mx <= 8.0, "cos>=0.999 maxabs<=8px"
-    elif kind == "cls_score":
+    elif kind in ("cls_score", "score"):
         ok, thr = cos >= 0.999 and mx <= 0.02, "cos>=0.999 maxabs<=2e-2"
-    elif kind == "emb":
-        ok, thr = cos >= 0.999, "cos>=0.999"
     else:
         ok, thr = cos >= 0.999, "cos>=0.999"
     tag = "OK " if ok else "FAIL"
@@ -95,14 +97,24 @@ SPECS = [
          # tactic costs ~38MB device scratch per profiled box (~1.2GB at K_max
          # 32) on a 20MB model — unacceptable on the 8GB board; K=1 runs ~10ms
          gates=[dict(feeds={"image_embeddings": "enc_ref", "boxes": "boxes2"},
-                     checks=[("masks", "masks_ref2", "cos"), ("iou", "iou_ref2", "cos")]),
+                     checks=[("masks", "masks_ref2", "cos"), ("iou", "iou_ref2", "score")]),
                 dict(feeds={"image_embeddings": "enc_ref", "boxes": "boxes5"},
-                     checks=[("masks", "masks_ref5", "cos"), ("iou", "iou_ref5", "cos")])]),
+                     checks=[("masks", "masks_ref5", "cos"), ("iou", "iou_ref5", "score")])]),
     dict(name="clip-visual", runtime="trt",
-         gates=[dict(feeds={"images": "images"}, checks=[("image_feats", "ref", "cos")])]),
+         gates=[dict(feeds={"images": "images"}, checks=[("image_feats", "ref", "emb")])]),
     dict(name="clip-text", runtime="ort",
          gates=[dict(feeds={"tokens": "tokens"}, checks=[("text_feats", "ref", "emb")]),
                 dict(feeds={"tokens": "tokens1"}, checks=[("text_feats", "ref1", "emb")])]),
+    dict(name="replica-text", runtime="ort", optional=True, metadata="replica_text",
+         gates=[dict(feeds={"tokens": "tokens"}, checks=[("text_feats", "ref", "emb")]),
+                dict(feeds={"tokens": "tokens1"}, checks=[("text_feats", "ref1", "emb")])]),
+    dict(name="fastsam", runtime="trt", optional=True,
+         gates=[dict(feeds={"images": "images"},
+                     checks=[("boxes", "boxes", "boxes"), ("scores", "scores", "cls_score"),
+                             ("coefficients", "coefficients", "cos"), ("prototypes", "prototypes", "cos")]),
+                dict(feeds={"images": "images1"},
+                     checks=[("boxes", "boxes1", "boxes"), ("scores", "scores1", "cls_score"),
+                             ("coefficients", "coefficients1", "cos"), ("prototypes", "prototypes1", "cos")])]),
 ]
 
 
@@ -125,6 +137,10 @@ def run_gate(spec, d, sess):
             continue
         outs = sess.run(feeds)
         vals = dict(outs)
+        if spec["name"] == "fastsam":
+            class_end = 4 + d["scores"].shape[1]
+            vals.update(boxes=outs["predictions"][:, :4], scores=outs["predictions"][:, 4:class_end],
+                        coefficients=outs["predictions"][:, class_end:])
         if spec["name"] == "yolo-world-cut":
             vals["cls_score"] = yolo_score_stage(
                 outs["feats"], d["txt_feats"], d["scales"], d["biases"], d["ns"])
@@ -150,7 +166,10 @@ def build_trt_engine(onnx_path: str, eng_path: str, cache_dir: str, d) -> float:
     for i in range(network.num_inputs):
         inp = network.get_input(i)
         name = inp.name
-        if name == "txt_feats":
+        if name == "images" and os.path.basename(onnx_path) == "fastsam.onnx":
+            profile.set_shape(name, trt.Dims((1, 3, 32, 32)),
+                              trt.Dims(d["images"].shape), trt.Dims((1, 3, 1024, 1024)))
+        elif name == "txt_feats":
             nc, width = map(int, d["txt_feats"].shape[1:])
             profile.set_shape(name, trt.Dims((1, 1, width)), trt.Dims((1, nc, width)),
                               trt.Dims((1, YOLO_NC_MAX, width)))
@@ -165,6 +184,8 @@ def build_trt_engine(onnx_path: str, eng_path: str, cache_dir: str, d) -> float:
             profile.set_shape(name, trt.Dims(ref.shape), trt.Dims(ref.shape),
                               trt.Dims(ref.shape))
     config = builder.create_builder_config()
+    # TF32's reduced mantissa can fail FP32 reference gates for convolutional encoders.
+    config.clear_flag(trt.BuilderFlag.TF32)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, WORKSPACE)
     # timing cache: same-board rebuilds land 30-50% faster
     tcache = os.path.join(cache_dir, f"timing-cache-trt{trt.__version__}.bin")
@@ -200,8 +221,15 @@ def main() -> int:
     log(f"build_engines: TRT {trt.__version__} sm_{cc} models={args.models_dir} cache={args.cache_dir}")
 
     failed = False
+    metadata_path = os.path.join(args.models_dir, "model-config.json")
+    metadata = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path) as source:
+            metadata = json.load(source)
     for spec in SPECS:
         name = spec["name"]
+        if spec.get("optional") and not metadata.get(spec.get("metadata", name)):
+            continue
         if args.only and name not in args.only:
             continue
         onnx_path = os.path.join(args.models_dir, f"{name}.onnx")

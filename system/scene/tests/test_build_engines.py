@@ -68,3 +68,47 @@ def test_check_never_builds_engines(tmp_path, monkeypatch, cached):
     assert build.main() == (0 if cached else 1)
     compile_engine.assert_not_called()
     assert final.exists() == cached
+
+
+def test_embedding_gate_checks_each_row_instead_of_hiding_a_bad_small_vector(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='test'))
+    path = Path(__file__).resolve().parents[1] / 'scripts/build_engines.py'
+    spec = importlib.util.spec_from_file_location('scene_gate', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    reference = np.array([[1000., 0.], [1., 0.]])
+    actual = np.array([[1000., 0.], [0., 1.]])
+    assert module.check('features', actual, reference, 'emb').startswith('FAIL')
+    assert module.check('features', reference, reference, 'emb').startswith('OK')
+
+
+def test_instance_gate_does_not_hide_score_errors_behind_large_box_coordinates(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='test'))
+    path = Path(__file__).resolve().parents[1] / 'scripts/build_engines.py'
+    spec = importlib.util.spec_from_file_location('instance_gate', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    candidate = next(s for s in module.SPECS if s['name'] == 'fastsam')
+    gate = dict(candidate, gates=candidate['gates'][:1])
+    reference = dict(images=np.ones((1, 3, 32, 32), np.float32), boxes=np.full((1, 4, 2), 10000., np.float32),
+                     scores=np.ones((1, 1, 2), np.float32), coefficients=np.ones((1, 1, 2), np.float32),
+                     prototypes=np.ones((1, 1, 8, 8), np.float32))
+    outputs = dict(predictions=np.concatenate([reference['boxes'], reference['scores'] * .8, reference['coefficients']], axis=1),
+                   prototypes=reference['prototypes'])
+    assert not module.run_gate(gate, reference, SimpleNamespace(run=lambda _: outputs))
+
+
+def test_decoder_quality_gate_checks_scalar_magnitude(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'tensorrt', SimpleNamespace(__version__='test'))
+    path = Path(__file__).resolve().parents[1] / 'scripts/build_engines.py'
+    spec = importlib.util.spec_from_file_location('decoder_gate', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    candidate = next(s for s in module.SPECS if s['name'] == 'sam-decoder')
+    gate = dict(candidate, gates=candidate['gates'][:1])
+    reference = dict(enc_ref=np.ones((1, 2, 2, 2), np.float32), boxes2=np.ones((1, 4), np.float32),
+                     masks_ref2=np.ones((1, 1, 2, 2), np.float32), iou_ref2=np.array([[.75]], np.float32))
+    outputs = dict(masks=reference['masks_ref2'], iou=np.array([[.5]], np.float32))
+    assert not module.run_gate(gate, reference, SimpleNamespace(run=lambda _: outputs))
+    outputs['iou'] = reference['iou_ref2']
+    assert module.run_gate(gate, reference, SimpleNamespace(run=lambda _: outputs))

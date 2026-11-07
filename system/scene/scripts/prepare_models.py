@@ -19,35 +19,60 @@ PKG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PKG))
 from scene_service.inference_config import (  # noqa: E402
     inference_backend, prepared_models_dir, engine_cache_dir, validate_tensorrt_config,
-    model_config, model_metadata,
+    model_config, model_metadata, model_profile, export_model_names,
 )
 
 
 def source_fingerprint(weights: list[Path]) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps(model_config(), sort_keys=True).encode())
-    digest.update((os.environ.get("SCENE_PROFILE") or "lite").strip().lower().encode())
-    for path in [PKG / "scripts/export_models.py", PKG / "scene_service/inference_config.py", *weights]:
+    digest.update(model_profile().encode())
+    for path in [PKG / "scripts/export_models.py", PKG / "scene_service/inference_config.py",
+                 PKG / "scene_service/ingest/perception_models.py", *weights]:
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1 << 20), b""):
                 digest.update(chunk)
-    for package in ("torch", "ultralytics", "open_clip_torch", "onnx", "onnxscript"):
+    for package in ("torch", "torchvision", "timm", "ultralytics", "open_clip_torch", "onnx", "onnxscript"):
         digest.update(f"{package}={importlib.metadata.version(package)}".encode())
     return digest.hexdigest()
 
 
 def build_engines(models_dir: Path, check: bool = False, cache_dir=None) -> None:
+    cache = Path(cache_dir or engine_cache_dir(str(models_dir)))
     cmd = [sys.executable, str(PKG / "scripts/build_engines.py"),
            "--models-dir", str(models_dir),
-           "--cache-dir", str(cache_dir or engine_cache_dir(str(models_dir)))]
+           "--cache-dir", str(cache)]
     if check:
         cmd.append("--check")
+    else:
+        from scene_service.ingest.perception_engines import trt_model_names, engine_file
+
+        cache.mkdir(parents=True, exist_ok=True)
+        reused = False
+        for name in trt_model_names(str(models_dir)):
+            destination = Path(engine_file(name, str(models_dir), str(cache)))
+            if destination.exists():
+                continue
+            for previous in cache.parent.iterdir():
+                if previous == cache or not previous.is_dir():
+                    continue
+                source = previous / destination.name
+                if source.is_file():
+                    os.link(source, destination)
+                    reused = True
+                    break
+        if reused:
+            cmd.append("--verify")
     subprocess.run(cmd, check=True)
 
 
 def prepare(models_dir: Path) -> None:
     models = model_config()
     weights = [Path(models[key]) for key in ("yolo", "sam", "clip_pretrained")]
+    if "fastsam" in models:
+        weights.append(Path(models["fastsam"]))
+    if "replica_clip_pretrained" in models:
+        weights.append(Path(models["replica_clip_pretrained"]))
     baked = Path('/opt/models/onnx')
     if baked.is_dir():
         try:
@@ -75,13 +100,13 @@ def prepare(models_dir: Path) -> None:
                         shutil.copy2(path, pending / path.name)
             else:
                 # Separate processes release Torch and exporter memory between models.
-                for model in ("yolo", "sam", "clip"):
+                for model in export_model_names(models):
                     subprocess.run([
                         sys.executable, str(PKG / "scripts/export_models.py"),
                         "--only", model, "--yolo-weights", str(weights[0]),
                         "--sam-weights", str(weights[1]), "--clip-bin", str(weights[2]),
                         "--clip-model", models["clip_model"],
-                        "--profile", (os.environ.get("SCENE_PROFILE") or "lite").strip().lower(),
+                        "--profile", model_profile(),
                         "--out", str(pending),
                     ], check=True)
             build_engines(pending, cache_dir=engine_cache_dir(str(destination)))

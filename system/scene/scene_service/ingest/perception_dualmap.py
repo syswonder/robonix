@@ -11,6 +11,7 @@ Hydra from its own YAML under ``SCENE_DUALMAP_ROOT`` with Scene's overrides.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -32,14 +33,8 @@ from .geometry_gates import KnownGround, fraction_on_known_ground  # noqa: E402
 log = logging.getLogger("scene.dualmap")
 
 _DEFAULT_ROOT = "/opt/dualmap"
-_DEFAULT_WEIGHTS = {
-    "yolo": "/opt/models/yolov8l-world.pt",
-    "sam": "/opt/models/mobile_sam.pt",
-    "fastsam": "/opt/models/dualmap/FastSAM-s.pt",
-    "mobileclip": "/opt/models/dualmap/mobileclip_s2_datacompdr.bin",
-}
 # Text encoder for the Replica export; its scorer matches labels via CLIP text features.
-_EXPORT_CLIP = ("ViT-B-32", "/opt/models/open_clip_pytorch_model.bin")
+_EXPORT_CLIP = "ViT-B-32"
 
 # Also exported at stop; periodic so a killed container leaves a recent export.
 _EXPORT_EVERY_TICKS = 100
@@ -133,7 +128,7 @@ class DualMapDetector(ConceptGraphsDetector):
         self._last_lm_size = -1
         self._undecodable = 0
         self._embed_warned = False
-        self._export_encoder: Any = None  # (model, tokenizer) once loaded
+        self._export_encoder: Any = None  # Callable returning normalized text features
         self._export_cache: dict[str, Any] = {}
         unknown = sorted(k for k in self._dualmap_cfg if k not in DUALMAP_KEYS)
         if unknown:
@@ -165,13 +160,22 @@ class DualMapDetector(ConceptGraphsDetector):
         if self._task is not None:
             await self._task
             self._task = None
-        if self._dm is not None:
-            self._export()
-        if self._classes_file_is_temp and self._classes_file:
-            try:
-                os.remove(self._classes_file)
-            except OSError:
-                pass
+        try:
+            if self._dm is not None:
+                self._export()
+        finally:
+            self._export_encoder = None
+            self._export_cache.clear()
+            if self._engines is not None:
+                self._engines.close()
+                if self._dm is not None:
+                    self._dm.inference = None
+                self._engines = None
+            if self._classes_file_is_temp and self._classes_file:
+                try:
+                    os.remove(self._classes_file)
+                except OSError:
+                    pass
 
     def _write_classes_file(self) -> Optional[str]:
         """The vocabulary file DualMap reads: ``perception.dualmap.classes`` written
@@ -201,8 +205,17 @@ class DualMapDetector(ConceptGraphsDetector):
             return False
         if root not in sys.path:
             sys.path.insert(0, root)
+        from ..inference_config import inference_backend, model_config, validate_tensorrt_config
+
+        use_engines = inference_backend() == "tensorrt"
+        if use_engines:
+            if os.environ.get("SCENE_DUALMAP_NPU_DIR", "").strip():
+                raise ValueError("Select either DualMap NPU models or TensorRT inference")
+            validate_tensorrt_config(profile=self._profile, backend="dualmap")
+            from scripts.prepare_dualmap import verify
+
+            verify(root)
         try:
-            import torch
             from hydra import compose, initialize_config_dir
             from hydra.core.global_hydra import GlobalHydra
             from utils.global_map_manager import GlobalMapManager  # DualMap
@@ -214,14 +227,18 @@ class DualMapDetector(ConceptGraphsDetector):
             log.warning("[scene-dualmap] import failed: %s", e)
             return False
 
-        force_cpu = os.environ.get("SCENE_CG_FORCE_CPU", "").strip().lower() in ("1", "true", "yes")
-        device = str(self._dualmap_cfg.get("device") or ("cpu" if force_cpu or not torch.cuda.is_available() else "cuda"))
+        if use_engines:
+            device = str(self._dualmap_cfg.get("device") or "cuda")
+            if device not in ("cuda", "cuda:0"):
+                raise ValueError("DualMap TensorRT requires device=cuda")
+        else:
+            import torch
+
+            force_cpu = os.environ.get("SCENE_CG_FORCE_CPU", "").strip().lower() in ("1", "true", "yes")
+            device = str(self._dualmap_cfg.get("device") or ("cpu" if force_cpu or not torch.cuda.is_available() else "cuda"))
         out_dir = os.path.join(tempfile.gettempdir(), "scene-dualmap")
         os.makedirs(out_dir, exist_ok=True)
-        weights = {k: os.environ.get(f"SCENE_DUALMAP_{k.upper()}_WEIGHTS", "").strip() or v
-                   for k, v in _DEFAULT_WEIGHTS.items()}
-        # RKNPU3 mode keeps only the CLIP text tower on torch; both MobileSAM
-        # stages run from the model bundle.
+        selected = model_config(self._profile, backend="dualmap")
         npu_dir = os.environ.get("SCENE_DUALMAP_NPU_DIR", "").strip()
         clip_weights = os.environ.get("SCENE_DUALMAP_CLIP_WEIGHTS", "").strip()
         if npu_dir:
@@ -239,12 +256,12 @@ class DualMapDetector(ConceptGraphsDetector):
                 log.warning("[scene-dualmap] NPU mode needs SCENE_DUALMAP_CLIP_WEIGHTS "
                             "(openai ViT-B/32 checkpoint) for the CLIP text tower: %r", clip_weights)
                 return False
-            needed = ()
-        else:
-            needed = tuple(weights)
-        for name in needed:
-            if not os.path.isfile(weights[name]):
-                log.warning("[scene-dualmap] %s weights missing: %s", name, weights[name])
+        required = () if npu_dir else (("yolo", "sam", "clip_pretrained")
+                                      + (("fastsam",) if self._use_fastsam else ()))
+        for name in required:
+            path = selected[name]
+            if not os.path.isfile(path):
+                log.warning("[scene-dualmap] %s weights missing: %s", name, path)
                 return False
         try:
             self._classes_file = self._write_classes_file()
@@ -258,8 +275,9 @@ class DualMapDetector(ConceptGraphsDetector):
             "save_local_map=false", "save_global_map=false",
             "save_detection=false", "visualize_detection=false",
             "run_detection=true", f"output_path={out_dir}", f"device={device}",
-            f"yolo.model_path={weights['yolo']}", f"sam.model_path={weights['sam']}",
-            f"fastsam.model_path={weights['fastsam']}", f"clip.pretrained={weights['mobileclip']}",
+            f"yolo.model_path={selected['yolo']}", f"sam.model_path={selected['sam']}",
+            f"fastsam.model_path={selected['fastsam']}", f"clip.pretrained={selected['clip_pretrained']}",
+            f"clip.model_name={selected['clip_model']}",
             f"use_fastsam={str(self._use_fastsam).lower()}",
         ]
         if npu_dir:
@@ -282,10 +300,21 @@ class DualMapDetector(ConceptGraphsDetector):
             # A singleton the detector and map managers fetch; configure it once.
             vis = ReRunVisualizer(cfg)
             vis.set_use_rerun(False)
-            self._dm = Detector(cfg)
+            if not npu_dir and (use_engines or "inference" in inspect.signature(Detector).parameters):
+                from .perception_models import load_perception
+
+                classes = [str(name) for name in vis.obj_classes.get_classes_arr()]
+                self._engines = load_perception(classes, profile=self._profile, backend="dualmap",
+                                               device=device, use_fastsam=self._use_fastsam)
+                self._dm = Detector(cfg, inference=self._engines)
+            else:
+                self._dm = Detector(cfg)
             self._lm = LocalMapManager(cfg)
             self._gm = GlobalMapManager(cfg) if self._global_map else None
         except Exception as e:  # noqa: BLE001
+            if self._engines is not None:
+                self._engines.close()
+                self._engines = None
             log.warning("[scene-dualmap] DualMap init failed: %s", e, exc_info=True)
             return False
         self._dm_data_input = DataInput
@@ -708,7 +737,7 @@ class DualMapDetector(ConceptGraphsDetector):
 
     # ── text embedding (MobileCLIP shared with the detector) ──────────
     def embed_text(self, texts: list[str]) -> Optional[list[list[float]]]:
-        if self._dm is None or getattr(self._dm, "clip_model", None) is None:
+        if self._dm is None or (self._engines is None and getattr(self._dm, "clip_model", None) is None):
             return None
         with self._inference_lock:
             return self._encode_text_nolock(texts)
@@ -716,6 +745,8 @@ class DualMapDetector(ConceptGraphsDetector):
     def _encode_text_nolock(self, texts: list[str]) -> Optional[list[list[float]]]:
         """L2-normalised MobileCLIP text features; caller holds ``_inference_lock``."""
         try:
+            if self._engines is not None:
+                return self._engines.embed_text(texts).tolist()
             import torch
             tok = self._dm.clip_tokenizer(list(texts)).to(self._device)
             with torch.no_grad():
@@ -736,8 +767,10 @@ class DualMapDetector(ConceptGraphsDetector):
         if not out_dir:
             return
         exp = os.environ.get("SCENE_EXPORT_CG_EXP", "scene").strip() or "scene"
-        model_name, pretrained = _EXPORT_CLIP
-        pretrained = os.environ.get("SCENE_DUALMAP_EXPORT_CLIP", "").strip() or pretrained
+        from ..inference_config import model_config
+
+        model_name = _EXPORT_CLIP
+        pretrained = model_config(self._profile, backend="dualmap")["replica_clip_pretrained"]
         import numpy as np
         encoder = self._text_encoder(model_name, pretrained)
         objs = []
@@ -756,47 +789,51 @@ class DualMapDetector(ConceptGraphsDetector):
                 "conf": list(o["conf"]),
             })
 
-        class _Serializable(list):
-            def to_serializable(self):
-                return list(self)
-
-        try:
-            path = export_map_objects(_Serializable(objs), exp, out_dir, model_name, pretrained)
-            log.info("[scene-dualmap] exported %d objects to %s", len(objs), path)
-        except Exception as e:  # noqa: BLE001
-            log.error("[scene-dualmap] export to %s failed: %s", out_dir, e)
+        path = export_map_objects(objs, exp, out_dir, model_name, pretrained)
+        log.info("[scene-dualmap] exported %d objects to %s", len(objs), path)
 
     def _text_encoder(self, model_name: str, pretrained: str):
-        """Load the export text encoder once; None (after one error log) when unavailable."""
+        """Cache the export encoder separately from the mapper's feature space."""
         if self._export_encoder is not None:
-            return self._export_encoder or None
-        try:
-            import open_clip
-            model, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-            model.eval()
-            self._export_encoder = (model, open_clip.get_tokenizer(model_name))
-        except Exception as e:  # noqa: BLE001
-            log.error("[scene-dualmap] export text encoder %s (%s) unavailable: %s — writing zero features",
-                      model_name, pretrained, e)
-            self._export_encoder = ()  # remembered failure
-            return None
-        return self._export_encoder
-
-    def _label_feature(self, encoder, label: str):
-        """ViT-B-32 text feature of ``label`` (cached), or a zero vector without an encoder."""
+            return self._export_encoder
+        from ..inference_config import inference_backend, prepared_models_dir
         import numpy as np
-        if label in self._export_cache:
-            return self._export_cache[label]
-        if encoder is None:
-            feat = np.zeros(512, dtype=np.float32)
+
+        if inference_backend() == "tensorrt":
+            import json
+            from pathlib import Path
+            from .perception_engines import OrtSess, SimpleTokenizer, normalize_rows
+
+            directory = Path(prepared_models_dir(os.environ.get("SCENE_ONNX_DIR") or
+                                               str(Path(__file__).resolve().parents[2] / "docker/_weights/onnx")))
+            metadata = json.loads((directory / "model-config.json").read_text())
+            if (metadata.get("replica_clip_model") != model_name or
+                    metadata.get("replica_clip_pretrained") != str(Path(pretrained).resolve())):
+                raise ValueError("Prepared Replica encoder differs; rebuild Scene with the selected export weights")
+            model = OrtSess(str(directory / "replica-text.onnx"))
+            tokenizer = SimpleTokenizer(context_length=metadata["replica_context_length"])
+
+            def encode(texts):
+                return normalize_rows(model.run({"tokens": tokenizer(texts)})["text_feats"])
         else:
             import torch
-            model, tok = encoder
-            with torch.no_grad():
-                tf = model.encode_text(tok([label]))
-                feat = (tf / tf.norm(dim=-1, keepdim=True))[0].cpu().numpy().astype(np.float32)
-        self._export_cache[label] = feat
-        return feat
+            import open_clip
+            from .perception_models import create_clip_model
+
+            model, _, _ = create_clip_model(model_name, pretrained)
+            tokenizer = open_clip.get_tokenizer(model_name)
+
+            def encode(texts):
+                with torch.inference_mode():
+                    features = model.encode_text(tokenizer(texts))
+                    return (features / features.norm(dim=-1, keepdim=True).clamp_min(1e-12)).cpu().numpy().astype(np.float32)
+        self._export_encoder = encode
+        return encode
+
+    def _label_feature(self, encoder, label: str):
+        if label not in self._export_cache:
+            self._export_cache[label] = encoder([label])[0]
+        return self._export_cache[label]
 
 
 def _track_confidence(track: Any) -> float:

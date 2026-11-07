@@ -1,0 +1,11 @@
+# DualMap mapping and observation processing; model loading uses OpenCLIP/timm.
+supervision==0.25.1
+open_clip_torch>=3.3,<4
+faiss-cpu>=1.8,<2
+networkx>=3
+scikit-learn
+distinctipy
+plyfile
+pympler
+dill
+tabulate
