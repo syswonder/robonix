@@ -370,6 +370,23 @@ stop: "true"
     }
 
     #[test]
+    fn pilot_receives_optional_reasoning_effort() {
+        for effort in [None, Some("high")] {
+            let cfg: serde_yaml::Value =
+                serde_yaml::from_str(&effort.map_or_else(String::new, |value| {
+                    format!("vlm:\n  reasoning_effort: {value}\n")
+                }))
+                .unwrap();
+            let args = system_cli_args("pilot", Some(&cfg), None);
+            let actual = args
+                .windows(2)
+                .find(|pair| pair[0] == "--vlm-reasoning-effort")
+                .map(|pair| pair[1].as_str());
+            assert_eq!(actual, effort);
+        }
+    }
+
+    #[test]
     fn vitals_receives_typed_manifest_fields() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
@@ -2320,6 +2337,11 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-upstream", nested_str("vlm", "upstream"));
             push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
+            push_pair(
+                &mut out,
+                "--vlm-reasoning-effort",
+                nested_str("vlm", "reasoning_effort"),
+            );
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
             push_pair(
                 &mut out,

@@ -146,6 +146,8 @@ system:
 - `ROBONIX_ATLAS` — atlas endpoint, default `localhost:50051`.
 - `VLM_API_KEY` / `VLM_BASE_URL` / `VLM_MODEL` — VLM credentials forwarded
   to pilot at boot.
+- `system.pilot.vlm.reasoning_effort` — optional model reasoning effort,
+  forwarded to Pilot's OpenAI-compatible request.
 - `ROBONIX_DRIVER_INIT_TIMEOUT_S` — seconds `rbnx boot` waits for a package's
   `Driver(CMD_INIT)` reply. Default 90.
 - `RBNX_GH_MIRROR` — prefix tried before `https://github.com/` URLs when
