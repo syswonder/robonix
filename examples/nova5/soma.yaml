@@ -1,0 +1,26 @@
+urdf:
+  path: ./model/nova5_base.urdf
+  root_link: base_link
+  model_name: nova5_sdk_controlled
+
+robot:
+  id: nova5_sdk_controlled
+  display_name: Nova5 RGB pick and return
+  family: manipulator
+  root_part: base
+  components:
+    - id: base
+      display_name: Nova5 base
+      type: base
+      urdf_link: base_link
+      exports: []
+
+description:
+  summary: Nova5 task capability; SDK owns arm kinematics and motion.
+  can_do:
+    - Capture a stationary wrist RGB image.
+    - Pick the configured box, return it to the observed place, and return home.
+  cannot_do:
+    - Move to arbitrary coordinates through this task skill.
+  notes:
+    - This base-only URDF is a Soma deployment placeholder, not the Nova5 kinematic model.

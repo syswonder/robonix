@@ -1,0 +1,14 @@
+{
+  "calibration_root": "/path/to/calibration-project",
+  "camera_python": "/path/to/camera-venv/bin/python",
+  "runtime_python": "/path/to/robonix-venv/bin/python",
+  "hand_python": "/path/to/gripper-venv/bin/python",
+  "generated_proto": "examples/nova5/skills/pick_return/rbnx-build/codegen/proto_gen",
+  "pgi_module": "/path/to/pgi-project/primitives/pgi_hand",
+  "atlas_binary": "target/debug/robonix-atlas",
+  "serial_port": "/dev/serial/by-id/<gripper-serial-id>",
+  "object_description": "the small black rectangular Robonix box on the fixed checkerboard",
+  "object_height_mm": 50,
+  "allowed_xy_mm": null,
+  "home_flange_mm_deg": null
+}

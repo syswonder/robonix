@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: MulanPSL-2.0 -->
+<robot name="nova5_sdk_controlled">
+  <link name="base_link"/>
+</robot>

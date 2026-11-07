@@ -31,6 +31,7 @@ stress_test
 rust/debug
 rust/provider/
 .artifacts/
+/Log/
 rbnx-boot
 tmp*
 .libero/

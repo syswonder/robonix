@@ -1,0 +1,32 @@
+manifestVersion: 1
+name: nova5-rgb-pick-return
+
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+  executor:
+    listen: 127.0.0.1:50061
+  soma:
+    robot_yaml: ./soma.yaml
+  pilot:
+    listen: 127.0.0.1:50071
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: gpt-6-astra
+      reasoning_effort: high
+      api_format: openai
+
+primitive:
+  - name: nova5_wrist_rgb
+    path: ./primitives/wrist_rgb
+    config:
+      calibration_root: ${NOVA5_CALIBRATION_ROOT}
+      camera_python: ${NOVA5_CAMERA_PYTHON}
+
+skill:
+  - name: nova5_pick_return
+    path: ./skills/pick_return
+    config:
+      python: ${NOVA5_RUNTIME_PYTHON}
+      settings: ${NOVA5_EXAMPLE_ROOT}/settings.json

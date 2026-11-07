@@ -1,0 +1,10 @@
+[contract]
+id = "robonix/skill/nova5_pick_return/run/cancel"
+version = "1"
+kind = "skill"
+idl = "nova5_pick_return/srv/Cancel.srv"
+description = "Request cancellation of one Nova5 pick-and-return run."
+llm_callable = false
+
+[mode]
+type = "rpc"

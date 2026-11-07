@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/skill/nova5_pick_return/run"
+version = "1"
+kind = "skill"
+idl = "nova5_pick_return/srv/Run.srv"
+description = "Start one RGB-guided black-box pickup, replacement and Nova5 return-home cycle."
+
+[mode]
+type = "rpc"

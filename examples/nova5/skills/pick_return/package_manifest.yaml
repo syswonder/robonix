@@ -1,0 +1,18 @@
+manifestVersion: 1
+package:
+  name: nova5-pick-return
+  version: 0.1.0
+  description: RGB-guided Nova5 box pickup, return to board and return home.
+  license: MulanPSL-2.0
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+capabilities:
+  - name: robonix/skill/nova5_pick_return/run
+    transport: mcp
+    path: capabilities/run.v1.toml
+  - name: robonix/skill/nova5_pick_return/run/status
+    transport: mcp
+    path: capabilities/status.v1.toml
+  - name: robonix/skill/nova5_pick_return/run/cancel
+    transport: mcp
+    path: capabilities/cancel.v1.toml
