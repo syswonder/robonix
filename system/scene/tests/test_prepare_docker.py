@@ -38,9 +38,9 @@ def test_docker_profile_does_not_require_host_python_to_match(docker):
 
 
 @pytest.mark.parametrize('key,value', [
-    ('SCENE_PROFILE', 'annotate'), ('SCENE_CG_FORCE_CPU', '1'),
+    ('SCENE_PROFILE', 'unsupported'), ('SCENE_CG_FORCE_CPU', '1'),
     ('ROBONIX_FORCE_CPU', '1'),
-    ('SCENE_PERCEPTION_BACKEND', 'dualmap'),
+    ('SCENE_PERCEPTION_BACKEND', 'unknown'),
 ])
 def test_invalid_trt_configuration_stops_before_touching_images(docker, monkeypatch, key, value):
     monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
@@ -207,3 +207,69 @@ def test_full_model_choice_reaches_docker_build(docker, monkeypatch):
     command = execute.call_args.args[0]
     assert "SCENE_PROFILE=full" in command
     assert "SCENE_CLIP_MODEL=ViT-H-14" in command
+
+
+def test_dualmap_tensorrt_configuration_is_supported(docker, monkeypatch):
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setenv('SCENE_PERCEPTION_BACKEND', 'dualmap')
+    docker.validate_config()
+
+
+@pytest.mark.parametrize('inference', ['torch', 'tensorrt'])
+def test_dualmap_stage_copies_all_optional_models(docker, monkeypatch, tmp_path, inference):
+    from scripts import prepare_dualmap
+    pkg = tmp_path / 'scene'
+    build = pkg / 'rbnx-build'
+    (pkg / 'docker/_weights').mkdir(parents=True)
+    for name in ('scene_service', 'scripts'):
+        (pkg / name).mkdir()
+    (pkg / 'package_manifest.jetson-docker.yaml').write_text('name: scene')
+    clip = pkg / 'docker/_weights/clip/ViT-B-32.pt'
+    clip.parent.mkdir()
+    clip.write_bytes(b'clip')
+    profiles = tmp_path / 'profiles.json'
+    profiles.write_text(json.dumps({'clip_source': {'sha256': hashlib.sha256(b'clip').hexdigest()}}))
+    monkeypatch.setattr(docker, 'PKG', pkg)
+    monkeypatch.setattr(docker, 'BUILD', build)
+    monkeypatch.setattr(docker, 'PROFILES', profiles)
+    monkeypatch.setenv('SCENE_PERCEPTION_BACKEND', 'dualmap')
+    fastsam = tmp_path / 'custom-fastsam.pt'
+    fastsam.write_bytes(b'custom fastsam')
+    monkeypatch.setenv('SCENE_DUALMAP_FASTSAM_WEIGHTS', str(fastsam))
+    selected = docker.model_config(weights_dir=pkg / 'docker/_weights')
+    for key in ('yolo', 'sam', 'clip_pretrained', 'replica_clip_pretrained'):
+        path = Path(selected[key])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(key.encode())
+    (pkg / 'docker/dualmap-inference.patch').write_bytes(b'patch')
+    source = tmp_path / 'dualmap'
+    source.mkdir()
+    (source / 'LICENSE').write_text('license')
+    monkeypatch.setattr(prepare_dualmap, 'prepare', lambda: source)
+    for relative in ('proto-staging', 'codegen/robonix_mcp_types', 'codegen/ros2_idl/src'):
+        (build / relative).mkdir(parents=True)
+    api = tmp_path / 'api'
+    (api / 'robonix_api').mkdir(parents=True)
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir()
+    monkeypatch.setattr(docker, 'run', lambda command, **kwargs: subprocess.CompletedProcess(
+        command, 0, str(api if command[-1] == 'robonix-api' else runtime), ''))
+    monkeypatch.setattr(docker, 'stage_download', lambda source, destination: destination.write_bytes(b'download'))
+    profile = {'ros_source': {}, 'wheels': [], 'torch': '2.5', 'torchvision': '0.20',
+               'docker': {'tensorrt_packages': [], 'tensorrt_suite': ''}}
+    context = docker.stage(profile, inference, 'source')
+    assert (context / 'models/dualmap/mobileclip_s2_datacompdr.bin').read_bytes() == b'clip_pretrained'
+    packaged = context / 'models/dualmap/FastSAM-s.pt'
+    assert packaged.exists()
+    if packaged.exists():
+        assert packaged.read_bytes() == b'custom fastsam'
+    assert (context / 'dualmap/LICENSE').is_file()
+
+
+def test_gpu_runtime_requests_compute_without_graphics_injection(docker, monkeypatch):
+    execute = Mock(return_value=subprocess.CompletedProcess([], 0, '{"nvidia": {}}', ''))
+    monkeypatch.setattr(docker, 'run', execute)
+    assert docker.gpu_args() == ['--runtime', 'nvidia', '-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility']
+    execute.return_value = subprocess.CompletedProcess([], 0, '{}', '')
+    with pytest.raises(RuntimeError, match='NVIDIA runtime is missing'):
+        docker.gpu_args()

@@ -34,6 +34,10 @@ if ROBONIX_API="$(rbnx path robonix-api 2>/dev/null)"; then
     export PYTHONPATH="$ROBONIX_API:$PYTHONPATH"
 fi
 
+VIEWER_VERSION="$(sed -n 's/^rerun-sdk==//p' "$PKG/docker/requirements/scene-viewer.txt")"
+export SCENE_RERUN_VIEWER_DIR="${SCENE_RERUN_VIEWER_DIR:-$(dirname "$(dirname "$PY")")/rerun-web-viewer/$VIEWER_VERSION}"
+export PATH="$(dirname "$PY"):$PATH"
+
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
 
 W="$PKG/docker/_weights"

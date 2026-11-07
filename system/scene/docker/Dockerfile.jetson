@@ -24,7 +24,7 @@ ENV PATH=/opt/scene-venv/bin:${PATH} \
 
 COPY requirements/scene-base.txt requirements/scene-perception-native.txt \
      requirements/scene-perception-lock.txt requirements/scene-perception-export.txt \
-     requirements/scene-perception-engines.txt /tmp/requirements/
+     requirements/scene-perception-engines.txt requirements/scene-perception-dualmap.txt /tmp/requirements/
 COPY _build/gpu-wheels.txt /tmp/gpu-wheels.txt
 COPY _build/gpu-constraints.txt /tmp/gpu-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -37,6 +37,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/lib/apt/lists/*
 COPY _build/tensorrt-packages.txt _build/tensorrt-key.asc _build/tensorrt-source.list /tmp/
 ARG SCENE_CG_INFERENCE=torch
+ARG SCENE_PERCEPTION_BACKEND=concept_graphs
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    if [ "$SCENE_PERCEPTION_BACKEND" = dualmap ]; then \
+        pip install -c /tmp/gpu-constraints.txt -c /tmp/requirements/scene-perception-lock.txt \
+            -r /tmp/requirements/scene-perception-dualmap.txt; \
+    fi
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -e; \
     if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
@@ -55,6 +61,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 ARG SCENE_PROFILE=lite
 ARG SCENE_CLIP_MODEL
 ENV SCENE_CG_INFERENCE=${SCENE_CG_INFERENCE} \
+    SCENE_PERCEPTION_BACKEND=${SCENE_PERCEPTION_BACKEND} \
+    SCENE_DUALMAP_ROOT=/opt/dualmap \
     SCENE_PROFILE=${SCENE_PROFILE} \
     SCENE_CLIP_MODEL=${SCENE_CLIP_MODEL} \
     YOLO_CONFIG_DIR=/opt/ultralytics \
@@ -73,6 +81,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
         package/index.js package/re_viewer.js package/re_viewer_bg.wasm \
     && rm /tmp/scene-viewer.tgz
 FROM dependencies AS application
+COPY _build/dualmap/ /opt/dualmap/
 COPY _build/models/ /opt/models/
 RUN mkdir -p /opt/models/ultralytics/clip \
     && mv /opt/models/ViT-B-32.pt /opt/models/ultralytics/clip/ViT-B-32.pt
@@ -95,7 +104,7 @@ SETTINGS.update({'weights_dir': '/opt/models/ultralytics', 'sync': False})
 PY
 # Ship portable exports and references; engines are compiled on the target GPU.
 RUN if [ "$SCENE_CG_INFERENCE" = tensorrt ]; then \
-        for model in yolo sam clip; do \
+        for model in $(python -c 'from scene_service.inference_config import export_model_names, model_config; print(" ".join(export_model_names(model_config())))'); do \
             python scripts/export_models.py --profile "$SCENE_PROFILE" --only "$model" \
                 --out /opt/models/onnx || exit 1; \
         done; \

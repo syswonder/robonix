@@ -48,6 +48,8 @@ class OfflineBuildContractTests(unittest.TestCase):
     def test_native_start_accepts_onnx_without_torch_weights(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / "docker/requirements").mkdir(parents=True)
+            shutil.copy2(SCENE_ROOT / "docker/requirements/scene-viewer.txt", root / "docker/requirements")
             models = root / "onnx"
             models.mkdir()
             (models / "yolo-world-cut.onnx").write_bytes(b"onnx")
@@ -167,6 +169,7 @@ printf 'downloaded-clip' > "$out"
                 "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
                 "RBNX_PACKAGE_ROOT": str(scene),
                 "RBNX_BUILD_PROXY": "0",
+                "SCENE_PERCEPTION_BACKEND": "concept_graphs",
                 "ROBONIX_MODEL_CACHE_DIR": str(root / "model-cache"),
                 "RBNX_HF_MIRROR": "https://hf.invalid",
                 "FAKE_DOCKER_LOG": str(root / "docker.log"),
@@ -238,6 +241,7 @@ printf 'downloaded-clip' > "$out"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene, env = self._fixture(root, include_clip=True)
+            (scene / "scripts/prepare_viewer.sh").write_text("#!/bin/bash\nexit 0\n")
             fake_python = root / "python"
             fake_python.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n')
             fake_python.chmod(0o755)
@@ -254,6 +258,47 @@ printf 'downloaded-clip' > "$out"
                 self.assertEqual("prepare_models.py" in calls, backend == "tensorrt")
                 self.assertEqual("scene-perception-export.txt" in calls, backend == "tensorrt")
                 (root / "native.log").unlink()
+
+    def test_x86_dualmap_stages_custom_replica_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            custom = root / "private-replica.bin"
+            custom.write_bytes(b"custom replica weights")
+            custom.chmod(0o600)
+            (scene / "scripts/prepare_dualmap.py").write_text(
+                'import sys\nfrom pathlib import Path\n'
+                'Path(sys.argv[sys.argv.index("--root") + 1]).mkdir(parents=True, exist_ok=True)\n')
+            env.update(SCENE_PROFILE="full", SCENE_PERCEPTION_BACKEND="dualmap",
+                       SCENE_DUALMAP_EXPORT_CLIP=str(custom))
+            self._run_build(scene, env)
+            staged = scene / "docker/_build/dualmap/.scene-replica-clip.bin"
+            self.assertEqual(staged.read_bytes(), custom.read_bytes())
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(custom.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((scene / "docker/_weights/open_clip_pytorch_model.bin").read_bytes(), b"clip")
+
+    def test_full_dualmap_downloads_its_mobile_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene, env = self._fixture(root, include_clip=True)
+            fake_python = root / "python"
+            fake_python.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$NATIVE_LOG"\n')
+            fake_python.chmod(0o755)
+            (scene / "scripts/prepare_viewer.sh").write_text("#!/bin/bash\nexit 0\n")
+            (scene / "rbnx-build").mkdir()
+            (scene / "rbnx-build/native-candidate.sh").write_text(
+                f'export SCENE_NATIVE_PYTHON="{fake_python}"\nexport ROS_DISTRO=jazzy\n')
+            env.update(RBNX_BUILD_TARGET="jetson-native", SCENE_NATIVE_PYTHON=str(fake_python),
+                       SCENE_PROFILE="full", SCENE_PERCEPTION_BACKEND="dualmap",
+                       NATIVE_LOG=str(root / "native.log"))
+            subprocess.run(["bash", "scripts/build.sh"], cwd=scene, env=env,
+                           check=True, capture_output=True, text=True)
+            urls = (root / "curl.log").read_text()
+            self.assertIn("apple/MobileCLIP-S2-OpenCLIP", urls)
+            self.assertIn("FastSAM-s.pt", urls)
+            self.assertNotIn("sam_l.pt", urls)
+            self.assertNotIn("CLIP-ViT-H-14", urls)
 
     def test_full_downloads_selected_weights_and_reuses_the_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,6 +399,8 @@ def test_tensorrt_preflight_failure_does_not_stop_existing_container(tmp_path):
 
 
 def test_native_start_selects_prepared_python_and_stops_on_stale_environment(tmp_path):
+    (tmp_path / 'docker/requirements').mkdir(parents=True)
+    shutil.copy2(SCENE_ROOT / 'docker/requirements/scene-viewer.txt', tmp_path / 'docker/requirements')
     (tmp_path / 'rbnx-build').mkdir()
     python = tmp_path / 'prepared-python'
     python.write_text(

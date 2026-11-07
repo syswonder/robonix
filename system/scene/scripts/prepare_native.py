@@ -342,6 +342,10 @@ def setup(host: dict) -> None:
                inference=inference_backend(), key=key, generation=directory.name,
                base_python=sys.executable, torch_source=torch.pop('source', 'existing'),
                torch=torch, cuda_paths=cuda_library_paths(torch['cuda']) if torch['cuda'] else [])
+    if os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() == 'dualmap':
+        from scripts.prepare_dualmap import prepare
+
+        env['dualmap_root'] = str(prepare())
     (BUILD / 'native-candidate.json').write_text(json.dumps(env, indent=2) + '\n')
     write_shell(BUILD / 'native-candidate.sh', env)
 
@@ -350,6 +354,9 @@ def write_shell(path: Path, env: dict) -> None:
     path.write_text('export SCENE_NATIVE_PYTHON=' + shlex.quote(env['python']) + '\n'
                     'export ROS_DISTRO=' + shlex.quote(env['ros']) + '\n'
                     'export PIP_CONSTRAINT=' + shlex.quote(str(Path(env['python']).parents[1] / 'gpu-constraints.txt')) + '\n')
+    if env.get('dualmap_root'):
+        with path.open('a') as output:
+            output.write('export SCENE_DUALMAP_ROOT=' + shlex.quote(env['dualmap_root']) + '\n')
     if env['cuda_paths']:
         with path.open('a') as output:
             output.write('export LD_LIBRARY_PATH=' + shlex.quote(os.pathsep.join(env['cuda_paths'])) +

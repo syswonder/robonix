@@ -99,6 +99,11 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     for req in scene-base scene-perception-native; do
         "$SCENE_NATIVE_PYTHON" -m pip install -r "docker/requirements/${req}.txt" --index-url "$PIP_IDX"
     done
+    "$SCENE_NATIVE_PYTHON" -m pip install --no-deps -r docker/requirements/scene-viewer.txt --index-url "$PIP_IDX"
+    bash scripts/prepare_viewer.sh "$(dirname "$(dirname "$SCENE_NATIVE_PYTHON")")/rerun-web-viewer"
+    if [[ "${SCENE_PERCEPTION_BACKEND:-}" == dualmap ]]; then
+        "$SCENE_NATIVE_PYTHON" -m pip install -r docker/requirements/scene-perception-dualmap.txt --index-url "$PIP_IDX"
+    fi
     if [[ "$INFERENCE" == "tensorrt" ]]; then
         for req in scene-perception-export scene-perception-engines; do
             "$SCENE_NATIVE_PYTHON" -m pip install -r "docker/requirements/$req.txt" --index-url "$PIP_IDX"
@@ -249,7 +254,7 @@ for models in (model_config(weights_dir=sys.argv[1]), model_defaults(weights_dir
 PYMODELS
 )"
 mapfile -t MODEL_PATHS <<< "$MODEL_PATHS_TEXT"
-for variable in SCENE_YOLO_WORLD_WEIGHTS SCENE_MOBILE_SAM_WEIGHTS SCENE_CLIP_PRETRAINED; do
+for variable in SCENE_YOLO_WORLD_WEIGHTS SCENE_MOBILE_SAM_WEIGHTS SCENE_CLIP_PRETRAINED SCENE_DUALMAP_EXPORT_CLIP; do
     if [[ -n "${!variable:-}" && ! -s "${!variable}" ]]; then
         echo "[build] error: $variable must name an existing local checkpoint: ${!variable}" >&2
         exit 1
@@ -261,22 +266,26 @@ fetch_weight \
     "${MODEL_PATHS[0]}"
 
 # The x86 image also carries Lite weights for its default runtime configuration.
-if [[ "$SCENE_PROFILE" != full || "$TARGET" == x86-docker ]]; then
+if [[ "$SCENE_PROFILE" != full || "${SCENE_PERCEPTION_BACKEND:-}" == dualmap || "$TARGET" == x86-docker ]]; then
     SAM_DEST="${MODEL_PATHS[1]}"
     CLIP_DEST="${MODEL_PATHS[2]}"
-    if [[ "$SCENE_PROFILE" == full ]]; then
+    if [[ "$SCENE_PROFILE" == full && "${SCENE_PERCEPTION_BACKEND:-}" != dualmap ]]; then
         SAM_DEST="$WEIGHTS_DIR/mobile_sam.pt"
+        CLIP_DEST="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
+    fi
+    if [[ "$TARGET" == x86-docker && "${SCENE_PERCEPTION_BACKEND:-}" == dualmap ]]; then
         CLIP_DEST="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
     fi
     fetch_weight \
         "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
         "$SAM_DEST"
-    fetch_hf_weight \
-        "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
-        "open_clip_pytorch_model.bin" \
-        "$CLIP_DEST"
+    if [[ "${SCENE_PERCEPTION_BACKEND:-}" == dualmap && "$TARGET" != x86-docker ]]; then
+        fetch_hf_weight "apple/MobileCLIP-S2-OpenCLIP" "open_clip_pytorch_model.bin" "$CLIP_DEST"
+    else
+        fetch_hf_weight "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" "open_clip_pytorch_model.bin" "$CLIP_DEST"
+    fi
 fi
-if [[ "$SCENE_PROFILE" == full ]]; then
+if [[ "$SCENE_PROFILE" == full && "${SCENE_PERCEPTION_BACKEND:-}" != dualmap ]]; then
     fetch_weight \
         "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam_l.pt" \
         "${MODEL_PATHS[1]}"
@@ -286,12 +295,19 @@ if [[ "$SCENE_PROFILE" == full ]]; then
         "${MODEL_PATHS[2]}"
 fi
 
+if [[ "${SCENE_PERCEPTION_BACKEND:-}" == dualmap && "$TARGET" != x86-docker ]]; then
+    FASTSAM_DEST="$(python3 -c 'from scene_service.inference_config import model_config; print(model_config()["fastsam"])')"
+    fetch_weight "https://github.com/ultralytics/assets/releases/download/v8.3.0/FastSAM-s.pt" "$FASTSAM_DEST"
+    REPLICA_CLIP_DEST="$(python3 -c 'from scene_service.inference_config import model_config; print(model_config()["replica_clip_pretrained"])')"
+    fetch_hf_weight "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" "open_clip_pytorch_model.bin" "$REPLICA_CLIP_DEST"
+fi
+
 if [[ "$TARGET" == x86-docker ]]; then
     FULL_CONTEXT="$PKG/docker/_build/full-models"
     rm -rf "$FULL_CONTEXT"
     mkdir -p "$FULL_CONTEXT"
     copy_cached_weight "${MODEL_PATHS[0]}" "$WEIGHTS_DIR/yolov8l-world.pt"
-    if [[ "$SCENE_PROFILE" == full ]]; then
+    if [[ "$SCENE_PROFILE" == full && "${SCENE_PERCEPTION_BACKEND:-}" != dualmap ]]; then
         copy_cached_weight "${MODEL_PATHS[1]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[4]}")"
         copy_cached_weight "${MODEL_PATHS[2]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[5]}")"
     else
@@ -317,7 +333,7 @@ if [[ "$TARGET" == "jetson-native" ]]; then
     YCD="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
     UWD="$YCD/weights"
     mkdir -p "$YCD" "$UWD"
-    "$PY" -c "import open_clip; from scene_service.inference_config import model_config; m=model_config(); open_clip.create_model_and_transforms(m['clip_model'], pretrained=m['clip_pretrained'])" \
+    "$PY" -c "from scene_service.inference_config import model_config; from scene_service.ingest.perception_models import create_clip_model; m=model_config(); create_clip_model(m['clip_model'], m['clip_pretrained'])" \
         || {
             echo "[build] error: open_clip could not load the selected model; check SCENE_PROFILE and model paths" >&2
             exit 1
@@ -464,11 +480,27 @@ esac
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
 
+TRT_IMG="$IMG"
+if [[ "$TARGET" == "x86-docker" && "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]]; then
+    echo "[build] DualMap layer -> robonix-scene-dualmap"
+    rm -rf docker/_build/dualmap
+    python3 scripts/prepare_dualmap.py --root docker/_build/dualmap
+    if [[ -n "${SCENE_DUALMAP_EXPORT_CLIP:-}" ]]; then
+        copy_cached_weight "$SCENE_DUALMAP_EXPORT_CLIP" docker/_build/dualmap/.scene-replica-clip.bin
+        chmod a+r docker/_build/dualmap/.scene-replica-clip.bin
+    fi
+    docker build "${DOCKER_BUILD_FLAGS[@]}" -f docker/Dockerfile.dualmap \
+        --build-arg BASE_IMAGE="$IMG" \
+        --build-arg HF_ENDPOINT="$HF_MIRROR" \
+        -t robonix-scene-dualmap docker/
+    TRT_IMG=robonix-scene-dualmap
+fi
+
 if [[ "$INFERENCE" == "tensorrt" ]]; then
     # GPU compilation runs after image construction, before service replacement.
     TRT_GPU=(--gpus all)
     mkdir -p "$BUILD/tensorrt"
-    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e USER=scene -e LOGNAME=scene "${TRT_GPU[@]}" -e NVIDIA_DRIVER_CAPABILITIES=all \
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e USER=scene -e LOGNAME=scene "${TRT_GPU[@]}" -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
         -e SCENE_CG_INFERENCE=tensorrt -e SCENE_ONNX_DIR=/scene-models/onnx \
         -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
         -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
@@ -476,7 +508,7 @@ if [[ "$INFERENCE" == "tensorrt" ]]; then
         -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
         -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
         -v "$PKG:/scene:ro" -v "$PKG/$BUILD/tensorrt:/scene-models" \
-        --entrypoint bash "$IMG" -ec '
+        --entrypoint bash "$TRT_IMG" -ec '
             mkdir -p /tmp/Ultralytics
             cp /opt/ultralytics/Ultralytics/settings.json /tmp/Ultralytics/
             export YOLO_CONFIG_DIR=/tmp
@@ -484,16 +516,6 @@ if [[ "$INFERENCE" == "tensorrt" ]]; then
         ' scene-prepare python3 /scene/scripts/prepare_models.py
 fi
 
-
-# DualMap, the default backend, is a layer over the image above (start.sh uses
-# it when present). SCENE_PERCEPTION_BACKEND=concept_graphs skips it.
-if [[ "$TARGET" == "x86-docker" && "${SCENE_PERCEPTION_BACKEND:-}" != "concept_graphs" ]]; then
-    echo "[build] DualMap layer -> robonix-scene-dualmap"
-    docker build "${DOCKER_BUILD_FLAGS[@]}" -f docker/Dockerfile.dualmap \
-        --build-arg BASE_IMAGE="$IMG" \
-        --build-arg HF_ENDPOINT="$HF_MIRROR" \
-        -t robonix-scene-dualmap docker/
-fi
 
 # colcon-build the ros2_idl overlay (map interface package for the
 # lifecycle broadcast) inside the image we just built, so the install

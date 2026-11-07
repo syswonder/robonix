@@ -62,8 +62,9 @@ with CPU ONNX Runtime for text. Both implementations share point-cloud fusion
 and object retention. Lite and Full use the same TensorRT export, build and
 runtime path. The selected SAM and CLIP models supply preprocessing, feature
 dimensions and tokenizer context length through export metadata. Selecting TensorRT also selects
-ConceptGraphs when no mapper is configured; an explicit DualMap setting is
-rejected.
+ConceptGraphs when no mapper is configured. DualMap Lite selects MobileSAM and
+MobileCLIP-S2 through the same model preparation and inference implementation.
+FP32 engine builds disable TF32 and verify numerical outputs before publication.
 
 Full selects SAM-L and CLIP ViT-H-14. Build and start with `SCENE_PROFILE=full`.
 The build downloads missing Full weights into `docker/_weights/full`, or into
@@ -160,6 +161,14 @@ L4T 36.4.x / Ubuntu 22.04 and L4T 39.2.x / Ubuntu 24.04. The host needs Docker,
 NVIDIA Container Toolkit and the Robonix build tools. Host Torch and ROS are
 not required. Unrecognized platform combinations stop before image construction.
 
+Orin Nano and Orin NX use the same build target. SDK selection follows the
+host L4T and Ubuntu versions. Initialize the capability library submodules
+from the repository root before building:
+
+```bash
+git submodule update --init --recursive capabilities/lib
+```
+
 ```bash
 python3 scripts/prepare_docker.py --plan
 RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
@@ -184,9 +193,10 @@ rejected before replacing the service container. A failed build preserves
 the previous verified image and model cache. Model-cache cleanup retains the
 current and previous generations; superseded images use normal Docker cleanup.
 
-Jetson packaged images support the ConceptGraphs backend. The build stages the
-selected Lite or Full weights into the image. `SCENE_MODELS_DIR` can select a
-local Full model directory; missing default files are downloaded there. Build
+Jetson packaged images support ConceptGraphs and DualMap. Set
+`SCENE_PERCEPTION_BACKEND=dualmap` for DualMap. The build stages the selected
+Lite or Full weights into the image. For ConceptGraphs, `SCENE_MODELS_DIR` can
+select a local Full model directory; missing default files are downloaded there. Build
 proxy arguments remain opt-in through `RBNX_BUILD_PROXY=1`.
 
 ### Local Dockerfile deployment
@@ -277,6 +287,59 @@ RA-L 2025, Apache-2.0: YOLO-World + FastSAM/MobileSAM + MobileCLIP-S2 with a Bay
 class filter) at 0.4-0.7 s per frame in 2.3 GB of video memory. It needs the
 image built from `docker/Dockerfile.dualmap` (DualMap source at a pinned commit plus its
 two extra weights) and is selected per deployment:
+
+Native and Jetson Docker builds also prepare DualMap when
+`SCENE_PERCEPTION_BACKEND=dualmap` is set. The build verifies the pinned source
+archive and applies `docker/dualmap-inference.patch`. The patch injects Scene's
+shared inference implementation and uses NumPy for association and point-cloud
+projection; DualMap keeps its local/global map and object lifecycle rules.
+Duplicate-mask filtering ranks near-equal areas by detection confidence, then
+class ID. The tolerance is one pixel or 0.1% of the larger mask, whichever is
+greater; larger area differences retain DualMap's configured size preference.
+Native builds install the same pinned Rerun SDK and browser assets as Docker.
+Assets are cached by SDK version inside the prepared Python environment; startup
+selects that directory and its `rerun` executable automatically.
+
+Point-cloud subsampling uses frame-indexed pixel ranks so a small mask-boundary
+change does not reshuffle the whole sample. RGB remains the map/CLIP format;
+detector and segmenter calls convert to their BGR input format.
+
+Local CLIP checkpoints reuse published preprocessing when the model's pretrained
+variants agree. This preserves MobileCLIP-S2's zero mean, unit standard deviation
+and bilinear resize. Torch image encoding disables cuDNN TF32 within the call and
+restores the previous setting. ONNX export expands supported fused visual
+attention after checking it against the original model; TensorRT preparation
+checks each reference embedding, including black and white image inputs.
+
+Torch retains Ultralytics' default 640 rectangular preprocessing. TensorRT uses
+672 square inputs, so switching backends can change detections. Numerical backend
+comparisons must use the same input preprocessing.
+
+Set both `SCENE_PERCEPTION_BACKEND=dualmap` and `SCENE_CG_INFERENCE=tensorrt`
+before building and starting. Torch and TensorRT support Lite and Full,
+FastSAM, unknown segments, local/global mapping and the optional
+`SCENE_EXPORT_CG_PICKLE` Replica export. DualMap uses MobileSAM and MobileCLIP-S2
+for both recognition profiles. Annotate reuses the Lite build artifacts and runs
+without perception. Torch remains the default.
+
+DualMap builds prepare FastSAM and a separate ViT-B-32 text graph for Replica's
+feature space. FastSAM is loaded when `use_fastsam` is enabled (by default this
+follows `keep_unknown`); the Replica encoder is loaded when exporting.
+FastSAM retains 1024-pixel, stride-aligned rectangular preprocessing through a
+dynamic-shape TensorRT engine. Unknown segments are also retained when YOLO
+finds no named objects. Mask overlap filtering uses NumPy with one mask-sized
+boolean workspace.
+
+`SCENE_DUALMAP_EXPORT_CLIP` can select an existing local ViT-B-32 checkpoint for
+Replica export. Rebuild after changing it. Export errors propagate to the caller;
+a failed encoder cannot produce zero feature vectors.
+
+With the DualMap and pytest dependencies installed, run the prepared-source
+filter regressions from `system/scene`:
+
+```sh
+SCENE_DUALMAP_ROOT="$(python3 scripts/prepare_dualmap.py)" python3 -m pytest tests/test_dualmap_filter.py
+```
 
 ```yaml
 system:
