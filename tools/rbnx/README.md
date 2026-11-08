@@ -51,7 +51,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx init NAME [--path DIR]` | Create a robot deployment directory with a `robonix_manifest.yaml` |
 | `rbnx package-new NAME [-t primitive\|service\|skill] [--path DIR]` | Create a new package |
 | `rbnx logs [-d DIR] [-t TAG] [-l LEVEL] [-f] [--json] [--list-tags]` | Read Scribe log files, by default from `./rbnx-boot/logs` |
-| `rbnx llm-usage [-d DIR] [--boot ID] [--json]` | Sum model usage records by consumer, operation, host and model, by default from `$ROBONIX_LLM_METRICS_DIR` or `./rbnx-boot/llm-metrics` |
+| `rbnx llm-usage [-d DIR] [--boot ID] [--json]` | Sum model usage records by consumer, operation, host and model—requests, outcomes, tokens and latency percentiles—by default from `$ROBONIX_LLM_METRICS_DIR` or `./rbnx-boot/llm-metrics` |
 | `rbnx update [-y]`        | Fast-forward cloned `url:` packages; asks first unless `-y`, and refuses without a terminal |
 | `rbnx update --check [--json]` | Report which `url:` packages have upstream commits; pulls nothing |
 | `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
