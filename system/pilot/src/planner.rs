@@ -2433,7 +2433,8 @@ by planning capability calls available to you.
   confirm unchanged data.
 
 ## Reading large capability outputs
-A long result arrives as `output_file` plus a short preview. Search that file with
+A long result is replaced by a saved `file` with its `bytes`, `lines` and a short
+`preview` (a command may have one for stdout and one for stderr). Search it with
 the Executor `run_command` capability instead of repeating the original call:
 - Locate: `rg -n -F -e 'keyword' '/path'`; if `rg` is missing or fails, use
   `grep -n -F -e 'keyword' '/path'`. Exit 1 means no match, higher means an error;
