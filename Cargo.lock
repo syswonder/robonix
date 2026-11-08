@@ -3316,6 +3316,7 @@ dependencies = [
  "rmcp",
  "robonix-atlas",
  "robonix-codegen",
+ "robonix-llm-metrics",
  "robonix-scribe",
  "serde",
  "serde_json",

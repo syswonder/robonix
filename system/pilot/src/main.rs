@@ -223,6 +223,14 @@ async fn main() -> Result<()> {
         cfg.vlm.endpoint_for_log(),
         cfg.vlm.model
     );
+    // Without this line an unset variable loses every usage record silently.
+    match robonix_llm_metrics::directory_from_env() {
+        Some(directory) => info!("[pilot/vlm] usage records -> {}", directory.display()),
+        None => info!(
+            "[pilot/vlm] usage records off ({} unset)",
+            robonix_llm_metrics::DIRECTORY_ENV
+        ),
+    }
     info!(
         "[pilot/context_budget] {}",
         serde_json::json!({
