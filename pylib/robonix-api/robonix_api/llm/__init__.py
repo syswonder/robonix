@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Feature catalog and model resolver for Robonix consumers.
+"""Feature catalog, model resolver and usage records for Robonix consumers.
 
-This package answers one question: given feature requirements, which model
+The catalog answers one question: given feature requirements, which model
 endpoint should this consumer connect to?  It does not proxy traffic, track
 health or manage keys; the caller resolves once and connects directly.
+`metrics` records one line per model request; see README.md.
 """
 from .catalog import ModelCatalog, ModelSpec
 from .resolve import (
