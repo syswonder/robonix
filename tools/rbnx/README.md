@@ -51,6 +51,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx init NAME [--path DIR]` | Create a robot deployment directory with a `robonix_manifest.yaml` |
 | `rbnx package-new NAME [-t primitive\|service\|skill] [--path DIR]` | Create a new package |
 | `rbnx logs [-d DIR] [-t TAG] [-l LEVEL] [-f] [--json] [--list-tags]` | Read Scribe log files, by default from `./rbnx-boot/logs` |
+| `rbnx llm-usage [-d DIR] [--boot ID] [--json]` | Sum model usage records by consumer, operation, host and model, by default from `$ROBONIX_LLM_METRICS_DIR` or `./rbnx-boot/llm-metrics` |
 | `rbnx update [-y]`        | Fast-forward cloned `url:` packages; asks first unless `-y`, and refuses without a terminal |
 | `rbnx update --check [--json]` | Report which `url:` packages have upstream commits; pulls nothing |
 | `rbnx version [--json]`   | Version, git commit, build date, rustc, target; `--json` adds the source root |
@@ -118,9 +119,12 @@ Next to the lock, `rbnx-boot/logs/` holds each component's log and
 `rbnx-boot/sessions/` holds session state: boot passes it to system
 components as `ROBONIX_SESSION_DIR` (an existing value wins), and Pilot keeps
 each session's transcript there so the session survives a restart. Boot clears
-old log files but never touches `sessions/`. `rbnx clean -f` removes
-everything under `rbnx-boot/` except `cache/` and `sessions/`; pass `--cache`
-or `--sessions` to remove those too.
+old log files but never touches `sessions/`. `rbnx-boot/llm-metrics/` holds
+one JSON line per model request (see `robonix_api.llm`); boot exports it as
+`ROBONIX_LLM_METRICS_DIR` (an existing value wins), never clears it, and
+`rbnx llm-usage` sums it. `rbnx clean -f` removes everything under
+`rbnx-boot/` except `cache/`, `sessions/` and `llm-metrics/`; pass
+`--cache`, `--sessions` or `--llm-metrics` to remove each of those too.
 
 ## Built-in system components
 
