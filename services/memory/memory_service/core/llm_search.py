@@ -142,6 +142,7 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> Optional[List[int]]:
         return None
 
     import httpx
+    from robonix_api.llm import metrics
 
     url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
     headers = {
@@ -157,8 +158,10 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> Optional[List[int]]:
 
     t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, json=body, headers=headers)
+        with metrics.Call("memory", "search", cfg["base_url"], cfg["model"]) as call:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(url, json=body, headers=headers)
+            call.finish(r)
             if r.status_code >= 400:
                 log.warning("llm_search: LLM returned %d: %s",
                             r.status_code, r.text[:200])

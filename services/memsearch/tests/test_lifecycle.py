@@ -246,6 +246,77 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.assertIn("database is not writable", result.message)
             self.assertIsNone(module.mem)
 
+    def test_compact_records_the_usage_of_its_request(self) -> None:
+        import asyncio
+        import json
+
+        sys.path.insert(0, str(PACKAGE_ROOT.parents[1] / "pylib" / "robonix-api"))
+        self.addCleanup(sys.path.remove, sys.path[0])
+        from robonix_api.llm import metrics  # noqa: PLC0415
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {"choices": [{"message": {"content": "summary"}}],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 2}}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class Client:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc) -> None:
+                return None
+
+            async def post(self, url, *, headers, json):
+                self.__class__.sent = (url, headers["Authorization"], json["model"])
+                return Response()
+
+        class Store:
+            @staticmethod
+            def query(filter_expr: str):
+                return [{"content": "the beacon is alpha-7"}]
+
+        class Backend:
+            store = Store()
+            indexed: list = []
+
+            async def index_file(self, path) -> None:
+                self.indexed.append(path)
+
+        httpx = types.ModuleType("httpx")
+        httpx.AsyncClient = Client
+        compact_module = types.ModuleType("memsearch.compact")
+        compact_module.COMPACT_PROMPT = "{chunks}"
+        with tempfile.TemporaryDirectory() as tmp:
+            module, _ = _load_service()
+            module.mem = Backend()
+            module.MEMORY_DIR = tmp
+            env = {"VLM_BASE_URL": "https://api.example.com/v1", "VLM_API_KEY": "k",
+                   "VLM_MODEL": "m", metrics.DIRECTORY_ENV: tmp}
+            with patch.dict(os.environ, env), patch.dict(
+                sys.modules, {"httpx": httpx, "memsearch.compact": compact_module}
+            ):
+                out = asyncio.run(module.compact(_Empty()))
+            [record] = [json.loads(line) for line in
+                        (Path(tmp) / f"memsearch-{os.getpid()}.jsonl").read_text().splitlines()]
+            summary = (Path(tmp) / "memory").glob("*.md")
+            self.assertIn("summary", next(summary).read_text())
+
+        self.assertIn("compacted successfully", out.data)
+        self.assertEqual(Client.sent,
+                         ("https://api.example.com/v1/chat/completions", "Bearer k", "m"))
+        self.assertEqual(len(Backend.indexed), 1)
+        self.assertEqual((record["status"], record["input_tokens"], record["output_tokens"]),
+                         ("ok", 7, 2))
+
     def test_start_hook_does_not_kill_database_holders(self) -> None:
         manifest = (PACKAGE_ROOT / "package_manifest.yaml").read_text(encoding="utf-8")
         self.assertNotIn("fuser", manifest)

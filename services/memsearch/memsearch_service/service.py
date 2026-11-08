@@ -236,6 +236,41 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
+async def _compact(base_url: str, api_key: str, model: str) -> Path | None:
+    """Summarize every indexed chunk into today's memory file and index it.
+
+    Mirrors ``MemSearch.compact`` but sends the request itself, because
+    memsearch's own request returns no usage for the metrics record. Unlike
+    the openai SDK it replaced, it does not retry: the caller can compact again."""
+    import httpx  # noqa: PLC0415
+    from memsearch.compact import COMPACT_PROMPT  # noqa: PLC0415
+    from robonix_api.llm import metrics  # noqa: PLC0415
+
+    backend = _require_backend()
+    chunks = backend.store.query(filter_expr="")
+    if not chunks:
+        return None
+    prompt = COMPACT_PROMPT.format(chunks="\n\n---\n\n".join(c["content"] for c in chunks))
+    with metrics.Call("memsearch", "compact", base_url, model) as call:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+            )
+        call.finish(response)
+    response.raise_for_status()
+    summary = response.json()["choices"][0]["message"]["content"] or ""
+    path = Path(MEMORY_DIR) / "memory" / f"{date.today()}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as sink:
+        if sink.tell() == 0:
+            sink.write(f"# {date.today()}\n")
+        sink.write(f"\n\n## Memory Compact\n\n{summary}\n")
+    await backend.index_file(path)
+    return path
+
+
 @memory.mcp("robonix/service/memory/compact")
 async def compact(msg: Empty) -> String:
     """Compact and summarize recent memories. Call this at the end of a session.
@@ -254,10 +289,9 @@ async def compact(msg: Empty) -> String:
         return String(data="compact: no LLM credentials available. "
                            "Set VLM_API_KEY in the deploy manifest's system.memory env block.")
     try:
-        summary_path = await _require_backend().compact(
-            llm_provider="openai", model=model,
-            base_url=base_url, api_key=api_key,
-        )
+        summary_path = await _compact(base_url or "https://api.openai.com/v1", api_key, model)
+        if summary_path is None:
+            return String(data="Nothing to compact: memory is empty.")
         log.info("compact done → %s", summary_path)
         return String(data=f"Memory compacted successfully to {summary_path}.")
     except Exception as e:

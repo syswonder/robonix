@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 import httpx
+from robonix_api.llm import metrics
 
 from ..state.data_assoc import Detection
 from ..state.object_registry import BBox3D, Pose3D
@@ -306,8 +307,10 @@ class VLMObjectDetector:
         }
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, json=body, headers=headers)
+        with metrics.Call("scene", "perception", self.base_url, self.model) as call:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(url, json=body, headers=headers)
+            call.finish(r)
             if r.status_code >= 400:
                 log.warning("[scene-vlm] VLM HTTP %d: %s", r.status_code, r.text[:200])
                 return None

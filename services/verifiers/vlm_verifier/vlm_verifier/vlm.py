@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+from robonix_api.llm import metrics
 
 SYSTEM_PROMPT = """You verify completed robot actions using BEFORE and AFTER camera images.
 Each image is labelled with its camera provider and execution phase.
@@ -121,14 +122,17 @@ async def judge(config, envelope, before, after):
         ],
     }
     try:
-        async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
-            response = await client.post(
-                config.base_url + "/chat/completions",
-                headers={"Authorization": "Bearer " + config.api_key},
-                json=payload,
-            )
+        with metrics.Call("vlm_verifier", "judge", config.base_url, config.model) as call:
+            async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
+                response = await client.post(
+                    config.base_url + "/chat/completions",
+                    headers={"Authorization": "Bearer " + config.api_key},
+                    json=payload,
+                )
+            call.finish(response)
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            data = response.json()
+        content = data["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f"VLM HTTP status {exc.response.status_code}") from None
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
