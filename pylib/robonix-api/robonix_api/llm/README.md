@@ -44,7 +44,7 @@ one line per call and are never rotated: archive or remove them with
 | `host` | Endpoint host and port; never the path, query or credentials |
 | `model`, `provider_model` | Model requested, and the one the response names |
 | `stream` | Whether the reply was streamed |
-| `status`, `http_status` | `ok` (2xx), `http_error`, `timeout`, `cancelled` or `transport_error` (also a streamed reply cut off before it finished) |
+| `status`, `http_status` | `ok` (2xx with a JSON body), `http_error`, `timeout`, `cancelled` or `transport_error` (unreadable body, or a streamed reply cut off before it finished) |
 | `attempts` | Requests sent for this call, counting retries |
 | `input_tokens`, `output_tokens`, `cached_input_tokens`, `reasoning_tokens` | Reported counts; `null` when not reported |
 

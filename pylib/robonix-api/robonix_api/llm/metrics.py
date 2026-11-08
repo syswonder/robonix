@@ -104,17 +104,24 @@ class Call:
     def finish(self, response: Any = None) -> None:
         """Record an HTTP response (``status_code`` and ``json()``, as httpx has).
 
-        Without a response the call is ``ok`` with unknown usage. A body that is
-        not JSON leaves usage unknown; the request was still answered.
+        Without a response the call is ``ok`` with unknown usage. A 2xx reply
+        whose body is not JSON is ``transport_error``: the caller cannot read
+        the answer, even though the HTTP status looked successful.
         """
         status = getattr(response, "status_code", None)
+        unreadable = False
         try:
             body = response.json() if response is not None else None
         except ValueError:
             body = None
-        self.record["status"] = (
-            "ok" if status is None or 200 <= status < 300 else "http_error"
-        )
+            unreadable = True
+        if status is None:
+            outcome = "ok"
+        elif 200 <= status < 300:
+            outcome = "transport_error" if unreadable else "ok"
+        else:
+            outcome = "http_error"
+        self.record["status"] = outcome
         self.record["http_status"] = status
         self.record.update(usage_from_response(body))
         self._done = True
