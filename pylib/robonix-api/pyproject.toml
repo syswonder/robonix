@@ -56,3 +56,4 @@ include = ["robonix_api*"]
 
 [tool.setuptools.package-data]
 robonix_api = ["_generated/*.py"]
+"robonix_api.llm" = ["contract/*.json"]

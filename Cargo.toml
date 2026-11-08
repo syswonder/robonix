@@ -16,6 +16,8 @@ members = [
     "system/chronos/clock",
     "system/executor",
     "system/liaison",
+    # Per-request model usage records shared by LLM consumers.
+    "system/llm-metrics",
     "system/pilot",
     "system/scribe",
     "system/soma",
@@ -82,3 +84,4 @@ crossterm = "0.29.0"
 # Internal crates
 robonix-codegen = { path = "tools/codegen" }
 robonix-scribe = { path = "system/scribe" }
+robonix-llm-metrics = { path = "system/llm-metrics" }

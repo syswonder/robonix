@@ -3293,6 +3293,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "robonix-llm-metrics"
+version = "1.1.0"
+dependencies = [
+ "robonix-scribe",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "robonix-pilot"
 version = "1.1.0"
 dependencies = [
