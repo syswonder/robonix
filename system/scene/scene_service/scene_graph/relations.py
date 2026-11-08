@@ -151,6 +151,7 @@ class RelationInferer:
             system_prompt=system_prompt,
             user_message=user_msg,
             timeout=_LLM_TIMEOUT_SEC,
+            operation="relations",
         )
         if not raw:
             return SceneGraphEdge(
