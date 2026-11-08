@@ -283,7 +283,7 @@ mod tests {
     fn real_rg_finds_tail_and_sed_reads_original_context() {
         let root = Directory::new();
         let content = format!(
-            "{}目标位置：柜子七号\nverification: blue-cup-987\n",
+            "{}目标位置：柜子七号\nverification: blue-cup-987\n", // i18n-ok: UTF-8 retrieval fixture
             "unrelated observation\n".repeat(100_000)
         );
         let path = save(&root.0, &content, 4 * 1024 * 1024).unwrap();
@@ -305,7 +305,7 @@ mod tests {
         assert!(read.status.success());
         assert_eq!(
             String::from_utf8(read.stdout).unwrap(),
-            "目标位置：柜子七号\nverification: blue-cup-987\n"
+            "目标位置：柜子七号\nverification: blue-cup-987\n" // i18n-ok: exact UTF-8 retrieval
         );
         assert_eq!(fs::read_to_string(path).unwrap(), content);
     }
