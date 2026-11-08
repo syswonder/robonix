@@ -65,13 +65,19 @@ pub async fn execute(
     file: Option<PathBuf>,
     cache: bool,
     sessions: bool,
+    llm_metrics: bool,
 ) -> Result<()> {
+    let wipe = Wipe {
+        cache,
+        sessions,
+        llm_metrics,
+    };
     match (package, file) {
         (Some(_), Some(_)) => {
             anyhow::bail!("pass one of -p / -f, not both")
         }
         (Some(pkg), None) => clean_package(&pkg),
-        (None, Some(f)) => clean_deploy(&config, &f, cache, sessions),
+        (None, Some(f)) => clean_deploy(&config, &f, &wipe),
         (None, None) => {
             // Default-mode resolution. cwd-local hints in priority order:
             //   1. ./robonix_manifest.yaml   → deploy clean (sibling of `rbnx boot -f`)
@@ -80,7 +86,7 @@ pub async fn execute(
             let cwd = std::env::current_dir().context("get cwd")?;
             let deploy = cwd.join("robonix_manifest.yaml");
             if deploy.is_file() {
-                return clean_deploy(&config, &deploy, cache, sessions);
+                return clean_deploy(&config, &deploy, &wipe);
             }
             match run_package::find_package_from_cwd() {
                 Ok(pkg) => clean_package(&pkg),
@@ -116,12 +122,17 @@ fn clean_package(pkg: &Path) -> Result<()> {
     Ok(())
 }
 
-fn clean_deploy(
-    config: &Config,
-    manifest_path: &Path,
-    also_cache: bool,
-    also_sessions: bool,
-) -> Result<()> {
+/// Which kept `rbnx-boot/` subdirectories `rbnx clean -f` also removes.
+struct Wipe {
+    /// `--cache`: url-fetched package clones.
+    cache: bool,
+    /// `--sessions`: Pilot session transcripts.
+    sessions: bool,
+    /// `--llm-metrics`: per-request model usage records.
+    llm_metrics: bool,
+}
+
+fn clean_deploy(config: &Config, manifest_path: &Path, wipe: &Wipe) -> Result<()> {
     let manifest_path = manifest_path
         .canonicalize()
         .with_context(|| format!("manifest not found: {}", manifest_path.display()))?;
@@ -191,8 +202,10 @@ fn clean_deploy(
 
     // Deploy-level cleanup. Walk every entry under <manifest>/rbnx-boot/
     // and remove it. Skip cache/ unless `--cache` was given (re-cloning
-    // url-fetched packages is expensive), and sessions/ unless `--sessions`
-    // was given (it holds the transcripts that restore Pilot sessions).
+    // url-fetched packages is expensive), sessions/ unless `--sessions` was
+    // given (it holds the transcripts that restore Pilot sessions), and
+    // llm-metrics/ unless `--llm-metrics` was given (usage records a bill is
+    // computed from).
     let rbnx_boot = manifest_dir.join("rbnx-boot");
     if rbnx_boot.exists() {
         if let Ok(entries) = std::fs::read_dir(&rbnx_boot) {
@@ -200,12 +213,19 @@ fn clean_deploy(
                 let path = entry.path();
                 let name = entry.file_name();
                 let is_cache = name == "cache";
-                if is_cache && !also_cache {
+                if is_cache && !wipe.cache {
                     output::sub_step(&format!("keep {} (use --cache to wipe)", path.display()));
                     continue;
                 }
-                if name == "sessions" && !also_sessions {
+                if name == "sessions" && !wipe.sessions {
                     output::sub_step(&format!("keep {} (use --sessions to wipe)", path.display()));
+                    continue;
+                }
+                if name == "llm-metrics" && !wipe.llm_metrics {
+                    output::sub_step(&format!(
+                        "keep {} (use --llm-metrics to wipe)",
+                        path.display()
+                    ));
                     continue;
                 }
                 let label = if is_cache { " (cache)" } else { "" };
@@ -223,7 +243,7 @@ fn clean_deploy(
                 }
             }
         }
-        // If rbnx-boot/ is empty (or only the kept cache/ and sessions/ remain),
+        // If rbnx-boot/ is empty (or only the kept subdirectories remain),
         // try to rmdir it too. Best-effort — no failure surface.
         let _ = std::fs::remove_dir(&rbnx_boot);
     }
