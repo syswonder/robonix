@@ -17,6 +17,8 @@ mod capability_execution;
 mod config;
 mod dispatch;
 mod grpc_server;
+mod output_file;
+mod output_view;
 mod pb;
 mod plan_input;
 mod plan_scheduler;

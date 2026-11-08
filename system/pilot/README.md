@@ -206,3 +206,12 @@ advancing while nothing will run, so the reply is rejected
 (`empty_dispatch_problem`) and the model gets one corrective round; if it repeats,
 the turn ends with what the model said. An empty sequence with no task update is
 an answer or a question to the user.
+
+### Inspecting retained outputs
+
+Executor bounds large text before publishing feedback and supplies a file path.
+Pilot preserves that reference instead of applying a second 4096-character cut.
+The standing prompt directs the model to search using Executor `run_command`
+with `rg`, or POSIX `grep` when unavailable, then read relevant lines with `sed`.
+Search exit status 1 means no matches; larger statuses indicate an error. Reading
+a saved result never requests the original robot action again.

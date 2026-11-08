@@ -26,13 +26,17 @@ ENV ROS_LOCALHOST_ONLY=0
 ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates \
+    ca-certificates bash grep sed coreutils \
     wget gnupg && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get install -y cuda-toolkit-12-4 && \
     rm cuda-keyring_1.1-1_all.deb
+
+# Search retained tool output; POSIX grep/sed remain available if ripgrep is unavailable.
+RUN apt-get update && (apt-get install -y ripgrep || \
+    echo "ripgrep unavailable; Executor output searches will use grep")
 
 # RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
 #     bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/miniconda3 && \

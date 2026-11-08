@@ -136,3 +136,28 @@ python3 scripts/test_execute_stream.py
 
 The cross-process test uses a local fake VLM, requires `grpcio` and
 `grpcio-tools`, and retains logs under `/tmp`.
+
+## Large capability outputs
+
+Executor retains long text in `.robonix/tool-output` under `ROBONIX_WORKSPACE`
+(or its working directory). A model-visible result carries the absolute file
+path, original byte length and a preview. Verification uses the original result.
+Pilot can search the saved file with the existing `run_command` builtin using
+`rg -n`, then inspect relevant lines with `sed -n`. POSIX `grep -n -F` is the
+fallback when ripgrep is unavailable. Files are not refreshed by reading them:
+they describe the original call, not current robot state.
+
+`ROBONIX_OUTPUT_INLINE_BYTES` controls the inline UTF-8 byte threshold (default 32 KiB);
+`ROBONIX_OUTPUT_STORAGE_BYTES` bounds retained file bytes in the output directory
+(default 256 MiB). Storage failure is reported separately from action success;
+it must not cause an automatic repeat of a physical action. Retained files
+survive Executor restarts. Remove old output files only after the associated
+sessions no longer need them. The shell and Executor must share this filesystem.
+
+`make install` and `make build-executor` check shell tools and attempt ripgrep
+installation on supported package managers when already running as root. They
+do not prompt for privilege escalation; non-root installs use the POSIX fallback.
+The container includes the same fallback tools. Command stdout/stderr stream directly
+to files with bounded preview memory. Non-UTF-8 bytes remain intact in the files.
+Exhausting the storage budget reports incomplete output, preserves the partial file,
+and stops the command process group instead of returning a successful prefix.

@@ -49,6 +49,7 @@ build-pilot:
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 
 build-executor:
+	sh scripts/install-search-tools.sh
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
 
 build-liaison:
@@ -68,6 +69,7 @@ check:
 	cargo clippy --workspace -- -D warnings
 
 install:
+	sh scripts/install-search-tools.sh
 	cargo install --force --path tools/codegen   --bin robonix-codegen  $(CARGO_FLAGS)
 	cargo install --force --path system/atlas    --bin robonix-atlas    $(CARGO_FLAGS)
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)

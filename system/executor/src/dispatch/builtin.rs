@@ -206,8 +206,8 @@ struct DocArgs {
 /// Unlike `read_file`, this never touches the filesystem — atlas serves the
 /// content the provider sent at registration, so it works regardless of the
 /// provider's (possibly containerised) mount layout. Errors when the provider
-/// is unknown or registered no doc; output is truncated to keep prompt size
-/// bounded.
+/// is unknown or registered no doc. Long results are retained as files when
+/// the model-visible event is prepared.
 async fn read_capability_doc(
     call: &CapabilityCall,
     atlas: &mut AtlasClient,
@@ -240,7 +240,7 @@ async fn read_capability_doc(
                     out.error = format!("provider '{provider_id}' published no documentation");
                 } else {
                     out.success = true;
-                    out.output = truncate(&doc, 12000);
+                    out.output = doc;
                 }
             }
             None => {
@@ -283,19 +283,6 @@ fn render_provider_doc(provider: &atlas_pb::CapabilityProvider) -> String {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        // Find a valid UTF-8 char boundary at or before `max` to avoid panic.
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…(truncated, {} bytes total)", &s[..end], s.len())
-    }
-}
-
 /// JSON arguments for reading a text file within the workspace.
 #[derive(Deserialize)]
 struct ReadArgs {
@@ -336,7 +323,7 @@ struct CmdArgs {
 fn read_file(args: &str) -> anyhow::Result<String> {
     let a: ReadArgs = serde_json::from_str(args)?;
     let path = safe_resolve(&a.path)?;
-    Ok(truncate(&std::fs::read_to_string(path)?, 8000))
+    Ok(std::fs::read_to_string(path)?)
 }
 
 fn write_file(args: &str) -> anyhow::Result<String> {
@@ -411,13 +398,45 @@ async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
     let pgid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned command has no pid"))?;
-    let output = child.wait_with_output();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let output = async move {
+        let root = crate::output_file::root();
+        let inline = crate::output_file::inline_budget();
+        let budget = crate::output_file::storage_budget();
+        let capture = |stream, root| async move {
+            let result = crate::output_file::collect(stream, root, inline, budget).await;
+            if result.is_err() {
+                terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            }
+            result
+        };
+        let (stdout, stderr, status) = tokio::join!(
+            capture(
+                Box::pin(stdout) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+                root.clone()
+            ),
+            capture(
+                Box::pin(stderr) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+                root
+            ),
+            child.wait(),
+        );
+        match (stdout, stderr, status) {
+            (Ok(stdout), Ok(stderr), Ok(status)) => Ok((stdout, stderr, status)),
+            (stdout, stderr, status) => Err(std::io::Error::other(format!(
+                "stdout: {}; stderr: {}; process: {status:?}",
+                stdout.unwrap_or_else(|error| error.to_string()),
+                stderr.unwrap_or_else(|error| error.to_string())
+            ))),
+        }
+    };
     tokio::pin!(output);
 
     enum StopReason {
@@ -438,25 +457,45 @@ async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow
 
     let stop_reason = tokio::select! {
         result = &mut output => {
-            let out = result.map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
-            return format_command_output(out);
+            match result {
+                Ok((stdout, stderr, status)) => return Ok(format_command_output(&stdout, &stderr, status)),
+                Err(error) => {
+                    terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                    anyhow::bail!("command output collection failed: {error}; output is incomplete; do not automatically repeat the command");
+                }
+            }
         }
         _ = &mut canceled => StopReason::Canceled,
         _ = &mut deadline => StopReason::Timeout,
     };
 
     terminate_command_group(pgid, nix::sys::signal::Signal::SIGTERM);
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut output)
-        .await
-        .is_err()
+    let captured = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut output).await
     {
-        terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-        let _ = output.await;
-    }
+        Ok(result) => {
+            if result.is_err() {
+                terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            }
+            result
+        }
+        Err(_) => {
+            terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            output.await
+        }
+    };
+    let details = match captured {
+        Ok((stdout, stderr, status)) => format_command_output(&stdout, &stderr, status),
+        Err(error) => format!("output collection failed: {error}"),
+    };
     match stop_reason {
-        StopReason::Canceled => anyhow::bail!("command canceled"),
+        StopReason::Canceled => {
+            anyhow::bail!("command canceled; output may be incomplete\n{details}")
+        }
         StopReason::Timeout => {
-            anyhow::bail!("command timed out after {}s", COMMAND_TIMEOUT.as_secs())
+            anyhow::bail!(
+                "command timed out after {}s; output may be incomplete\n{details}",
+                COMMAND_TIMEOUT.as_secs()
+            )
         }
     }
 }
@@ -475,29 +514,47 @@ fn terminate_command_group(pgid: u32, signal: nix::sys::signal::Signal) {
     }
 }
 
-fn format_command_output(out: std::process::Output) -> anyhow::Result<String> {
-    let mut result = String::new();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !stdout.is_empty() {
-        result.push_str(&truncate(&stdout, 4000));
-    }
+fn format_command_output(stdout: &str, stderr: &str, status: std::process::ExitStatus) -> String {
+    let mut result = stdout.to_string();
     if !stderr.is_empty() {
         if !result.is_empty() {
             result.push('\n');
         }
         result.push_str("stderr: ");
-        result.push_str(&truncate(&stderr, 2000));
+        result.push_str(stderr);
     }
-    if result.is_empty() {
-        result = format!("exit code: {}", out.status.code().unwrap_or(-1));
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
     }
-    Ok(result)
+    result.push_str(&format!("exit code: {}", status.code().unwrap_or(-1)));
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shell_search_exit_codes_remain_visible_with_output() {
+        let runtime = PlanRuntime::default();
+        let no_match = run_command(
+            r#"{"command":"printf 'alpha\n' | grep -n -F -e absent"}"#,
+            &runtime,
+            "test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(no_match, "exit code: 1");
+        let failed = run_command(
+            r#"{"command":"printf 'diagnostic\n' >&2; exit 2"}"#,
+            &runtime,
+            "test",
+        )
+        .await
+        .unwrap();
+        assert!(failed.contains("stderr: diagnostic"));
+        assert!(failed.ends_with("exit code: 2"));
+    }
 
     /// Run environment-mutating tests in a child process so concurrent execution tests
     /// never inherit a workspace directory that another test removes.
@@ -615,52 +672,5 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&test_file);
         let _ = std::fs::remove_dir(&tmp);
-    }
-
-    #[test]
-    fn truncate_ascii_works() {
-        let s = "hello world";
-        assert_eq!(truncate(s, 100), "hello world");
-        let t = truncate(s, 5);
-        assert!(
-            t.starts_with("hello"),
-            "should start with 'hello', got: {t}"
-        );
-        assert!(
-            t.contains("truncated"),
-            "should contain 'truncated', got: {t}"
-        );
-    }
-
-    #[test]
-    fn truncate_multibyte_utf8_does_not_panic() {
-        // Each euro sign is 3 bytes in UTF-8
-        let s = "€€€€€€€€"; // 8 chars × 3 bytes = 24 bytes
-        // Truncate at byte 7 — in the middle of the 3rd char '€'
-        let result = truncate(s, 7);
-        // Should NOT panic, and should truncate at a valid boundary
-        assert!(
-            result.contains("truncated"),
-            "should be truncated, got: {result}"
-        );
-        // The truncated prefix should be valid UTF-8 (it is, since we're returning a String)
-        assert!(
-            result.starts_with("€€"),
-            "should keep first 2 chars, got: {result}"
-        );
-    }
-
-    #[test]
-    fn truncate_emoji_boundary() {
-        // 🚀 is 4 bytes in UTF-8
-        let s = "A🚀B🚀C"; // 1 + 4 + 1 + 4 + 1 = 11 bytes
-        // Truncate at byte 3, which is in the middle of 🚀
-        let result = truncate(s, 3);
-        assert!(result.contains("truncated"), "should be truncated");
-        // Should only keep "A" since 🚀 starts at byte 1 and ends at byte 5
-        assert!(
-            result.starts_with("A"),
-            "should start with 'A', got: {result}"
-        );
     }
 }
