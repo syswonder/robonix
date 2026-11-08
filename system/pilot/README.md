@@ -209,9 +209,6 @@ an answer or a question to the user.
 
 ### Inspecting retained outputs
 
-Executor bounds large text before publishing feedback and supplies a file path.
-Pilot preserves that reference instead of applying a second 4096-character cut.
-The standing prompt directs the model to search using Executor `run_command`
-with `rg`, or POSIX `grep` when unavailable, then read relevant lines with `sed`.
-Search exit status 1 means no matches; larger statuses indicate an error. Reading
-a saved result never requests the original robot action again.
+Executor replaces long results with a reference to a saved file (see the
+Executor README). Pilot does not cut results again; the standing prompt tells
+the model to search the file with `run_command` instead of repeating the call.

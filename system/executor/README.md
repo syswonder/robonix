@@ -139,25 +139,24 @@ The cross-process test uses a local fake VLM, requires `grpcio` and
 
 ## Large capability outputs
 
-Executor retains long text in `.robonix/tool-output` under `ROBONIX_WORKSPACE`
-(or its working directory). A model-visible result carries the absolute file
-path, original byte length and a preview. Verification uses the original result.
-Pilot can search the saved file with the existing `run_command` builtin using
-`rg -n`, then inspect relevant lines with `sed -n`. POSIX `grep -n -F` is the
-fallback when ripgrep is unavailable. Files are not refreshed by reading them:
-they describe the original call, not current robot state.
+A leaf result longer than `ROBONIX_OUTPUT_INLINE_BYTES` (UTF-8 bytes, default
+16 KiB) is saved whole under `.robonix/tool-output` in the workspace. Pilot then
+receives a JSON reference with the file path, size, line count, call ID,
+completion time and a 512-character preview, and searches the file through
+`run_command` with `rg`, or `grep` and `sed` where `rg` is not installed.
+Verification and logs use the original result. Images are never saved.
 
-`ROBONIX_OUTPUT_INLINE_BYTES` controls the inline UTF-8 byte threshold (default 32 KiB);
-`ROBONIX_OUTPUT_STORAGE_BYTES` bounds retained file bytes in the output directory
-(default 256 MiB). Storage failure is reported separately from action success;
-it must not cause an automatic repeat of a physical action. Retained files
-survive Executor restarts. Remove old output files only after the associated
-sessions no longer need them. The shell and Executor must share this filesystem.
+The directory holds at most `ROBONIX_OUTPUT_STORAGE_BYTES` (default 256 MiB);
+the oldest files are deleted to make room. A failed save returns the preview
+with `storage_error` and leaves the call's success unchanged.
 
-`make install` and `make build-executor` check shell tools and attempt ripgrep
-installation on supported package managers when already running as root. They
-do not prompt for privilege escalation; non-root installs use the POSIX fallback.
-The container includes the same fallback tools. Command stdout/stderr stream directly
-to files with bounded preview memory. Non-UTF-8 bytes remain intact in the files.
-Exhausting the storage budget reports incomplete output, preserves the partial file,
-and stops the command process group instead of returning a successful prefix.
+The inline limit is per result. Pilot's history budget comes from the model's
+context window, and history compaction cuts any single kept message to 20% of
+the history room. Keep the inline limit at or below that cut (16 KiB is about
+4,096 estimated tokens, so a room of at least 20,480 tokens) or compaction will
+drop the tail of results that were never saved. Without a declared context
+window Pilot does not compact at all.
+
+`run_command` holds at most 16 MiB of stdout and 16 MiB of stderr; beyond that
+it stops the command and marks the output incomplete. `read_file` refuses files
+over 16 MiB. Both always report the exit code where applicable.

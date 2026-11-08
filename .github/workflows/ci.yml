@@ -129,11 +129,6 @@ jobs:
       - name: cargo build
         run: cargo build --workspace
 
-      - name: Install output retrieval test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-
       # Unit tests: per-crate #[cfg(test)] mods (atlas registry, pilot helpers, …).
       # System tests: robonix-atlas/tests/end_to_end.rs spawns Atlas on an
       # ephemeral port and drives it through the SDK — exercises RegisterNode /

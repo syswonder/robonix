@@ -410,7 +410,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");
         let verifier = OverlapVerifier {
-            output_view: None,
+            // Pilot gets the already-saved reference; the verifier saw the original.
+            output_view: Some("saved-reference".into()),
             call: target_call.clone(),
             node: NodeEventContext {
                 plan_id: "p".into(),
@@ -447,7 +448,9 @@ mod tests {
         let final_state = event.node_state.unwrap();
         assert_eq!(final_state.node_index, 1);
         assert_eq!(final_state.state, RtdlNodeStateEnum::Failed as u32);
-        assert!(!final_state.leaf_result.unwrap().success);
+        let leaf = final_state.leaf_result.unwrap();
+        assert!(!leaf.success);
+        assert_eq!(leaf.output, "saved-reference");
         assert!(rx.try_recv().is_err());
         atlas_server.abort();
     }

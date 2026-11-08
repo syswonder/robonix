@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// this directory, and path traversal beyond it is rejected.
 /// > `wheatfox's note: the definition of this "workspace" is where all the built-in tools
 /// > like read_file, write_file, exec command will be ran, as the linux CWD`
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     std::env::var("ROBONIX_WORKSPACE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -323,6 +323,13 @@ struct CmdArgs {
 fn read_file(args: &str) -> anyhow::Result<String> {
     let a: ReadArgs = serde_json::from_str(args)?;
     let path = safe_resolve(&a.path)?;
+    let size = std::fs::metadata(&path)?.len();
+    if size > IN_MEMORY_OUTPUT_BYTES as u64 {
+        anyhow::bail!(
+            "{} is {size} bytes, over the read_file limit of {IN_MEMORY_OUTPUT_BYTES}; search it with run_command (rg, grep or sed) instead",
+            path.display()
+        );
+    }
     Ok(std::fs::read_to_string(path)?)
 }
 
@@ -374,6 +381,9 @@ fn list_dir(args: &str) -> anyhow::Result<String> {
 const MAX_COMMAND_LEN: usize = 8192;
 /// Command execution timeout.
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Bytes of command stdout, of command stderr, or of a read file held in memory.
+/// A command that writes more is stopped; the model is told to redirect instead.
+const IN_MEMORY_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow::Result<String> {
     let a: CmdArgs = serde_json::from_str(args)?;
@@ -404,38 +414,11 @@ async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow
     let pgid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned command has no pid"))?;
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let output = async move {
-        let root = crate::output_file::root();
-        let inline = crate::output_file::inline_budget();
-        let budget = crate::output_file::storage_budget();
-        let capture = |stream, root| async move {
-            let result = crate::output_file::collect(stream, root, inline, budget).await;
-            if result.is_err() {
-                terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-            }
-            result
-        };
-        let (stdout, stderr, status) = tokio::join!(
-            capture(
-                Box::pin(stdout) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
-                root.clone()
-            ),
-            capture(
-                Box::pin(stderr) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
-                root
-            ),
-            child.wait(),
-        );
-        match (stdout, stderr, status) {
-            (Ok(stdout), Ok(stderr), Ok(status)) => Ok((stdout, stderr, status)),
-            (stdout, stderr, status) => Err(std::io::Error::other(format!(
-                "stdout: {}; stderr: {}; process: {status:?}",
-                stdout.unwrap_or_else(|error| error.to_string()),
-                stderr.unwrap_or_else(|error| error.to_string())
-            ))),
-        }
+        let (stdout, stderr, status) =
+            tokio::join!(capture(stdout, pgid), capture(stderr, pgid), child.wait());
+        std::io::Result::Ok(format_command_output(stdout?, stderr?, status?))
     };
     tokio::pin!(output);
 
@@ -457,47 +440,48 @@ async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow
 
     let stop_reason = tokio::select! {
         result = &mut output => {
-            match result {
-                Ok((stdout, stderr, status)) => return Ok(format_command_output(&stdout, &stderr, status)),
-                Err(error) => {
-                    terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-                    anyhow::bail!("command output collection failed: {error}; output is incomplete; do not automatically repeat the command");
-                }
-            }
+            return result.map_err(|e| anyhow::anyhow!("failed to execute command: {e}"));
         }
         _ = &mut canceled => StopReason::Canceled,
         _ = &mut deadline => StopReason::Timeout,
     };
 
     terminate_command_group(pgid, nix::sys::signal::Signal::SIGTERM);
-    let captured = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut output).await
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut output)
+        .await
+        .is_err()
     {
-        Ok(result) => {
-            if result.is_err() {
-                terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-            }
-            result
-        }
-        Err(_) => {
-            terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-            output.await
-        }
-    };
-    let details = match captured {
-        Ok((stdout, stderr, status)) => format_command_output(&stdout, &stderr, status),
-        Err(error) => format!("output collection failed: {error}"),
-    };
+        terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+        let _ = output.await;
+    }
     match stop_reason {
-        StopReason::Canceled => {
-            anyhow::bail!("command canceled; output may be incomplete\n{details}")
-        }
+        StopReason::Canceled => anyhow::bail!("command canceled"),
         StopReason::Timeout => {
-            anyhow::bail!(
-                "command timed out after {}s; output may be incomplete\n{details}",
-                COMMAND_TIMEOUT.as_secs()
-            )
+            anyhow::bail!("command timed out after {}s", COMMAND_TIMEOUT.as_secs())
         }
     }
+}
+
+/// Read one command stream up to [`IN_MEMORY_OUTPUT_BYTES`]; on overflow, stop
+/// the command's process group and report the stream as cut.
+async fn capture(
+    stream: Option<impl tokio::io::AsyncRead + Unpin>,
+    pgid: u32,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    if let Some(stream) = stream {
+        stream
+            .take(IN_MEMORY_OUTPUT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+    }
+    let cut = bytes.len() > IN_MEMORY_OUTPUT_BYTES;
+    if cut {
+        bytes.truncate(IN_MEMORY_OUTPUT_BYTES);
+        terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+    }
+    Ok((bytes, cut))
 }
 
 fn terminate_command_group(pgid: u32, signal: nix::sys::signal::Signal) {
@@ -514,14 +498,27 @@ fn terminate_command_group(pgid: u32, signal: nix::sys::signal::Signal) {
     }
 }
 
-fn format_command_output(stdout: &str, stderr: &str, status: std::process::ExitStatus) -> String {
-    let mut result = stdout.to_string();
+/// Stdout, then stderr, then the exit code, which search commands need: grep
+/// and rg exit 1 for no match and higher for errors.
+fn format_command_output(
+    (stdout, stdout_cut): (Vec<u8>, bool),
+    (stderr, stderr_cut): (Vec<u8>, bool),
+    status: std::process::ExitStatus,
+) -> String {
+    let mut result = String::new();
+    if stdout_cut || stderr_cut {
+        result.push_str(&format!(
+            "output exceeded {} MiB on one stream, so the command was stopped and the output below is incomplete; redirect the output to a file and search that file instead\n",
+            IN_MEMORY_OUTPUT_BYTES >> 20
+        ));
+    }
+    result.push_str(&String::from_utf8_lossy(&stdout));
     if !stderr.is_empty() {
-        if !result.is_empty() {
+        if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }
         result.push_str("stderr: ");
-        result.push_str(stderr);
+        result.push_str(&String::from_utf8_lossy(&stderr));
     }
     if !result.is_empty() && !result.ends_with('\n') {
         result.push('\n');
@@ -554,6 +551,20 @@ mod tests {
         .unwrap();
         assert!(failed.contains("stderr: diagnostic"));
         assert!(failed.ends_with("exit code: 2"));
+    }
+
+    #[tokio::test]
+    async fn oversized_command_output_is_stopped_and_marked_incomplete() {
+        let output = run_command(
+            r#"{"command":"head -c 17000000 /dev/zero; echo never"}"#,
+            &PlanRuntime::default(),
+            "test",
+        )
+        .await
+        .unwrap();
+        assert!(output.starts_with("output exceeded 16 MiB"));
+        assert!(output.len() < IN_MEMORY_OUTPUT_BYTES + 512);
+        assert!(!output.contains("never"));
     }
 
     /// Run environment-mutating tests in a child process so concurrent execution tests
