@@ -3337,6 +3337,7 @@ dependencies = [
  "robonix-atlas",
  "robonix-codegen",
  "robonix-llm-catalog",
+ "robonix-llm-metrics",
  "robonix-scribe",
  "serde",
  "serde_json",
