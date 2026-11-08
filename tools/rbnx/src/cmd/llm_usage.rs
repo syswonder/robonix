@@ -36,6 +36,37 @@ struct Total {
     /// Calls whose input or output count was not reported; their tokens are
     /// missing from the sums.
     unreported: u64,
+    /// Reported latencies, kept only to compute the summary below.
+    #[serde(skip)]
+    latencies: Vec<u64>,
+    /// Calls that reported a latency.
+    latency_samples: u64,
+    /// Median reported latency in milliseconds.
+    latency_p50_ms: Option<u64>,
+    /// 95th percentile reported latency in milliseconds.
+    latency_p95_ms: Option<u64>,
+    /// Maximum reported latency in milliseconds.
+    latency_max_ms: Option<u64>,
+}
+
+impl Total {
+    /// Sort once, then fill the latency summary fields.
+    fn summarize_latency(&mut self) {
+        self.latency_samples = self.latencies.len() as u64;
+        if self.latencies.is_empty() {
+            return;
+        }
+        self.latencies.sort_unstable();
+        self.latency_p50_ms = Some(percentile(&self.latencies, 0.50));
+        self.latency_p95_ms = Some(percentile(&self.latencies, 0.95));
+        self.latency_max_ms = self.latencies.last().copied();
+    }
+}
+
+/// Nearest-rank percentile of a sorted slice; `fraction` is in `0..=1`.
+fn percentile(sorted: &[u64], fraction: f64) -> u64 {
+    let rank = (fraction * sorted.len() as f64).ceil() as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 pub fn execute(dir: Option<PathBuf>, boot: Option<&str>, json: bool) -> Result<()> {
@@ -112,17 +143,24 @@ fn sum(dir: &Path, boot: Option<&str>) -> Result<(Vec<Total>, u64)> {
             total.output_tokens += count("output_tokens").unwrap_or(0);
             total.cached_input_tokens += count("cached_input_tokens").unwrap_or(0);
             total.reasoning_tokens += count("reasoning_tokens").unwrap_or(0);
+            if let Some(latency) = count("latency_ms") {
+                total.latencies.push(latency);
+            }
             if count("input_tokens").is_none() || count("output_tokens").is_none() {
                 total.unreported += 1;
             }
         }
     }
-    Ok((groups.into_values().collect(), skipped))
+    let mut totals: Vec<Total> = groups.into_values().collect();
+    for total in &mut totals {
+        total.summarize_latency();
+    }
+    Ok((totals, skipped))
 }
 
 fn print_table(totals: &[Total]) {
     println!(
-        "{:<14} {:<16} {:<24} {:<24} {:>6} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}  status",
+        "{:<14} {:<16} {:<24} {:<24} {:>6} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>7} {:>8} {:>8} {:>8}  status",
         "consumer",
         "operation",
         "host",
@@ -133,7 +171,11 @@ fn print_table(totals: &[Total]) {
         "output",
         "cached",
         "reasoning",
-        "unreported"
+        "unreported",
+        "lat_n",
+        "p50_ms",
+        "p95_ms",
+        "max_ms"
     );
     for t in totals {
         let status = t
@@ -143,7 +185,7 @@ fn print_table(totals: &[Total]) {
             .collect::<Vec<_>>()
             .join(" ");
         println!(
-            "{:<14} {:<16} {:<24} {:<24} {:>6} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}  {status}",
+            "{:<14} {:<16} {:<24} {:<24} {:>6} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>7} {:>8} {:>8} {:>8}  {status}",
             t.consumer,
             t.operation,
             t.host,
@@ -154,9 +196,18 @@ fn print_table(totals: &[Total]) {
             t.output_tokens,
             t.cached_input_tokens,
             t.reasoning_tokens,
-            t.unreported
+            t.unreported,
+            t.latency_samples,
+            fmt_ms(t.latency_p50_ms),
+            fmt_ms(t.latency_p95_ms),
+            fmt_ms(t.latency_max_ms)
         );
     }
+}
+
+/// A latency cell, or `-` when no record reported one.
+fn fmt_ms(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
 }
 
 #[cfg(test)]
@@ -167,9 +218,9 @@ mod tests {
     fn sums_by_group_and_boot_and_skips_partial_lines() {
         let directory = tempfile::tempdir().unwrap();
         let records = [
-            r#"{"consumer":"pilot","operation":"plan","host":"h","model":"m","status":"ok","attempts":2,"input_tokens":10,"output_tokens":3,"cached_input_tokens":4,"boot_id":"a"}"#,
-            r#"{"consumer":"pilot","operation":"plan","host":"h","model":"m","status":"timeout","attempts":1,"input_tokens":null,"output_tokens":null,"boot_id":"a"}"#,
-            r#"{"consumer":"scene","operation":"caption","host":"h","model":"m","status":"ok","input_tokens":5,"output_tokens":1,"boot_id":"b"}"#,
+            r#"{"consumer":"pilot","operation":"plan","host":"h","model":"m","status":"ok","attempts":2,"input_tokens":10,"output_tokens":3,"cached_input_tokens":4,"latency_ms":100,"boot_id":"a"}"#,
+            r#"{"consumer":"pilot","operation":"plan","host":"h","model":"m","status":"timeout","attempts":1,"input_tokens":null,"output_tokens":null,"latency_ms":300,"boot_id":"a"}"#,
+            r#"{"consumer":"scene","operation":"caption","host":"h","model":"m","status":"ok","input_tokens":5,"output_tokens":1,"latency_ms":200,"boot_id":"b"}"#,
             r#"{"consumer":"pilot","operation":"pl"#,
         ];
         std::fs::write(directory.path().join("pilot-1.jsonl"), records.join("\n")).unwrap();
@@ -191,8 +242,18 @@ mod tests {
         );
         assert_eq!(plan.unreported, 1);
         assert_eq!(plan.status.get("timeout"), Some(&1));
+        assert_eq!(
+            (
+                plan.latency_samples,
+                plan.latency_p50_ms,
+                plan.latency_p95_ms,
+                plan.latency_max_ms
+            ),
+            (2, Some(100), Some(300), Some(300))
+        );
         // Python writers before `attempts` count as one request.
         assert_eq!(totals[1].attempts, 1);
+        assert_eq!(totals[1].latency_p50_ms, Some(200));
 
         let (totals, _) = sum(directory.path(), Some("b")).unwrap();
         assert_eq!(totals.len(), 1);
