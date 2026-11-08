@@ -76,7 +76,8 @@ class CallTest(unittest.TestCase):
 
         statuses = [(r["host"], r["status"], r["http_status"]) for r in self.records()]
         self.assertEqual(statuses, [
-            ("127.0.0.1:8000", "http_error", 429), ("", "ok", 200),
+            ("127.0.0.1:8000", "http_error", 429),
+            ("", "transport_error", 200),
             ("", "timeout", None), ("", "cancelled", None),
         ])
 
@@ -100,6 +101,13 @@ class CallTest(unittest.TestCase):
             ("http_error", 301), ("http_error", 302),
             ("http_error", 400), ("http_error", 500),
         ])
+
+    def test_unreadable_2xx_body_is_a_transport_error(self) -> None:
+        with metrics.Call("scene", "decode", "https://h/v1", "m") as call:
+            call.finish(Response(200, "not json"))
+        [record] = self.records()
+        self.assertEqual((record["status"], record["http_status"]), ("transport_error", 200))
+        self.assertIsNone(record["input_tokens"])
 
     def test_a_name_utf8_cannot_encode_still_records_the_usage(self) -> None:
         # A provider may answer with a lone surrogate; the record must survive it.
