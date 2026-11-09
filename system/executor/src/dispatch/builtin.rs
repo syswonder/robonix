@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// this directory, and path traversal beyond it is rejected.
 /// > `wheatfox's note: the definition of this "workspace" is where all the built-in tools
 /// > like read_file, write_file, exec command will be ran, as the linux CWD`
-pub(crate) fn workspace_root() -> PathBuf {
+fn workspace_root() -> PathBuf {
     std::env::var("ROBONIX_WORKSPACE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -323,8 +323,7 @@ struct CmdArgs {
 fn read_file(args: &str) -> anyhow::Result<String> {
     let a: ReadArgs = serde_json::from_str(args)?;
     let path = safe_resolve(&a.path)?;
-    let limits = crate::output_view::Limits::from_env();
-    if std::fs::metadata(&path)?.len() > limits.inline as u64 {
+    if std::fs::metadata(&path)?.len() > crate::output_view::inline_bytes() as u64 {
         // Point at the file itself rather than copying it.
         let mut reference = crate::output_view::describe(&path)?;
         reference["note"] = "Too long to inline. Search this file with run_command (rg -n, or \
@@ -384,23 +383,28 @@ const MAX_COMMAND_LEN: usize = 8192;
 /// Command execution timeout.
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 async fn run_command(args: &str, runtime: &PlanRuntime, plan_id: &str) -> anyhow::Result<String> {
+    let dir = crate::output_view::output_dir().map_err(|error| {
+        anyhow::anyhow!("command not started: the temporary directory is unusable: {error}")
+    })?;
     run_command_in(
         args,
         runtime,
         plan_id,
-        &crate::output_view::Limits::from_env(),
+        &dir,
+        crate::output_view::inline_bytes(),
     )
     .await
 }
 
-/// Run a shell command whose stdout and stderr go straight to files, so no
-/// output is held in memory or lost. Short output is read back inline; long
-/// output stays on disk and is described for searching.
+/// Run a shell command with stdout and stderr copied to files, so Executor
+/// holds almost none of its output in memory. Short output is read back
+/// inline; long output stays on disk and is described for searching.
 async fn run_command_in(
     args: &str,
     runtime: &PlanRuntime,
     plan_id: &str,
-    limits: &crate::output_view::Limits,
+    dir: &Path,
+    inline: usize,
 ) -> anyhow::Result<String> {
     let a: CmdArgs = serde_json::from_str(args)?;
     if a.command.len() > MAX_COMMAND_LEN {
@@ -414,8 +418,8 @@ async fn run_command_in(
         anyhow::bail!("command canceled before spawn");
     }
 
-    let (stdout_path, stdout) = crate::output_view::create(&limits.dir)?;
-    let (stderr_path, stderr) = crate::output_view::create(&limits.dir)?;
+    let (stdout_path, stdout_file) = crate::output_view::create(dir)?;
+    let (stderr_path, stderr_file) = crate::output_view::create(dir)?;
     let paths = [stdout_path.as_path(), stderr_path.as_path()];
     use std::process::Stdio;
     let mut command = tokio::process::Command::new("bash");
@@ -423,8 +427,8 @@ async fn run_command_in(
         .arg("-c")
         .arg(&a.command)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
     let mut child = match command.spawn() {
@@ -439,76 +443,99 @@ async fn run_command_in(
     let pgid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned command has no pid"))?;
-    let exit = child.wait();
-    tokio::pin!(exit);
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let output = async move {
+        let (stdout, stderr, status) = tokio::join!(
+            spool(stdout, stdout_file),
+            spool(stderr, stderr_file),
+            child.wait()
+        );
+        std::io::Result::Ok((stdout?.or(stderr?), status?))
+    };
+    tokio::pin!(output);
 
     enum StopReason {
         Canceled,
         Timeout,
-        StorageFull,
     }
-    let written = || -> u64 {
-        paths
-            .iter()
-            .filter_map(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
-            .sum()
-    };
-    let watch = async {
+    let canceled = async {
         loop {
             if runtime.is_cancelled(plan_id).await {
-                break StopReason::Canceled;
-            }
-            if written() > limits.budget {
-                break StopReason::StorageFull;
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     };
-    tokio::pin!(watch);
+    tokio::pin!(canceled);
     let deadline = tokio::time::sleep(COMMAND_TIMEOUT);
     tokio::pin!(deadline);
 
     let stop_reason = tokio::select! {
-        status = &mut exit => {
-            let status = status.map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
-            return Ok(command_result(limits, &paths, status.code())?);
+        result = &mut output => {
+            let (failure, status) =
+                result.map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
+            return Ok(command_result(&paths, status.code(), failure, inline)?);
         }
-        reason = &mut watch => reason,
+        _ = &mut canceled => StopReason::Canceled,
         _ = &mut deadline => StopReason::Timeout,
     };
 
     terminate_command_group(pgid, nix::sys::signal::Signal::SIGTERM);
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut exit)
-        .await
-        .is_err()
+    let finished = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut output).await
     {
-        terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
-        let _ = exit.await;
-    }
+        Ok(result) => result,
+        Err(_) => {
+            terminate_command_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            output.await
+        }
+    };
     let reason = match stop_reason {
         StopReason::Canceled => "command canceled".to_owned(),
         StopReason::Timeout => format!("command timed out after {}s", COMMAND_TIMEOUT.as_secs()),
-        StopReason::StorageFull => format!(
-            "command stopped after writing more than the {}-byte output storage budget",
-            limits.budget
-        ),
     };
+    let failure = finished.ok().and_then(|(failure, _)| failure);
     anyhow::bail!(
         "{reason}; output written before it stopped:\n{}",
-        command_result(limits, &paths, None)?
+        command_result(&paths, None, failure, inline)?
     )
 }
 
+/// Copy a command stream to its file. A failed write, such as a full temporary
+/// directory, is returned and the rest is drained, so storing output never
+/// blocks or breaks the command.
+async fn spool(
+    stream: Option<impl tokio::io::AsyncRead + Unpin>,
+    file: std::fs::File,
+) -> std::io::Result<Option<std::io::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut file = tokio::fs::File::from_std(file);
+    let mut failure = None;
+    if let Some(mut stream) = stream {
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let count = stream.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            if failure.is_none() {
+                failure = file.write_all(&buffer[..count]).await.err();
+            }
+        }
+    }
+    Ok(failure.or(file.flush().await.err()))
+}
+
 /// Inline both streams when together they fit the inline limit (deleting the
-/// files); otherwise keep the non-empty files and describe them.
+/// files); otherwise keep the non-empty files and describe them. A storage
+/// failure is always reported, because the files are then incomplete.
 fn command_result(
-    limits: &crate::output_view::Limits,
-    paths: &[&std::path::Path; 2],
+    paths: &[&Path; 2],
     code: Option<i32>,
+    failure: Option<std::io::Error>,
+    inline: usize,
 ) -> std::io::Result<String> {
     let sizes = paths.map(|path| std::fs::metadata(path).map_or(0, |metadata| metadata.len()));
-    if sizes.iter().sum::<u64>() <= limits.inline as u64 {
+    if failure.is_none() && sizes.iter().sum::<u64>() <= inline as u64 {
         let text =
             format_command_output(&std::fs::read(paths[0])?, &std::fs::read(paths[1])?, code);
         paths
@@ -516,12 +543,16 @@ fn command_result(
             .for_each(|path| drop(std::fs::remove_file(path)));
         return Ok(text);
     }
-    crate::output_view::evict_oldest(&limits.dir, limits.budget, paths)?;
     let mut reference = serde_json::json!({
         "observed_unix": crate::output_view::now_unix(),
         "exit_code": code,
         "note": crate::output_view::SEARCH_NOTE,
     });
+    if let Some(error) = failure {
+        robonix_scribe::warn!("[executor] command output is incomplete: {error}");
+        reference["storage_error"] = error.to_string().into();
+        reference["note"] = crate::output_view::STORAGE_NOTE.into();
+    }
     for (name, path, size) in [
         ("stdout", paths[0], sizes[0]),
         ("stderr", paths[1], sizes[1]),
@@ -571,35 +602,33 @@ fn format_command_output(stdout: &[u8], stderr: &[u8], code: Option<i32>) -> Str
 mod tests {
     use super::*;
 
-    async fn run(command: &str, limits: &crate::output_view::Limits) -> anyhow::Result<String> {
+    async fn run(command: &str, dir: &Path, inline: usize) -> anyhow::Result<String> {
         let args = serde_json::json!({ "command": command }).to_string();
-        run_command_in(&args, &PlanRuntime::default(), "test", limits).await
+        run_command_in(&args, &PlanRuntime::default(), "test", dir, inline).await
     }
 
     #[tokio::test]
     async fn short_output_is_inline_with_its_exit_code() {
         let dir = crate::output_view::tests::TempDir::new();
-        let limits = dir.limits(1024, 1 << 20);
-        let no_match = run("printf 'alpha\\n' | grep -n -F -e absent", &limits).await;
+        let no_match = run("printf 'alpha\\n' | grep -n -F -e absent", &dir.0, 1024).await;
         assert_eq!(no_match.unwrap(), "exit code: 1");
-        let failed = run("printf 'diagnostic\\n' >&2; exit 2", &limits)
+        let failed = run("printf 'diagnostic\\n' >&2; exit 2", &dir.0, 1024)
             .await
             .unwrap();
         assert_eq!(failed, "stderr: diagnostic\nexit code: 2");
-        assert_eq!(std::fs::read_dir(&limits.dir).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
     }
 
     #[tokio::test]
     async fn long_output_is_written_to_disk_whole_and_the_command_runs_once() {
         let dir = crate::output_view::tests::TempDir::new();
-        let limits = dir.limits(1024, 64 << 20);
         let count = dir.0.join("count");
         let command = format!(
             "echo run >> '{}'; head -c 20000000 /dev/zero | tr '\\0' x; echo TAIL-972",
             count.display()
         );
         let reference: serde_json::Value =
-            serde_json::from_str(&run(&command, &limits).await.unwrap()).unwrap();
+            serde_json::from_str(&run(&command, &dir.0, 1024).await.unwrap()).unwrap();
         assert_eq!(reference["exit_code"], 0);
         assert!(reference.get("stderr").is_none());
         assert_eq!(reference["stdout"]["bytes"], 20_000_009);
@@ -609,20 +638,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(count).unwrap(), "run\n");
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn output_over_the_storage_budget_stops_the_command_and_keeps_what_was_written() {
+    async fn a_full_disk_is_reported_and_the_stream_is_still_drained() {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let data = vec![b'x'; 300_000];
+        let failure = spool(Some(&data[..]), full).await.unwrap().unwrap();
+        assert_eq!(failure.raw_os_error(), Some(28));
+    }
+
+    #[test]
+    fn storage_failure_keeps_what_was_written_and_tells_the_model() {
         let dir = crate::output_view::tests::TempDir::new();
-        let limits = dir.limits(1024, 1 << 20);
-        let error = run("while :; do echo endless-output-line; done", &limits)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.starts_with("command stopped after writing more than the 1048576-byte"));
-        let reference: serde_json::Value =
-            serde_json::from_str(error.split_once('\n').unwrap().1).unwrap();
-        let file = reference["stdout"]["file"].as_str().unwrap();
-        assert!(std::fs::metadata(file).unwrap().len() > 1 << 20);
-        assert!(reference["exit_code"].is_null());
+        let (stdout, stderr) = (dir.0.join("out"), dir.0.join("err"));
+        std::fs::write(&stdout, "partial\n").unwrap();
+        std::fs::write(&stderr, "").unwrap();
+        let text = command_result(
+            &[stdout.as_path(), stderr.as_path()],
+            Some(0),
+            Some(std::io::Error::from_raw_os_error(28)),
+            1024,
+        )
+        .unwrap();
+        let reference: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(!reference["storage_error"].as_str().unwrap().is_empty());
+        assert_eq!(reference["stdout"]["bytes"], 8);
+        assert!(stdout.exists());
     }
 
     /// Run environment-mutating tests in a child process so concurrent execution tests

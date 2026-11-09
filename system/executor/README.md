@@ -140,26 +140,27 @@ The cross-process test uses a local fake VLM, requires `grpcio` and
 ## Large capability outputs
 
 A leaf result longer than `ROBONIX_OUTPUT_INLINE_BYTES` (UTF-8 bytes, default
-16 KiB) is saved whole under `.robonix/tool-output` in the workspace. Pilot then
-receives a JSON reference with the file path, size, line count, completion time
-and a 512-character preview, and searches the file through `run_command` with
-`rg`, or `grep` and `sed` where `rg` is not installed. Verification and logs use
-the original result. Images are never saved.
+32 KiB, read from the environment Executor starts with) is saved whole in a private directory under the system temporary
+directory (`TMPDIR`, usually `/tmp`). Pilot then receives a JSON reference with
+the file path, size, line count, completion time and a 512-character preview, and
+searches the file through `run_command` with `rg`, or `grep` and `sed` where `rg`
+is not installed. Verification and logs use the original result. Images are never
+saved.
 
-`run_command` connects the command's stdout and stderr directly to files in the
-same directory, so Executor holds none of it in memory and none is dropped. Output
-that fits the inline limit is read back and the files are deleted. `read_file`
-returns a reference to a large file instead of its contents.
+`run_command` copies the command's stdout and stderr to files in that directory,
+so Executor holds almost none of it in memory. Output that fits the inline limit
+is read back and the files are deleted. `read_file` returns a reference to a large
+file instead of its contents.
 
-The directory holds at most `ROBONIX_OUTPUT_STORAGE_BYTES` (default 256 MiB); the
-oldest files are deleted to make room. A command that writes more than the whole
-budget is stopped, like a timeout, and what it wrote is kept and reported. A
-failed save returns the preview with `storage_error` and leaves the call's
-success unchanged.
+Executor sets no size limit and never deletes saved files: available space is
+whatever the temporary directory has, and the operating system clears it. If a
+write fails, for example because the directory is full, the command still runs to
+completion, Executor logs a warning, and the result carries `storage_error` so the
+model tells the user. A failed save does not change the call's success.
 
 The inline limit is per result. Pilot's history budget comes from the model's
 context window, and history compaction cuts any single kept message to 20% of the
-history room. Keep the inline limit at or below that cut (16 KiB is about 4,096
-estimated tokens, so a room of at least 20,480 tokens) or compaction will drop
+history room. Keep the inline limit at or below that cut (32 KiB is about 8,192
+estimated tokens, so a room of at least 40,960 tokens) or compaction will drop
 the tail of results that were never saved. Without a declared context window
 Pilot does not compact at all.
