@@ -4,10 +4,54 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
 ### Added
 
-- **CLI (rbnx):** A deployment entry can say `status: disabled` (`enabled`, or no `status`, is on) to stay in the manifest, its `url`, `branch` and `config` kept, while nothing builds, starts or updates it; `rbnx boot` lists it as skipped, soma does not start it. Of the built-in system components pilot, liaison and vitals can be disabled; atlas, executor and soma cannot.
-- **Config specs:** A package's `config.spec` may now be strict: YAML with `specVersion: 1` and a small JSON Schema subset (`type`, `description`, `default`, `enum`, `minimum`, `maximum`, `items`, nested `properties`, `required`) plus `x-secret`, `x-group` and `x-provider` (a field that names another entry of the deployment, and the contract it must provide), from which tools such as Robonix Hub build the configuration form. Free-text specs are still accepted. Every system and bundled service now ships a strict spec, checked by `rbnx`'s tests; writing them corrected several defaults and accepted values the old text documented wrongly (Speech, Voiceprint, Scene).
+- **Pilot:** Add multi-task management, per-task execution tracking and session recovery. [#250](https://github.com/syswonder/robonix/pull/250), [#281](https://github.com/syswonder/robonix/pull/281)
+- **Pilot:** Support constrained RTDL generation on model backends that accept JSON Schema. [#250](https://github.com/syswonder/robonix/pull/250), [#272](https://github.com/syswonder/robonix/pull/272)
+- **Executor:** Dispatch executable RTDL steps while the model is still generating the plan. [#280](https://github.com/syswonder/robonix/pull/280)
+- **Executor:** Verify action effects with before-and-after camera images and scene pose checks; allow verification to overlap subsequent execution. [#242](https://github.com/syswonder/robonix/pull/242), [#251](https://github.com/syswonder/robonix/pull/251), [#294](https://github.com/syswonder/robonix/pull/294)
+- **Scene:** Add DualMap as an experimental perception backend, a bilingual Rerun semantic-map viewer and object-correction interfaces. [#234](https://github.com/syswonder/robonix/pull/234), [#243](https://github.com/syswonder/robonix/pull/243), [#248](https://github.com/syswonder/robonix/pull/248)
+- **Chronos:** Add Rust and Python time interfaces, caller-supplied simulation time, clock-quality checks, and stale-time and backward-time detection. [#283](https://github.com/syswonder/robonix/pull/283), [#298](https://github.com/syswonder/robonix/pull/298)
+- **CLI (rbnx):** Support disabled manifest entries while preserving their configuration; Atlas, Executor and Soma remain required. Record deployed package commits. [#247](https://github.com/syswonder/robonix/pull/247)
+- **Config specs:** Add strict configuration schemas for validation and configuration forms, while retaining free-text specs. [#264](https://github.com/syswonder/robonix/pull/264)
+- **Capability Contracts and Code Generation:** Declare capability transports and add `llm_callable` metadata to control which contracts the planner sees. [#242](https://github.com/syswonder/robonix/pull/242), [#296](https://github.com/syswonder/robonix/pull/296)
+- **Testing:** Add 42 Pilot model-benchmark cases across 7 capability dimensions and a [Hub model leaderboard](https://hub.robonix.ai/discover/models). [#282](https://github.com/syswonder/robonix/pull/282), [#299](https://github.com/syswonder/robonix/pull/299)
+- **Mapping:** Add slam_toolbox 2D laser mapping and global localization with visual confirmation of candidate poses. [service-map-rbnx#24](https://github.com/syswonder/service-map-rbnx/pull/24), [#31](https://github.com/syswonder/service-map-rbnx/pull/31), [#35](https://github.com/syswonder/service-map-rbnx/pull/35), [#36](https://github.com/syswonder/service-map-rbnx/pull/36), [#37](https://github.com/syswonder/service-map-rbnx/pull/37)
+- **Navigation:** Integrate depth-camera obstacle observations with lidar and expose the global costmap through Atlas. [service-navigation-rbnx#19](https://github.com/syswonder/service-navigation-rbnx/pull/19), [#21](https://github.com/syswonder/service-navigation-rbnx/pull/21), [#267](https://github.com/syswonder/robonix/pull/267), [#275](https://github.com/syswonder/robonix/pull/275)
+- **Ecosystem:** Launch [Robonix Hub](https://hub.robonix.ai) for community packages and robot configurations, and Robonix Console for one-command installation and web-based deployment configuration, service control, logs, configuration history, rollback, backup and sharing. See the [Hub and Console guide](https://book.robonix.ai/getting-started/hub-console). [#305](https://github.com/syswonder/robonix/pull/305), [robonix-book#29](https://github.com/syswonder/robonix-book/pull/29)
+- **Clients:** Add layered perception views, an RTDL execution tree, per-task plans and calls, service pages, bilingual interfaces and robot-health displays. Add [Robonix Client for Android](https://github.com/syswonder/robonix-client-android) with voice task submission, perception views, RTDL execution, robot health and a 3D robot model. [robonix-client#12](https://github.com/syswonder/robonix-client/pull/12), [#13](https://github.com/syswonder/robonix-client/pull/13), [#14](https://github.com/syswonder/robonix-client/pull/14), [#15](https://github.com/syswonder/robonix-client/pull/15), [#16](https://github.com/syswonder/robonix-client/pull/16)
+- **Robot support:** Add MirrorMe BPX, JAKA Mini with TG-9801 or LinkerHand O6, AUBO i5H, and AgileX Piper on RK3588 with NPU-based object detection. [robonix-package-catalog#46](https://github.com/syswonder/robonix-package-catalog/pull/46), [#52](https://github.com/syswonder/robonix-package-catalog/pull/52), [#54](https://github.com/syswonder/robonix-package-catalog/pull/54), [#69](https://github.com/syswonder/robonix-package-catalog/pull/69), [#74](https://github.com/syswonder/robonix-package-catalog/pull/74)
+- **Simulation (MuJoCo):** Add Unitree Go2, AgileX Ranger with Piper, and Piper with LinkerHand O6 deployments. [robonix-package-catalog#45](https://github.com/syswonder/robonix-package-catalog/pull/45), [#47](https://github.com/syswonder/robonix-package-catalog/pull/47), [#60](https://github.com/syswonder/robonix-package-catalog/pull/60)
+- **Hardware integration:** Extend LinkerHand O6 and Orbbec camera integration, add camera and lidar primitives for Lynx S10, and add seven sport-action skills for Unitree Go2. [#289](https://github.com/syswonder/robonix/pull/289), [robonix-package-catalog#53](https://github.com/syswonder/robonix-package-catalog/pull/53), [#56](https://github.com/syswonder/robonix-package-catalog/pull/56), [#68](https://github.com/syswonder/robonix-package-catalog/pull/68)
+- **Deployment:** Support Jetson Orin Nano and Orin NX deployments, RK3588 for AgileX Piper, and x86_64 Linux development and simulation.
+
+### Changed
+
+- **Pilot:** Use a cache-stable prompt layout and bounded history compaction to reduce model API overhead. [#250](https://github.com/syswonder/robonix/pull/250)
+- **Scene:** Add optional TensorRT inference for ConceptGraphs, ONNX Runtime text encoders and shared NumPy fusion while retaining Torch as the default. Single-image inference peak process memory decreases from approximately 2.8 GB to 0.7 GB, about 74%. [#312](https://github.com/syswonder/robonix/pull/312)
+- **Speech and Audio:** Use int8 Paraformer streaming ASR and CAM++ voiceprint recognition. Peak ASR memory decreases from 3981 MB to 396 MB, about 90%; peak voiceprint memory decreases from 666 MB to 127 MB, about 81%. Upgrade Speech and Liaison together. [#312](https://github.com/syswonder/robonix/pull/312)
+- **Mapping:** Improve single-scan Top-1 localization success on Intel Lab, Freiburg 079 and MIT CSAIL from 73.6%, 70.2% and 64.6% to 96.2%, 97.4% and 89.0%, respectively. [service-map-rbnx#31](https://github.com/syswonder/service-map-rbnx/pull/31), [#35](https://github.com/syswonder/service-map-rbnx/pull/35), [#36](https://github.com/syswonder/service-map-rbnx/pull/36), [#37](https://github.com/syswonder/service-map-rbnx/pull/37)
+- **Exploration:** Integrate MRTSP planning and map optimization. [skill-explore-rbnx#9](https://github.com/syswonder/skill-explore-rbnx/pull/9)
+- **Point-cloud-to-laser-scan service:** Optimize the conversion pipeline.
+
+### Fixed
+
+- **Pilot:** Recover from failed leaves during streamed generation without redispatching completed work, retain failure feedback, and retry a failed model-stream connection once. [#302](https://github.com/syswonder/robonix/pull/302)
+- **Runtime:** Report provider exits promptly, clean up failed starts and interrupted boot, and preserve cancellation and terminal-state handling. [#228](https://github.com/syswonder/robonix/pull/228)
+- **Scene:** Preserve the active map binding, annotations and photos when saving another named map, retain map geometry across corrected-pose gaps, and restore semantic objects after restart. [7fb25b7d](https://github.com/syswonder/robonix/commit/7fb25b7d865b6753544b1daffdcafe46bdc9b533)
+- **Scene:** Align TensorRT YOLO NMS with Torch best-class selection, correct frame handling, retain DualMap tracks for the intended keyframe window, and recover Rerun views after restart. [#312](https://github.com/syswonder/robonix/pull/312), [55d0baa3](https://github.com/syswonder/robonix/commit/55d0baa32a0efc46c5adcdc3f43b63bf606e41ea)
+- **Scene and Memory:** Reuse inference for unchanged frames, handle malformed upstream messages, and improve state recovery and concurrent access. [#231](https://github.com/syswonder/robonix/pull/231), [#245](https://github.com/syswonder/robonix/pull/245)
+- **Navigation:** Improve velocity control and spin timeouts; retain nearby obstacles during Webots costmap recovery. [service-navigation-rbnx#15](https://github.com/syswonder/service-navigation-rbnx/pull/15), [#16](https://github.com/syswonder/service-navigation-rbnx/pull/16), [e2a13183](https://github.com/syswonder/robonix/commit/e2a13183952c6fa6172fd71b3fc1e234d02b28a2)
+- **Speech and Audio:** Improve long-text Tencent TTS playback and Edge TTS compatibility. [#230](https://github.com/syswonder/robonix/pull/230), [#291](https://github.com/syswonder/robonix/pull/291)
+- **Packages:** Isolate subscription callbacks. [#293](https://github.com/syswonder/robonix/pull/293)
+- **Simulation (Webots):** Improve viewer asset loading and depth-frame registration; pin tf2 to 0.25.24. [#240](https://github.com/syswonder/robonix/pull/240), [#256](https://github.com/syswonder/robonix/pull/256), [#270](https://github.com/syswonder/robonix/pull/270)
+- **Build:** Support LoongArch64 builds with a system `protoc`. [#249](https://github.com/syswonder/robonix/pull/249)
+
+### Removed
+
+- **Voiceprint:** Remove the ECAPA-TDNN backend in favor of CAM++. Re-enroll existing speakers for the new embedding model; enrollment files are preserved during loading. [#312](https://github.com/syswonder/robonix/pull/312)
 
 ## [1.1.0-beta.1] - 2026-10-01
 
