@@ -248,5 +248,17 @@
   "outdoor.waiting_for_eligible_state": "底盘状态未满足切换条件",
   "outdoor.gait_feedback_stale": "步态反馈过期",
   "outdoor.gait_not_confirmed_retrying": "等待实际步态反馈",
-  "outdoor.unknown_route_gait": "路线步态未知，请检查地图"
+  "outdoor.unknown_route_gait": "路线步态未知，请检查地图",
+  "outdoor.localizationGrade": "当前定位",
+  "outdoor.rtkGrade": "RTK 解状态",
+  "outdoor.initializing": "初始化中",
+  "outdoor.fault": "故障",
+  "outdoor.unavailable": "不可用",
+  "outdoor.inertialMode": "是否纯惯导",
+  "outdoor.inertialElapsed": "本次惯导时长",
+  "outdoor.fusionElapsed": "距上次固定解",
+  "outdoor.seconds": "秒",
+  "outdoor.inertial": "纯惯导",
+  "outdoor.yes": "是",
+  "outdoor.no": "否"
 }

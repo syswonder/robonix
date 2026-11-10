@@ -2,6 +2,7 @@
 """Scene's outdoor map facade; geometry stays in its map service."""
 import asyncio
 from collections import OrderedDict
+import logging
 import time
 import uuid
 
@@ -89,6 +90,11 @@ class OutdoorScene:
                 await self.synchronize()
             except Exception as error:
                 self.hold["reason"] = str(error)
+            if self.navigation:
+                try:
+                    await asyncio.to_thread(self.navigation.status)
+                except Exception as error:
+                    logging.getLogger(__name__).warning("Outdoor navigation status unavailable: %s", error)
             await asyncio.sleep(.5)
 
     async def state(self, request):
