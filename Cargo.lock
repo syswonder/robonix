@@ -3325,6 +3325,7 @@ name = "robonix-scribe"
 version = "1.1.0"
 dependencies = [
  "libc",
+ "robonix-chronos-clock",
  "serde",
  "serde_json",
  "tempfile",
