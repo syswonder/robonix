@@ -828,7 +828,7 @@ mod tests {
     /// Production finalization requires all envelope fields and validates completed task metadata.
     #[test]
     fn finish_enforces_envelope_schema() {
-        let valid = serde_json::json!({
+        let mut valid = serde_json::json!({
             "content": "done", "rtdl_description": "", "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [],
             "rtdl": {"op": "sequence", "children": []}
         });
@@ -871,6 +871,13 @@ mod tests {
         let (envelope, meta_op) = p.finish().unwrap();
         assert!(envelope.task_fields.updates.is_empty());
         assert!(meta_op.is_none());
+
+        for key in tasks::REPLY_FIELDS {
+            valid.as_object_mut().unwrap().remove(key);
+        }
+        let mut p = parser();
+        p.push(&valid.to_string()).unwrap();
+        assert_eq!(p.finish().unwrap().0.task_fields, TaskFields::default());
     }
 
     /// Finalization preserves complete metadata and builds no-call trees without wire traffic.
@@ -1226,6 +1233,8 @@ mod tests {
     #[test]
     fn invalid_envelope_and_call_fields_never_commit() {
         for raw in [
+            r#"Let me check the scene first.
+{"content":"","rtdl_description":"check","message_updates":[],"rtdl_parent_task_id":"T1","rtdl":{"op":"do","cap":"run"},"task_updates":[]}"#,
             r#"{"content":7,"rtdl":{"op":"do","description":"d","cap":"run","args":{}}}"#,
             r#"{"task_update":[0,1],"rtdl":{}}"#,
             r#"{"task_update":{"goal":[0,1]}}"#,
@@ -1236,6 +1245,7 @@ mod tests {
             let mut p = parser();
             assert!(p.push(raw).is_err(), "{raw}");
             assert!(!p.committed());
+            assert!(p.take_messages().is_empty());
         }
     }
 

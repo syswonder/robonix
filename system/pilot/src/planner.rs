@@ -2140,96 +2140,6 @@ pub(crate) struct RtdlEnvelope {
     pub(crate) task_fields: TaskFields,
 }
 
-#[cfg(test)]
-fn extract_json_object(raw: &str) -> Option<&str> {
-    let bytes = raw.as_bytes();
-    let start = bytes.iter().position(|&b| b == b'{')?;
-    let mut depth = 0usize;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The reply fields besides the task fields of `tasks::REPLY_FIELDS`.
-#[cfg(test)]
-const REPLY_CORE_FIELDS: [&str; 3] = ["content", "rtdl_description", "rtdl"];
-
-/// Tolerates a prose preamble or trailing commentary around the JSON object
-/// (a common model habit, e.g. a narration line then the JSON on the next
-/// line) by extracting the first balanced `{...}` before parsing; the raw
-/// string is used unchanged when no object is found, so a genuinely
-/// JSON-less reply still surfaces the original parse error.
-///
-/// Fails if `raw` is not valid JSON, the root is not an object, a field is
-/// unknown or one of `content`, `rtdl_description`, `rtdl` is missing,
-/// `content` / `rtdl_description` are not strings, `rtdl` is not an object, or
-/// a task field is malformed (`tasks::parse_task_fields`).
-#[cfg(test)]
-fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
-    let candidate = extract_json_object(raw).unwrap_or(raw);
-    let v: serde_json::Value = serde_json::from_str(candidate)?;
-    let obj = v
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("assistant response must be a JSON object"))?;
-    if let Some(key) = obj.keys().find(|key| {
-        !REPLY_CORE_FIELDS.contains(&key.as_str()) && !tasks::REPLY_FIELDS.contains(&key.as_str())
-    }) {
-        anyhow::bail!("assistant response has an unknown field `{key}`");
-    }
-    if let Some(key) = REPLY_CORE_FIELDS
-        .iter()
-        .find(|key| !obj.contains_key(**key))
-    {
-        anyhow::bail!(
-            "assistant response must contain `content`, `rtdl_description` and `rtdl`; `{key}` is missing"
-        );
-    }
-    let content = obj
-        .get("content")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("assistant `content` must be a string"))?
-        .to_string();
-    let rtdl_description = obj
-        .get("rtdl_description")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow::anyhow!("assistant `rtdl_description` must be a string"))?
-        .to_string();
-    let rtdl = obj
-        .get("rtdl")
-        .filter(|x| x.is_object())
-        .ok_or_else(|| anyhow::anyhow!("assistant `rtdl` must be an object"))?
-        .clone();
-    Ok(RtdlEnvelope {
-        content,
-        rtdl_description,
-        rtdl,
-        task_fields: tasks::parse_task_fields(obj)?,
-    })
-}
-
 /// Distinguishes this Pilot process's ids from ids restored with earlier sessions.
 pub static RUN_TAG: LazyLock<String> =
     LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
@@ -2763,11 +2673,11 @@ mod tests {
         UsageTotals, append_request_context, append_steer, assemble_planning_messages,
         build_capability_target_map, build_display_capabilities, build_forest_block,
         compact_tool_result, configured_vlm_idle_timeout, executor_active_snapshot,
-        extract_json_object, feed_results_into_history, format_plan_summary, invalid_cancel_target,
-        is_control_only, is_legacy_plan_control_contract, is_terminal_executor_state,
-        parse_meta_plan_op, parse_rtdl_assistant_response, record_dispatched_plan,
-        repeat_result_message, rtdl_node_kind_name, rtdl_state_name, should_replan_after_plan_done,
-        skip_memory_prefetch, task_is_session_end, upsert_terminal_result,
+        feed_results_into_history, format_plan_summary, invalid_cancel_target, is_control_only,
+        is_legacy_plan_control_contract, is_terminal_executor_state, parse_meta_plan_op,
+        record_dispatched_plan, repeat_result_message, rtdl_node_kind_name, rtdl_state_name,
+        should_replan_after_plan_done, skip_memory_prefetch, task_is_session_end,
+        upsert_terminal_result,
     };
     use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
     use crate::pb::pilot::{
@@ -2775,7 +2685,6 @@ mod tests {
     };
     use crate::prompt::{MAX_INLINE_DESCRIPTION_CHARS, summarize_description};
     use crate::rtdl_stream::{RtdlIncrementalParser, next_op_id};
-    use crate::tasks::{TaskFields, TaskRef};
     use crate::vlm::{Message, VlmUsage};
     use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
@@ -4082,78 +3991,6 @@ mod tests {
         assert_eq!(rtdl_node_kind_name(RTDL_PARALLEL), "parallel");
         assert_eq!(rtdl_node_kind_name(RTDL_DO), "do");
         assert_eq!(rtdl_node_kind_name(99), "unknown(99)");
-    }
-
-    #[test]
-    fn rtdl_response_requires_exact_top_level_keys() {
-        // Old two-key envelope is now rejected.
-        let err = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl":{"op":"sequence","children":[]}}"#,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("`rtdl_description` is missing"),
-            "{err}"
-        );
-        let err = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl_description":"","rtdl":{"op":"sequence","children":[]},"plan":1}"#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("unknown field `plan`"), "{err}");
-    }
-
-    #[test]
-    fn rtdl_response_parses_full_envelope() {
-        let env = parse_rtdl_assistant_response(
-            r#"{
-                "content":"on it",
-                "message_updates":[{"message_id":"m2","parent_task_id":"new"}],
-                "rtdl_parent_task_id":"new",
-                "rtdl_description":"fetch water",
-                "rtdl":{"op":"sequence","children":[]},
-                "task_updates":[{"task_id":"new","goal":"bring water","success_criterion":"cup by user"}]
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(env.content, "on it");
-        assert_eq!(env.rtdl_description, "fetch water");
-        assert!(env.rtdl.is_object());
-        assert_eq!(env.task_fields.messages.len(), 1);
-        assert_eq!(env.task_fields.task, Some(TaskRef::New));
-        assert_eq!(
-            env.task_fields.updates[0].goal.as_deref(),
-            Some("bring water")
-        );
-    }
-
-    #[test]
-    fn rtdl_response_tolerates_prose_preamble() {
-        // Observed real failure: the model narrates a line, then emits the JSON
-        // on the next line. The leading prose must be stripped, not rejected.
-        let env = parse_rtdl_assistant_response(
-            "Let me take a photo to check the scene, then turn left.\n{\"content\":\"on it\",\"rtdl_description\":\"turn\",\"rtdl\":{\"op\":\"sequence\",\"children\":[]}}",
-        )
-        .unwrap();
-        assert_eq!(env.content, "on it");
-        assert_eq!(env.task_fields, TaskFields::default());
-    }
-
-    #[test]
-    fn extract_json_object_skips_prose_and_braces_in_strings() {
-        // Leading prose dropped; a `}` inside a string value does not end it.
-        let got = extract_json_object("hi: {\"a\":\"x}y\",\"b\":1} trailing");
-        assert_eq!(got, Some("{\"a\":\"x}y\",\"b\":1}"));
-        // No object at all → None, so the caller still hits the real parse error.
-        assert_eq!(extract_json_object("no json here"), None);
-    }
-
-    #[test]
-    fn rtdl_response_without_task_fields_changes_no_task() {
-        let env = parse_rtdl_assistant_response(
-            r#"{"content":"x","rtdl_description":"","rtdl":{"op":"sequence","children":[]}}"#,
-        )
-        .unwrap();
-        assert_eq!(env.task_fields, TaskFields::default());
     }
 
     #[tokio::test]
