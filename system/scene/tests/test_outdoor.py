@@ -2,6 +2,7 @@
 """Outdoor facade identity and cross-provider regressions, without ROS."""
 import copy
 import json
+import asyncio
 
 import pytest
 from starlette.testclient import TestClient
@@ -10,6 +11,26 @@ from scene_service.annotations import AnnotationStore
 from scene_service.map_meta import MapMetaStore
 from scene_service.state.object_registry import ObjectRegistry
 from scene_service.web import make_app
+
+
+def test_navigation_poll_failure_does_not_hold_indoor_map(monkeypatch, caplog):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from scene_service.outdoor import OutdoorScene
+
+    hold = {"reason": None}
+    navigation = SimpleNamespace(status=Mock(side_effect=OSError("navigation unavailable")))
+    facade = OutdoorScene(None, {"map_type": "indoor"}, None, None, None, None, hold, navigation)
+
+    async def finish(_):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "sleep", finish)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(facade.watch())
+    navigation.status.assert_called_once()
+    assert hold["reason"] is None
+    assert "Outdoor navigation status unavailable" in caplog.text
 
 
 @pytest.fixture

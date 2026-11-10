@@ -248,5 +248,17 @@
   "outdoor.waiting_for_eligible_state": "Waiting for chassis eligibility",
   "outdoor.gait_feedback_stale": "Gait feedback is stale",
   "outdoor.gait_not_confirmed_retrying": "Waiting for actual gait feedback",
-  "outdoor.unknown_route_gait": "Unknown route gait; inspect the map"
+  "outdoor.unknown_route_gait": "Unknown route gait; inspect the map",
+  "outdoor.localizationGrade": "Localization",
+  "outdoor.rtkGrade": "RTK solution",
+  "outdoor.initializing": "Initializing",
+  "outdoor.fault": "Fault",
+  "outdoor.unavailable": "Unavailable",
+  "outdoor.inertialMode": "Inertial only",
+  "outdoor.inertialElapsed": "Current inertial duration",
+  "outdoor.fusionElapsed": "Since last fixed solution",
+  "outdoor.seconds": "s",
+  "outdoor.inertial": "Inertial",
+  "outdoor.yes": "Yes",
+  "outdoor.no": "No"
 }

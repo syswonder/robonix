@@ -660,7 +660,7 @@ _STATUS_BAR = """
       }
       setTimeout(beat, 1000);
     }
-    beat();
+    document.addEventListener('DOMContentLoaded', beat, {once: true});
   })();
 </script>
 """
