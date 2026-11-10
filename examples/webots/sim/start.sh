@@ -137,11 +137,13 @@ echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
 # it. Falls back to :0 so headless / non-X bash still gets a sensible
 # default the docker compose env interpolation can use. Without this,
 # users repeatedly forgot to `export DISPLAY=:0` and Webots / rviz2
-# came up invisible.
+# came up invisible. Each probe is bounded by `timeout`: on a Wayland 
+# host the leftover Xwayland sockets accept connections but never 
+# answer `xset q`, which otherwise hangs startup forever.
 if [[ -z "${DISPLAY:-}" ]]; then
     if command -v xset &>/dev/null; then
         for d in :0 :1 :10; do
-            if DISPLAY="$d" xset q &>/dev/null; then
+            if DISPLAY="$d" timeout 3 xset q &>/dev/null; then
                 export DISPLAY="$d"
                 echo "[sim/start] auto-detected DISPLAY=$DISPLAY"
                 break
