@@ -29,9 +29,25 @@ Logging uses Scribe: `system.executor.log` (via `--config-json`) overrides
 `SCRIBE_FILE_LEVEL` (default `info`); `SCRIBE_CONSOLE_LEVEL` defaults to `warn`.
 The standalone `--log` flag is accepted but currently not applied.
 
+Executor exposes the shared `robonix/lifecycle/driver` and becomes `ACTIVE`
+only after its gRPC server accepts `INIT` then `ACTIVATE`; a failed handshake
+fails startup. Only `ACTIVE` accepts new plans. `INIT`, `DEACTIVATE`, and
+`SHUTDOWN` are rejected while plans are active; use `ControlPlan` to cancel
+them and wait for local plan completion before retrying. Once idle,
+`SHUTDOWN` publishes `TERMINATED` and gracefully stops the server.
+Closing admission also rejects `ExecuteStream` requests waiting for `START`.
+The health report's `state` is `active` while accepting plans and `inactive`
+otherwise; an idle, deactivated server can still report healthy.
+Connections have five seconds to drain after `SHUTDOWN`; a stalled client causes
+the process to exit with a shutdown-timeout error.
+
+`ControlPlan.completed` reports local plan completion. Asynchronous providers
+can still be cleaning up after accepting cancellation. Check their terminal
+status and device-stop confirmation before treating hardware as stopped.
+
 ## Execution and control
 
-All gRPC contracts are under `robonix/system/executor/`:
+Execution, control, and health gRPC contracts are under `robonix/system/executor/`:
 
 | Contract | Purpose |
 |---|---|

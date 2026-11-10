@@ -19,6 +19,7 @@ mod dispatch;
 mod execution_context;
 mod expression;
 mod grpc_server;
+mod lifecycle;
 mod pb;
 mod plan_input;
 mod plan_scheduler;
@@ -34,6 +35,8 @@ use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
 use grpc_server::ExecutorServiceImpl;
+use lifecycle::{ExecutorLifecycleDriver, SHARED_DRIVER_CONTRACT};
+use pb::contracts::robonix_lifecycle_driver_server::RobonixLifecycleDriverServer;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
@@ -62,21 +65,34 @@ async fn main() -> Result<()> {
             .await
             .context("connect to atlas")?;
 
-    atlas
-        .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
-        .await?;
-    info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
-
     let listen_addr: std::net::SocketAddr = cfg
         .listen
         .parse()
         .with_context(|| format!("invalid executor listen address '{}'", cfg.listen))?;
-    let advertised = match listen_addr.ip() {
-        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
-            format!("127.0.0.1:{}", listen_addr.port())
-        }
-        _ => listen_addr.to_string(),
-    };
+    // Own the port before self-dialing, so startup cannot reach another server.
+    let incoming = tonic::transport::server::TcpIncoming::bind(listen_addr)
+        .with_context(|| format!("bind executor gRPC at {listen_addr}"))?
+        .with_nodelay(Some(true));
+    let listen_addr = incoming.local_addr().context("executor listener address")?;
+    let advertised = lifecycle::advertised_endpoint(listen_addr);
+    atlas
+        .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
+        .await?;
+    info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
+    atlas
+        .declare_capability(
+            &cfg.id,
+            SHARED_DRIVER_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/lifecycle/driver.v1.toml",
+                "robonix.contracts.RobonixLifecycleDriver",
+                "/robonix.contracts.RobonixLifecycleDriver/Driver",
+            ),
+        )
+        .await
+        .context("declare Executor shared lifecycle Driver")?;
 
     // Execute RPC: pilot → executor for plan dispatch.
     atlas
@@ -193,33 +209,6 @@ async fn main() -> Result<()> {
         BUILTINS.len()
     );
 
-    // Executor has no Driver lifecycle handshake — it's ready as soon as
-    // the gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
-    // legacy-fallback INACTIVE forever.
-    if let Err(e) = atlas
-        .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
-        .await
-    {
-        warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
-    }
-
-    // Atlas evicts providers after ~60s without a heartbeat. Send one every
-    // 20s so we stay registered for the lifetime of the process.
-    {
-        let mut hb = atlas.clone();
-        let provider_id = cfg.id.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(20));
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if let Err(e) = hb.heartbeat(&provider_id).await {
-                    warn!("heartbeat failed: {e:#}");
-                }
-            }
-        });
-    }
-
     let verification = Arc::new(verification::VerificationPolicy::new(
         cfg.verification.overlap,
         cfg.verification.rules,
@@ -228,19 +217,78 @@ async fn main() -> Result<()> {
         "loaded {} executor verification rule(s)",
         verification.len()
     );
-    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone(), verification);
+    let svc = ExecutorServiceImpl::new(atlas.clone(), cfg.id.clone(), verification);
+    svc.runtime
+        .close_admission()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let lifecycle =
+        ExecutorLifecycleDriver::new(atlas.clone(), cfg.id.clone(), svc.runtime.clone());
+    let server_shutdown = lifecycle.subscribe_shutdown();
+    let server_lifecycle = lifecycle.clone();
+    let mut server_task = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(RobonixLifecycleDriverServer::new(server_lifecycle))
+            .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
+            .add_service(RobonixSystemExecutorExecuteStreamServer::new(svc.clone()))
+            .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
+            .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
+            .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
+            .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
+            .serve_with_incoming_shutdown(incoming, lifecycle::wait_for_shutdown(server_shutdown))
+            .await
+    });
+    tokio::select! {
+        result = lifecycle::initialize_and_activate(&advertised) => result?,
+        result = &mut server_task => {
+            result.context("join Executor gRPC server")?
+                .context("Executor gRPC server failed before readiness")?;
+            anyhow::bail!("Executor gRPC server stopped before readiness");
+        }
+    }
+
+    // Atlas evicts providers after ~60s without a heartbeat. Send one every
+    // 20s so we stay registered for the lifetime of the process.
+    {
+        let mut hb = atlas.clone();
+        let provider_id = cfg.id.clone();
+        let shutdown = lifecycle::wait_for_shutdown(lifecycle.subscribe_shutdown());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await;
+            tokio::pin!(shutdown);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown => break,
+                    _ = tick.tick() => {
+                        if let Err(e) = hb.heartbeat(&provider_id).await {
+                            warn!("heartbeat failed: {e:#}");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     info!("executor gRPC on {listen_addr}");
     info!("robonix-executor ready on {listen_addr}");
 
-    tonic::transport::Server::builder()
-        .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorExecuteStreamServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorCancelAllPlansServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorControlPlanServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorListActivePlansServer::new(svc.clone()))
-        .add_service(RobonixSystemExecutorGetHealthServer::new(svc))
-        .serve(listen_addr)
-        .await
+    let result = tokio::select! {
+        result = &mut server_task => result,
+        _ = lifecycle::wait_for_shutdown(lifecycle.subscribe_shutdown()) => {
+            // Completed plans can leave unread responses blocked by a client's flow control.
+            match tokio::time::timeout(Duration::from_secs(5), &mut server_task).await {
+                Ok(result) => result,
+                Err(_) => {
+                    server_task.abort();
+                    let _ = server_task.await;
+                    anyhow::bail!("Executor gRPC shutdown timed out draining connections");
+                }
+            }
+        }
+    };
+    result
+        .context("join Executor gRPC server")?
         .context("executor gRPC server failed")?;
 
     Ok(())

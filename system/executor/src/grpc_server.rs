@@ -99,10 +99,14 @@ impl RobonixSystemExecutorExecuteStream for ExecutorServiceImpl {
         request: Request<Streaming<ExecuteStreamInput>>,
     ) -> Result<Response<Self::ExecuteStreamStream>, Status> {
         let mut stream = request.into_inner();
-        let first = stream
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("missing START"))?;
+        let mut admission = self.runtime.subscribe_admission();
+        // An idle input stream must not keep graceful shutdown waiting for START.
+        let first = tokio::select! {
+            _ = admission.wait_for(|closed| *closed) => {
+                return Err(Status::failed_precondition("Executor is not accepting plans; activate it before executing"));
+            }
+            message = stream.message() => message?.ok_or_else(|| Status::invalid_argument("missing START"))?,
+        };
         let mut input = PlanInput::default();
         input.accept(first).map_err(Status::invalid_argument)?;
         Ok(Response::new(
@@ -215,13 +219,16 @@ impl RobonixSystemExecutorGetHealth for ExecutorServiceImpl {
         _request: Request<GetModuleHealthRequest>,
     ) -> Result<Response<GetModuleHealthResponse>, Status> {
         Ok(Response::new(GetModuleHealthResponse {
-            report: Some(executor_health_report(&self.provider_id)),
+            report: Some(executor_health_report(
+                &self.provider_id,
+                self.runtime.is_accepting_plans(),
+            )),
         }))
     }
 }
 
 /// Build the minimal module-health report served to Vitals.
-fn executor_health_report(provider_id: &str) -> ModuleHealthReport {
+fn executor_health_report(provider_id: &str, accepting_plans: bool) -> ModuleHealthReport {
     ModuleHealthReport {
         schema_version: MODULE_HEALTH_SCHEMA_VERSION,
         module: Some(ModuleHealth {
@@ -229,7 +236,12 @@ fn executor_health_report(provider_id: &str) -> ModuleHealthReport {
             module_id: "executor".to_string(),
             provider_id: provider_id.to_string(),
             health: MODULE_HEALTH_OK,
-            state: "active".to_string(),
+            state: if accepting_plans {
+                "active"
+            } else {
+                "inactive"
+            }
+            .to_string(),
             reason_code: "OK".to_string(),
             detail: "executor serving".to_string(),
             source: String::new(),
@@ -246,7 +258,7 @@ mod tests {
     /// Health responses retain the minimal schema and the configured provider identity.
     #[test]
     fn executor_health_report_uses_minimal_module_health_v1_fields() {
-        let report = executor_health_report("executor");
+        let report = executor_health_report("executor", true);
         assert_eq!(report.schema_version, MODULE_HEALTH_SCHEMA_VERSION);
 
         let module = report.module.expect("module health");
