@@ -362,6 +362,8 @@ pub struct VlmClient {
     api_base: String,
     api_key: String,
     model: String,
+    /// Optional reasoning effort forwarded to the configured model API.
+    reasoning_effort: Option<String>,
     configured_context_window_tokens: Option<usize>,
     /// One routing key for the lifetime of this Pilot process. A per-task key
     /// would defeat reuse between independent tasks with the same standing
@@ -561,6 +563,7 @@ impl VlmClient {
             api_base: cfg.upstream.trim_end_matches('/').to_string(),
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
+            reasoning_effort: cfg.reasoning_effort.clone(),
             configured_context_window_tokens: cfg.context_window_tokens,
             prompt_cache_key: Uuid::new_v4().simple().to_string(),
         }
@@ -687,6 +690,12 @@ impl VlmClient {
         // system prefix alive through the interactive task; compatibility
         // fallback below removes this optional field if a proxy rejects it.
         if let Some(body) = request_body.as_object_mut() {
+            if let Some(effort) = &self.reasoning_effort {
+                body.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String(effort.clone()),
+                );
+            }
             body.insert(
                 "prompt_cache_options".to_string(),
                 serde_json::json!({"mode": "implicit", "ttl": "30m"}),
@@ -1153,11 +1162,19 @@ mod tests {
 
     /// Exercise the real HTTP receiver with deliberately fragmented response bytes.
     async fn receive_http_chunks(chunks: Vec<Vec<u8>>) -> Vec<anyhow::Result<VlmStreamItem>> {
+        receive_http_chunks_with_effort(chunks, None).await
+    }
+
+    async fn receive_http_chunks_with_effort(
+        chunks: Vec<Vec<u8>>,
+        effort: Option<&str>,
+    ) -> Vec<anyhow::Result<VlmStreamItem>> {
         use futures_util::StreamExt;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let expected_effort = effort.map(str::to_owned);
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -1177,6 +1194,16 @@ mod tests {
                         })
                         .unwrap();
                     if request.len() >= end + 4 + length {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                        assert_eq!(
+                            body.get("reasoning_effort")
+                                .and_then(serde_json::Value::as_str),
+                            expected_effort.as_deref()
+                        );
+                        if expected_effort.is_none() {
+                            assert!(body.get("reasoning_effort").is_none());
+                        }
                         break;
                     }
                 }
@@ -1198,6 +1225,7 @@ mod tests {
             api_base: format!("http://{address}"),
             api_key: "local-test".into(),
             model: "local-test".into(),
+            reasoning_effort: effort.map(str::to_owned),
             configured_context_window_tokens: None,
             prompt_cache_key: "local-test".into(),
         };
@@ -1210,6 +1238,13 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         items
+    }
+
+    #[tokio::test]
+    async fn http_request_forwards_reasoning_effort() {
+        let items =
+            receive_http_chunks_with_effort(vec![b"data: [DONE]\n\n".to_vec()], Some("high")).await;
+        assert!(matches!(items.last(), Some(Ok(VlmStreamItem::Finish))));
     }
 
     /// UTF-8 content must survive splits inside every Chinese and emoji character.

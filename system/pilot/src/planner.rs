@@ -3458,6 +3458,7 @@ mod tests {
             upstream: format!("http://{model_address}"),
             api_key: String::new(),
             model: "test".into(),
+            reasoning_effort: None,
             context_window_tokens: None,
             api_format: "openai".into(),
         });
