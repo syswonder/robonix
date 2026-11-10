@@ -212,8 +212,13 @@ nor any plan in Executor's active-plan snapshot — the model claims the task is
 advancing while nothing will run, so the reply is rejected
 and the model gets a corrective round; if it repeats,
 the turn ends with what the model said. The per-round reminder states the
-pairing rule: an empty sequence goes with `task_update: null` or
-`status: "done"`, or stands while a running tree is waited on.
+pairing rule: return an empty sequence with `"task_updates": []` if no task
+changes, such as while waiting for a running tree. To close a task, include
+its ID and status, for example `"task_updates": [{"task_id":"T1","status":"done"}]`.
+
+Pilot uses the specific node error as model feedback when RTDL argument or
+condition evaluation fails or a while loop reaches its limit with the
+condition still true. It can start recovery while another branch is running.
 
 ## RTDL conditions and loops
 

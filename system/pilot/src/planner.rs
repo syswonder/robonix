@@ -359,6 +359,8 @@ enum TreeInterrupt {
     NodeState {
         plan_id: String,
         node_state: Box<RtdlNodeState>,
+        /// Whether to report this node's own failure detail to the model.
+        failed_without_leaf_result: bool,
     },
     /// A tree finished (or its Execute stream ended/errored). Carries one
     /// full `RtdlNodeState` record for every node that reached a terminal
@@ -367,7 +369,7 @@ enum TreeInterrupt {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
-        /// False when the latest leaf failure already requested recovery.
+        /// False when the latest result already requested recovery for a failure.
         replan: bool,
         /// True when this tree ended because it was canceled (a node reached
         /// CANCELED), as opposed to running to natural success/failure. A
@@ -443,6 +445,7 @@ async fn handle_interrupt(
         TreeInterrupt::NodeState {
             plan_id,
             node_state,
+            failed_without_leaf_result,
         } => {
             let mut ns = *node_state;
             // Carry the originating tree's id (the executor sets this too, but
@@ -454,18 +457,26 @@ async fn handle_interrupt(
             {
                 tree.call_signatures.remove(&ns.node_index);
             }
-            // VERIFYING is deliberately non-terminal. Feed only a leaf's
-            // post-verification final state so history never contains an
-            // optimistic result that must be corrected.
-            if is_terminal_executor_state(ns.state)
-                && let Some(r) = ns.leaf_result.as_ref()
-            {
+            // VERIFYING is non-terminal: optimistic call results must stay out of history.
+            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
+            if let Some(r) = ns.leaf_result.as_ref().filter(|_| terminal_leaf) {
                 let description = forest
                     .trees
                     .get(&plan_id)
                     .map(|meta| meta.description.as_str())
                     .unwrap_or("unknown tree");
                 feed_results_into_history(history, &plan_id, description, std::slice::from_ref(r));
+            } else if failed_without_leaf_result {
+                let feedback = serde_json::json!({
+                    "plan_id": plan_id,
+                    "node_index": ns.node_index,
+                    "op_id": ns.op_id,
+                    "description": ns.description,
+                    "operator_detail": ns.operator_detail,
+                });
+                history.push(Message::user(&format!(
+                    "Executor feedback for an RTDL node failure\n{feedback}"
+                )));
             }
             if let Some(meta) = forest.trees.get(&plan_id)
                 && let Some(feedback) = repeat_result_message(&ns, &meta.repeat_counts)
@@ -478,9 +489,8 @@ async fn handle_interrupt(
             // without blocking on still-running sibling branches. Successes
             // still batch at tree completion, which avoids per-node re-plan
             // storms.
-            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
-            let replan = terminal_leaf
-                && ns.state != RtdlNodeStateEnum::Succeeded as u32
+            let replan = (failed_without_leaf_result
+                || terminal_leaf && ns.state != RtdlNodeStateEnum::Succeeded as u32)
                 && !forest.kill_pending.contains(&plan_id)
                 && tasks.any_open();
             log_node_state(&plan_id, &ns);
@@ -589,17 +599,33 @@ async fn drive_plan(
                 if event.event_kind == RtdlEventEnum::NodeState as u32
                     && let Some(ns) = event.node_state
                 {
-                    // Forward every node state for live viz.
+                    // Operators report child failures after the children have reported theirs.
+                    let failed_without_leaf_result = ns.state == RtdlNodeStateEnum::Failed as u32
+                        && ns.leaf_result.is_none()
+                        && !ns.operator_detail.trim().is_empty()
+                        && !execution
+                            .plan
+                            .nodes
+                            .get(ns.node_index as usize)
+                            .into_iter()
+                            .flat_map(|node| &node.children)
+                            .any(|child| {
+                                results.iter().any(|result| {
+                                    result.node_index == *child
+                                        && result.state != RtdlNodeStateEnum::Succeeded as u32
+                                })
+                            });
                     let _ = interrupt_tx.send(TreeInterrupt::NodeState {
                         plan_id: plan_id.clone(),
                         node_state: Box::new(ns.clone()),
+                        failed_without_leaf_result,
                     });
                     // Collect the full RtdlNodeState for every node that reaches
                     // a terminal state (leaf and non-leaf). A non-success
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
                         forest_revision.fetch_add(1, Ordering::Release);
-                        if ns.leaf_result.is_some() {
+                        if ns.leaf_result.is_some() || failed_without_leaf_result {
                             replan_on_completion = ns.state == RtdlNodeStateEnum::Succeeded as u32;
                         }
                         if ns.state == RtdlNodeStateEnum::Canceled as u32 {
@@ -1745,7 +1771,7 @@ pub async fn run_turn(
                     .recv()
                     .await
                     .context("execution feedback channel closed")?;
-                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state }
+                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state, .. }
                     if plan_id == &failed_plan_id && matches!(node_state.state, 3..=5));
                 handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
                 if failure_seen {
@@ -2087,7 +2113,7 @@ Nodes are exactly one of:
 - {"op":"repeat","op_id":0,"description":"...","count":0..10000,"body":<node>}
 - {"op":"while","op_id":0,"description":"...","condition":<expr>,"max_iterations":1..10000,"body":<node>}
 do may set bind. References: {"var":"name","path":["field",0]}; conditions: {"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}, or booleans. Bindings contain successful output; later sequential calls and loops overwrite them. Read only earlier completed nodes, never sibling parallel branches.
-Every node needs a description and op_id=0; Pilot assigns the real ID. Do not add node fields. Compose dependent steps into one sequence and independent steps into one parallel tree. With no new call, return an empty sequence paired with task_update: null or status=done; in_progress with nothing running is rejected.
+Every node needs a description and op_id=0; Pilot assigns the real ID. Do not add node fields. Compose dependent steps into one sequence and independent steps into one parallel tree. With no new call, return an empty sequence with task_updates: [] if no task changes, or task_updates: [{"task_id":"T1","status":"done"}] to close task T1. in_progress with nothing running is rejected.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan using an exact listed plan_id, or cancel_all, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
@@ -3643,6 +3669,7 @@ mod tests {
                 super::handle_interrupt(
                     super::TreeInterrupt::NodeState {
                         plan_id: "old".into(),
+                        failed_without_leaf_result: false,
                         node_state: Box::new(RtdlNodeState {
                             node_index,
                             state: state as u32,
@@ -3677,14 +3704,34 @@ mod tests {
     #[tokio::test]
     async fn failed_tree_completion_does_not_restart_recovery() {
         use crate::pb::executor::{RtdlEvent, RtdlPlanComplete};
-        for (later_success, requested_cancellation) in
-            [(false, false), (true, false), (false, true)]
-        {
+        for (leaf_failure, later_success, requested_cancellation) in [
+            (true, false, false),
+            (true, true, false),
+            (true, false, true),
+            (false, false, false),
+            (false, true, false),
+        ] {
             let mut execution = crate::stream_execution::StreamExecution::default();
             execution.plan.plan_id = "failed".into();
-            for (node_index, success, leaf) in
-                [(1, false, true), (0, false, false), (2, true, true)]
-            {
+            execution.plan.nodes = vec![
+                RtdlNode {
+                    children: vec![1, 2],
+                    ..Default::default()
+                },
+                RtdlNode::default(),
+                RtdlNode::default(),
+            ];
+            let cause = "condition evaluation: variable 'ready' is missing";
+            for (node_index, success, leaf, detail) in [
+                (
+                    1,
+                    false,
+                    leaf_failure,
+                    if leaf_failure { "" } else { cause },
+                ),
+                (0, false, false, "failed because a child failed"),
+                (2, true, true, ""),
+            ] {
                 if success && !later_success {
                     continue;
                 }
@@ -3692,6 +3739,7 @@ mod tests {
                     event_kind: super::RtdlEventEnum::NodeState as u32,
                     node_state: Some(RtdlNodeState {
                         node_index,
+                        operator_detail: detail.into(),
                         state: if success {
                             RtdlNodeStateEnum::Succeeded
                         } else {
@@ -3753,6 +3801,16 @@ mod tests {
                 .await
             );
 
+            if !leaf_failure {
+                assert!(
+                    history.iter().any(|message| message
+                        .content
+                        .as_deref()
+                        .is_some_and(|text| text.contains(cause))),
+                    "replanning must see the direct failure reason"
+                );
+            }
+
             // Recovery dispatch precedes the old tree's parent failure and completion.
             forest.trees.insert("retry".into(), meta());
             tasks.attach_tree("T1", "retry", "save corrected memory");
@@ -3779,6 +3837,12 @@ mod tests {
                 completion_seen |= completion;
             }
             assert!(completion_seen);
+            assert!(!history.iter().any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("failed because a child failed"))
+            }));
             assert!(!forest.trees.contains_key("failed"));
             assert!(forest.trees.contains_key("retry"));
             assert!(tasks.any_open());

@@ -132,6 +132,27 @@ pub(crate) async fn send_operator_state(
     let _ = tx.send(Ok(operator_node_state(node, state, detail))).await;
 }
 
+/// Report a node that failed before invoking a capability or completing a child.
+pub(crate) async fn send_node_failure(
+    tx: &Sender<Result<RtdlEvent, Status>>,
+    node: &NodeEventContext,
+    detail: String,
+    runtime: &PlanRuntime,
+) {
+    robonix_scribe::warn!(
+        "[executor/rtdl] plan_id={} node={} op_id={} failed: {}",
+        node.plan_id,
+        node.node_index,
+        node.op_id,
+        detail
+    );
+    let state = RtdlNodeStateEnum::Failed as u32;
+    runtime
+        .record_op_state(&node.plan_id, &node.op_id, state)
+        .await;
+    let _ = tx.send(Ok(operator_node_state(node, state, detail))).await;
+}
+
 /// Select and publish one non-leaf operator's final state after execution and verification.
 pub(crate) async fn send_operator_final(
     tx: &Sender<Result<RtdlEvent, Status>>,
