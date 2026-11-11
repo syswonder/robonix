@@ -4,6 +4,15 @@ Robonix system service that maintains the **current best estimate** of what's in
 
 Scene maintains current environment state from observations. Memory services handle long-term recall; hardware services control the robot. Scene does not send robot commands.
 
+The `/cam` page controls preview frame rate, image width and JPEG quality.
+These settings are saved in the browser and affect browser traffic; camera
+capture and robot topic publishing keep their deployment settings. Width is
+capped at the source size and height follows its aspect ratio. The page shows
+observed new frames and received payload KB/s, including duplicate frames.
+Defaults are 2 fps, 640 px wide and JPEG quality 75. The existing `/api/camera`
+endpoint accepts `fps` (0.2–5), `width` (0 or 160–1920) and `quality` (40–95).
+Omitting quality keeps the original PNG response; depth previews stay PNG.
+
 ## What's inside
 
 ```

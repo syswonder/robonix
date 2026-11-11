@@ -1,4 +1,13 @@
 {
+  "camera.fps": "帧率（帧/秒）",
+  "camera.width": "图像宽度",
+  "camera.original": "原始尺寸",
+  "camera.quality": "JPEG 画质",
+  "camera.previewOnly": "仅调整网页预览；不改变相机采集和机器人内部发布。高度按比例自动调整。",
+  "camera.noRgb": "尚未收到相机画面",
+  "camera.noDepth": "暂无深度画面",
+  "camera.transfer": "实际新画面约 {fps} 帧/秒 · 接收约 {kb} KB/秒 · 相机源尺寸 {source}",
+  "camera.error": "相机连接失败，正在重试",
   "nav.group.live": "当前地图",
   "nav.maps": "地图库",
   "nav.semantic": "3D",

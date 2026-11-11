@@ -46,7 +46,7 @@ def test_camera_preview_is_encoded_once_per_hub_channel_message(monkeypatch):
     monkeypatch.setattr(web, "_CAMERA_CACHE", _empty_camera_cache())
     calls = []
 
-    def fake_encode(msg, *, kind):
+    def fake_encode(msg, *, kind, width=0, quality=0):
         """Return a deterministic encoded record while tracking invocations."""
         calls.append((msg, kind))
         return {
@@ -57,7 +57,7 @@ def test_camera_preview_is_encoded_once_per_hub_channel_message(monkeypatch):
             "png_b64": f"encoded-{msg}",
         }
 
-    monkeypatch.setattr(web, "_image_to_png_b64", fake_encode)
+    monkeypatch.setattr(web, "_image_to_base64", fake_encode)
     hub = _FakeHub({"rgb": ("frame-1", 12.5, 1)})
 
     first = web._camera_payload(hub)
@@ -83,11 +83,11 @@ def test_unsupported_camera_frame_is_cached_until_message_changes(monkeypatch):
     monkeypatch.setattr(web, "_CAMERA_CACHE", _empty_camera_cache())
     calls = []
 
-    def unsupported(msg, *, kind):
+    def unsupported(msg, *, kind, width=0, quality=0):
         calls.append((msg, kind))
         return None
 
-    monkeypatch.setattr(web, "_image_to_png_b64", unsupported)
+    monkeypatch.setattr(web, "_image_to_base64", unsupported)
     hub = _FakeHub({"depth": ("unsupported-depth", 1.0, 7)})
     assert web._camera_payload(hub)["depth"] is None
     assert web._camera_payload(hub)["depth"] is None
@@ -109,7 +109,7 @@ def test_camera_requests_are_offloaded_single_flight_and_rate_limited(monkeypatc
     entered = threading.Event()
     release = threading.Event()
 
-    def slow_payload(request_hub):
+    def slow_payload(request_hub, *, width=0, quality=0):
         """Hold the worker until the test proves the event loop is responsive."""
         calls.append(request_hub)
         entered.set()
@@ -149,6 +149,80 @@ def test_camera_requests_are_offloaded_single_flight_and_rate_limited(monkeypatc
         response.json()["rgb"]["png_b64"] == "frame" for response in responses
     )
     assert calls == [hub, hub]
+
+
+def test_camera_preview_refresh_interval_includes_encoding_time(monkeypatch):
+    import time
+    import httpx
+
+    web = _web_module()
+    calls = []
+
+    def encode(hub, *, width=0, quality=0):
+        calls.append(hub)
+        time.sleep(.04)
+        return {"rgb": {"stamp_ms": len(calls)}, "depth": None}
+
+    monkeypatch.setattr(web, "_camera_payload", encode)
+    monkeypatch.setattr(web, "_CAMERA_PREVIEW_MIN_INTERVAL_S", .1)
+    app = web.make_app(registry=object(), hub=object())
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://scene.test") as client:
+            first = await client.get("/api/camera")
+            await asyncio.sleep(.07)
+            second = await client.get("/api/camera")
+            return first.json(), second.json()
+
+    first, second = asyncio.run(scenario())
+    assert first["rgb"]["stamp_ms"] == 1
+    assert second["rgb"]["stamp_ms"] == 2
+
+
+def test_camera_preview_controls_resize_encode_and_invalidate_same_frame_cache():
+    import base64
+    from io import BytesIO
+    from types import SimpleNamespace
+
+    from PIL import Image
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    msg = SimpleNamespace(width=1024, height=576, encoding="bgr8",
+                          data=bytes([20, 60, 200]) * (1024 * 576))
+    hub = _FakeHub({"rgb": (msg, 12.5, 1)})
+    client = TestClient(web.make_app(registry=object(), hub=hub))
+
+    def decode(query, field):
+        response = client.get("/api/camera" + query)
+        assert response.status_code == 200
+        payload = response.json()["rgb"]
+        assert payload["source_width"] == 1024 and payload["source_height"] == 576
+        return payload, Image.open(BytesIO(base64.b64decode(payload[field])))
+
+    low, low_image = decode("?width=320&quality=40&fps=5", "jpeg_b64")
+    assert (low["width"], low["height"]) == low_image.size == (320, 180)
+    assert low_image.format == "JPEG"
+    assert all(abs(actual - expected) <= 4
+               for actual, expected in zip(low_image.getpixel((0, 0)), (200, 60, 20)))
+    _, high_image = decode("?width=320&quality=95&fps=1", "jpeg_b64")
+    assert sum(high_image.quantization[0]) < sum(low_image.quantization[0])
+    resized, _ = decode("?width=640&quality=75&fps=2", "jpeg_b64")
+    assert (resized["width"], resized["height"]) == (640, 360)
+    _, original = decode("", "png_b64")
+    assert original.format == "PNG" and original.size == (1024, 576)
+    _, unscaled = decode("?width=1920&quality=75", "jpeg_b64")
+    assert unscaled.size == (1024, 576)
+
+
+@pytest.mark.parametrize("query", ["width=99999", "quality=5", "fps=nan", "fps=0"])
+def test_camera_preview_rejects_invalid_settings(query):
+    from starlette.testclient import TestClient
+
+    web = _web_module()
+    client = TestClient(web.make_app(registry=object(), hub=None))
+    assert client.get("/api/camera?" + query).status_code == 400
 
 
 def test_live_map_pages_expose_first_paint_readiness_and_errors():
