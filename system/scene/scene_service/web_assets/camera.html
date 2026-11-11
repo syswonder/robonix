@@ -7,12 +7,19 @@
     html, body { margin: 0; padding: 0; height: 100%;
                  background: #08090c; color: #d8dde6;
                  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { display: flex; flex-direction: column; }
+    #controls { padding: 10px; display: flex; gap: 12px; flex-wrap: wrap;
+                align-items: center; font-size: 12px; background: #141a22; }
+    #controls label { display: flex; gap: 6px; align-items: center; }
+    select, input { accent-color: #6aa9ff; }
+    select { background: #202a38; color: inherit; padding: 4px; }
+    #note, #transfer { width: 100%; color: #9ba9bb; }
     /* Two stacked tiles, RGB on top of depth. Each tile takes half the
        viewport. Image fills the tile keeping aspect; the dark bg shows
        through letterboxing when the panel aspect doesn't match the
        camera's. */
     #stack { display: grid; grid-template-rows: 1fr 1fr;
-             height: 100vh; gap: 1px; background: #1a1d24; }
+             flex: 1; min-height: 0; gap: 1px; background: #1a1d24; }
     .tile { position: relative; background: #08090c;
             min-width: 0; min-height: 0; overflow: hidden;
             display: flex; align-items: center; justify-content: center; }
@@ -30,23 +37,67 @@
   </style>
 </head>
 <body>
+  <div id="controls">
+    <label><span data-i18n="camera.fps">Frame rate (fps)</span>
+      <select id="fps"><option>0.5</option><option>1</option><option selected>2</option><option>5</option></select>
+    </label>
+    <label><span data-i18n="camera.width">Image width</span>
+      <select id="width"><option value="320">320 px</option><option value="640" selected>640 px</option>
+        <option value="1024">1024 px</option><option value="0" data-i18n="camera.original">Original</option></select>
+    </label>
+    <label><span data-i18n="camera.quality">JPEG quality</span>
+      <input id="quality" type="range" min="40" max="95" step="5" value="75"><output id="quality-value">75</output>
+    </label>
+    <span id="note" data-i18n="camera.previewOnly">Preview settings only; capture and robot publishing stay unchanged.</span>
+    <span id="transfer" role="status" aria-live="polite">—</span>
+  </div>
   <div id="stack">
     <div class="tile" id="rgb">
       <span class="label"><b>rgb</b> <span class="meta">—</span></span>
       <img id="rgb_img" alt="" />
-      <div class="empty" id="rgb_empty">no rgb stream connected</div>
+      <div class="empty" id="rgb_empty" data-i18n="camera.noRgb">no rgb stream connected</div>
     </div>
     <div class="tile" id="depth">
       <span class="label"><b>depth</b> <span class="meta">—</span> <i style="color:#666">(near=bright)</i></span>
       <img id="depth_img" alt="" />
-      <div class="empty" id="depth_empty">no depth frame available</div>
+      <div class="empty" id="depth_empty" data-i18n="camera.noDepth">no depth frame available</div>
     </div>
   </div>
   <script>
-    const POLL_MS = 200;  // 5 Hz
+    __I18N_RUNTIME__
     const STALE_MS = 2000; // mark stale if no update in 2s
-
+    const fps = document.getElementById('fps');
+    const width = document.getElementById('width');
+    const quality = document.getElementById('quality');
+    const transfer = document.getElementById('transfer');
     let lastRgbStamp = 0, lastDepthStamp = 0;
+    let revision = 0, statsStarted = performance.now(), bytes = 0, freshFrames = 0;
+    try {
+      const saved = JSON.parse(localStorage.getItem('sceneCameraPreview') || '{}');
+      for (const control of [fps, width, quality]) {
+        if (control === quality && Number.isFinite(saved.quality)) {
+          control.value = String(Math.max(40, Math.min(95, saved.quality)));
+        } else if (Array.from(control.options || []).some(o => o.value === saved[control.id])) {
+          control.value = saved[control.id];
+        }
+      }
+    } catch (_) { /* Use defaults when browser storage is unavailable. */ }
+    document.getElementById('quality-value').textContent = quality.value;
+    quality.addEventListener('input', () => {
+      document.getElementById('quality-value').textContent = quality.value;
+    });
+    for (const control of [fps, width, quality]) {
+      control.addEventListener('change', () => {
+        revision++;
+        lastRgbStamp = lastDepthStamp = 0;
+        statsStarted = performance.now(); bytes = freshFrames = 0;
+        try {
+          localStorage.setItem('sceneCameraPreview', JSON.stringify({
+            fps: fps.value, width: width.value, quality: Number(quality.value)
+          }));
+        } catch (_) { /* Controls still work without browser storage. */ }
+      });
+    }
 
     function fmtAge(stamp_ms) {
       if (!stamp_ms) return '—';
@@ -60,7 +111,7 @@
       const img  = document.getElementById(panelId + '_img');
       const empty = document.getElementById(panelId + '_empty');
       const meta = tile.querySelector('.meta');
-      if (!payload || !payload.png_b64) {
+      if (!payload || !(payload.jpeg_b64 || payload.png_b64)) {
         img.style.display = 'none';
         empty.style.display = '';
         meta.textContent = '—';
@@ -70,23 +121,43 @@
       img.style.display = '';
       // Only re-render when stamp changes (avoid flicker on identical frames).
       if (payload.stamp_ms !== lastStamp) {
-        img.src = 'data:image/png;base64,' + payload.png_b64;
+        img.src = payload.jpeg_b64 ? 'data:image/jpeg;base64,' + payload.jpeg_b64
+                                  : 'data:image/png;base64,' + payload.png_b64;
       }
       const ageStr = fmtAge(payload.stamp_ms);
-      const stale = (Date.now() - payload.stamp_ms) > STALE_MS;
+      const stale = (Date.now() - payload.stamp_ms) > Math.max(STALE_MS, 2500 / Number(fps.value));
       meta.textContent = `${payload.width}x${payload.height} ${payload.encoding} · ${ageStr}`;
       meta.classList.toggle('stale', stale);
       return payload.stamp_ms;
     }
 
     async function tick() {
+      const started = performance.now(), requestedRevision = revision;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
       try {
-        const r = await fetch('/api/camera', { cache: 'no-store' });
-        const j = await r.json();
+        const query = new URLSearchParams({fps: fps.value, width: width.value, quality: quality.value});
+        const r = await fetch('/api/camera?' + query, { cache: 'no-store', signal: controller.signal });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const body = await r.arrayBuffer();
+        const j = JSON.parse(new TextDecoder().decode(body));
+        if (requestedRevision !== revision) return;
+        bytes += body.byteLength;
+        if (j.rgb && j.rgb.stamp_ms !== lastRgbStamp) freshFrames++;
         lastRgbStamp = applyTile('rgb', j.rgb, lastRgbStamp);
         lastDepthStamp = applyTile('depth', j.depth, lastDepthStamp);
-      } catch (_) { /* swallow — next tick retries */ }
-      setTimeout(tick, POLL_MS);
+        const seconds = Math.max(1, (performance.now() - statsStarted) / 1000);
+        const source = j.rgb ? `${j.rgb.source_width}×${j.rgb.source_height}` : '—';
+        transfer.textContent = tv('camera.transfer', {
+          fps: (freshFrames / seconds).toFixed(1), kb: (bytes / seconds / 1024).toFixed(1), source
+        });
+      } catch (error) {
+        transfer.textContent = t('camera.error') + ': ' + error.message;
+      } finally {
+        clearTimeout(timeout);
+        setTimeout(tick, Math.max(document.hidden ? 1000 : 0,
+          1000 / Number(fps.value) - (performance.now() - started)));
+      }
     }
     tick();
   </script>

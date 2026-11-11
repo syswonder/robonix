@@ -129,9 +129,9 @@ def occupancy_payload(hub: Any) -> Optional[dict]:
     return payload
 
 
-def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
-    """sensor_msgs/Image as a PNG; depth is normalised per frame to
-    grayscale. None for an unsupported encoding or without Pillow."""
+def _image_to_base64(msg: Any, *, kind: str, width: int = 0,
+                     quality: int = 0) -> Optional[dict]:
+    """Encode a preview; RGB optionally uses JPEG, depth stays normalised PNG."""
     try:
         import numpy as np
         from PIL import Image as PILImage
@@ -185,20 +185,30 @@ def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
 
     if arr is None:
         return None
+    image = PILImage.fromarray(np.ascontiguousarray(arr), mode=out_mode)
+    if width and width < w:
+        image = image.resize((width, max(1, round(h * width / w))), PILImage.Resampling.LANCZOS)
     buf = io.BytesIO()
-    PILImage.fromarray(np.ascontiguousarray(arr), mode=out_mode).save(buf, format="PNG", optimize=False)
+    jpeg = quality > 0 and kind == "rgb"
+    if jpeg:
+        image.save(buf, format="JPEG", quality=quality)
+    else:
+        image.save(buf, format="PNG", optimize=False)
     stamp_unix = float(getattr(getattr(msg, "header", None), "stamp", None) and
                        (msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9) or 0.0)
     return {
-        "width": w,
-        "height": h,
+        "width": image.width,
+        "height": image.height,
+        "source_width": w,
+        "source_height": h,
         "encoding": enc,
         "stamp_ms": int(stamp_unix * 1000),
-        "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+        "jpeg_b64" if jpeg else "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
     }
 
 
-def _camera_channel_payload(hub: Any, kind: str) -> Optional[dict]:
+def _camera_channel_payload(hub: Any, kind: str, *, width: int = 0,
+                            quality: int = 0) -> Optional[dict]:
     """One channel's preview, cached per message. The entry is replaced
     whole, so a reader on another thread never sees half an update."""
     if not hub.has(kind):
@@ -208,25 +218,27 @@ def _camera_channel_payload(hub: Any, kind: str) -> Optional[dict]:
         return None
 
     cache = _CAMERA_CACHE[kind]
-    if cache["hub"] is hub and cache["count"] == count:
+    options = (width, quality)
+    if (cache["hub"] is hub and cache["count"] == count
+            and cache.get("options", (0, 0)) == options):
         return cache["payload"]
 
-    payload = _image_to_png_b64(msg, kind=kind)
+    payload = _image_to_base64(msg, kind=kind, width=width, quality=quality)
     if payload is not None and payload["stamp_ms"] == 0:
         payload["stamp_ms"] = int(stamp_unix * 1000)
-    _CAMERA_CACHE[kind] = {"hub": hub, "count": count, "payload": payload}
+    _CAMERA_CACHE[kind] = {"hub": hub, "count": count, "options": options, "payload": payload}
     return payload
 
 
-def _camera_payload(hub: Any) -> dict:
+def _camera_payload(hub: Any, *, width: int = 0, quality: int = 0) -> dict:
     """The latest RGB and depth previews."""
-    return {kind: _camera_channel_payload(hub, kind) if hub is not None
+    return {kind: _camera_channel_payload(hub, kind, width=width, quality=quality) if hub is not None
             else None for kind in ("rgb", "depth")}
 
 
-def _camera_json_bytes(hub: Any) -> bytes:
+def _camera_json_bytes(hub: Any, *, width: int = 0, quality: int = 0) -> bytes:
     """The /api/camera body, encoded entirely in the calling worker."""
-    return json.dumps(_camera_payload(hub), ensure_ascii=False,
+    return json.dumps(_camera_payload(hub, width=width, quality=quality), ensure_ascii=False,
                       allow_nan=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -777,7 +789,8 @@ def make_app(*, registry: ObjectRegistry,
     camera_preview_lock = asyncio.Lock()
     camera_preview_hub: Any = None
     camera_preview_bytes: Optional[bytes] = None
-    camera_preview_completed_s = 0.0
+    camera_preview_started_s = 0.0
+    camera_preview_options = (0, 0)
 
     async def _persist_scene_objects(partition: str) -> tuple[int, int]:
         """Write every object except the robot (missing ones too: a fresh
@@ -1807,18 +1820,33 @@ def make_app(*, registry: ObjectRegistry,
     async def maps_page(request) -> HTMLResponse:
         return HTMLResponse(_shell_page("/maps", _MAPS_BODY, "scene — maps", map_type=_page_map_type(request)))
 
-    async def camera_state(_request) -> JSONResponse:
+    async def camera_state(request) -> Response:
         """Return a rate-limited, single-flight preview off the event loop."""
         nonlocal camera_preview_hub
         nonlocal camera_preview_bytes
-        nonlocal camera_preview_completed_s
+        nonlocal camera_preview_started_s
+        nonlocal camera_preview_options
+
+        try:
+            width = int(request.query_params.get("width", "0"))
+            quality = int(request.query_params.get("quality", "0"))
+            fps = float(request.query_params["fps"]) if "fps" in request.query_params else None
+        except ValueError:
+            return JSONResponse({"error": "width, quality and fps must be numbers"}, status_code=400)
+        if (width != 0 and not 160 <= width <= 1920
+                or quality != 0 and not 40 <= quality <= 95
+                or fps is not None and not 0.2 <= fps <= 5):
+            return JSONResponse({"error": "width: 0 or 160–1920; quality: 0 (PNG) or 40–95 (JPEG); fps: 0.2–5"}, status_code=400)
+        options = (width, quality)
+        interval_s = 1 / fps if fps is not None else _CAMERA_PREVIEW_MIN_INTERVAL_S
 
         loop = asyncio.get_running_loop()
         now = loop.time()
         if (
             camera_preview_hub is hub
+            and camera_preview_options == options
             and camera_preview_bytes is not None
-            and now - camera_preview_completed_s < _CAMERA_PREVIEW_MIN_INTERVAL_S
+            and now - camera_preview_started_s < interval_s
         ):
             return Response(camera_preview_bytes, media_type="application/json")
 
@@ -1826,15 +1854,17 @@ def make_app(*, registry: ObjectRegistry,
             now = loop.time()
             if (
                 camera_preview_hub is hub
+                and camera_preview_options == options
                 and camera_preview_bytes is not None
-                and now - camera_preview_completed_s
-                < _CAMERA_PREVIEW_MIN_INTERVAL_S
+                and now - camera_preview_started_s
+                < interval_s
             ):
                 return Response(camera_preview_bytes, media_type="application/json")
-            payload = await asyncio.to_thread(_camera_json_bytes, hub)
+            payload = await asyncio.to_thread(_camera_json_bytes, hub, width=width, quality=quality)
             camera_preview_hub = hub
             camera_preview_bytes = payload
-            camera_preview_completed_s = loop.time()
+            camera_preview_started_s = now
+            camera_preview_options = options
             return Response(payload, media_type="application/json")
 
     async def viewer_focus(request):
@@ -2081,7 +2111,7 @@ def _cost_sample(detector):
 
 
 _COST_HTML = _asset("cost.html")
-_INDEX_CAM_HTML = _asset("camera.html")
+_INDEX_CAM_HTML = _asset("camera.html").replace("__I18N_RUNTIME__", _i18n_js())
 
 
 def _regions_html() -> str:

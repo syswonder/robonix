@@ -1,4 +1,13 @@
 {
+  "camera.fps": "Frame rate (fps)",
+  "camera.width": "Image width",
+  "camera.original": "Original size",
+  "camera.quality": "JPEG quality",
+  "camera.previewOnly": "Preview settings only; capture and robot publishing stay unchanged. Height follows the aspect ratio.",
+  "camera.noRgb": "no rgb stream connected",
+  "camera.noDepth": "no depth frame available",
+  "camera.transfer": "New frames ~{fps} fps · Receiving ~{kb} KB/s · Source {source}",
+  "camera.error": "Camera request failed; retrying",
   "nav.group.live": "current map",
   "nav.maps": "map library",
   "nav.semantic": "3D",
