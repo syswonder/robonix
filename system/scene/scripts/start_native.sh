@@ -40,7 +40,32 @@ W="$PKG/docker/_weights"
 export SCENE_ONNX_DIR="${SCENE_ONNX_DIR:-$W/onnx}"
 export SCENE_ENGINE_CACHE_DIR="${SCENE_ENGINE_CACHE_DIR:-$HOME/.cache/robonix/scene-engines}"
 # Startup checks only: export/compilation must precede Atlas registration.
-"$PY" "$PKG/scripts/prepare_models.py" --check
+if [[ -n "${SCENE_DUALMAP_NPU_DIR:-}" ]]; then
+    if [[ -z "${SCENE_DUALMAP_CLIP_WEIGHTS:-}" ]]; then
+        echo "[scene/native] error: SCENE_DUALMAP_CLIP_WEIGHTS is required for NPU mode" >&2
+        exit 1
+    fi
+    model_paths=(
+        "$SCENE_DUALMAP_CLIP_WEIGHTS"
+        "$SCENE_DUALMAP_NPU_DIR/npu_meta.json"
+        "$SCENE_DUALMAP_NPU_DIR/yoloworld.rknn"
+        "$SCENE_DUALMAP_NPU_DIR/yoloworld.weight"
+        "$SCENE_DUALMAP_NPU_DIR/mobilesam.rknn"
+        "$SCENE_DUALMAP_NPU_DIR/mobilesam.weight"
+        "$SCENE_DUALMAP_NPU_DIR/mobilesam_decoder.rknn"
+        "$SCENE_DUALMAP_NPU_DIR/mobilesam_decoder.weight"
+        "$SCENE_DUALMAP_NPU_DIR/clip_image.rknn"
+        "$SCENE_DUALMAP_NPU_DIR/clip_image.weight"
+    )
+    for model_path in "${model_paths[@]}"; do
+        if [[ ! -s "$model_path" ]]; then
+            echo "[scene/native] error: missing NPU model file $model_path" >&2
+            exit 1
+        fi
+    done
+else
+    "$PY" "$PKG/scripts/prepare_models.py" --check
+fi
 
 # Host-persisted scene state (object-memory DB + scene-graph caches).
 mkdir -p "$PKG/rbnx-build/data/robonix"
