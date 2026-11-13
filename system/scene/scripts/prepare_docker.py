@@ -26,8 +26,9 @@ from scripts.prepare_native import detect, download_verified  # noqa: E402
 
 def select_profile(host: dict, *, check_python: bool = False) -> dict:
     for profile in json.loads(PROFILES.read_text())['profiles']:
-        if (host['distro'] == 'ubuntu' and host['arch'] == 'aarch64' and 'orin' in host['model'].lower()
-                and host['l4t'].startswith(profile['l4t_prefix'])
+        if (host['distro'] == 'ubuntu' and host['arch'] == 'aarch64'
+                and 'orin' in host.get('model', '').lower()
+                and host.get('l4t', '').startswith(profile['l4t_prefix'])
                 and host['ubuntu'] == profile['ubuntu']
                 and (not check_python or host['python'] == profile['python'])):
             return profile
