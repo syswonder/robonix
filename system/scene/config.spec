@@ -763,4 +763,6 @@ properties:
       selects the localization runtime configuration for loaded-map Driver binding. execution_enabled defaults false; only a
       motion-authorized deployment profile enables it. The deployment supplies the
       navigation service Python package and consumed navigation/localization bindings.
+      navigation_http_url is the local navigation HTTP origin used for read-only
+      global/local costmap snapshots, including when execution is disabled.
 

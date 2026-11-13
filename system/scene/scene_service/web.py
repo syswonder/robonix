@@ -1983,7 +1983,8 @@ def make_app(*, registry: ObjectRegistry,
     routes.insert(0,Route("/api/outdoor/costmap",outdoor_costmap,methods=["GET"]))
 
     def outdoor_page():
-        return _shell_page("/outdoor", _asset("outdoor.html"), "scene — outdoor map")
+        body = _asset("outdoor.html").replace('__OUTDOOR_COSTMAPS_JS__', _asset('outdoor_costmaps.js'))
+        return _shell_page("/outdoor", body, "scene — outdoor map")
     routes = outdoor.routes(outdoor_page) + routes
     from contextlib import asynccontextmanager, suppress
 

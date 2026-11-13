@@ -247,6 +247,18 @@ class OutdoorScene:
     def routes(self, page):
         async def outdoor_page(request):
             return HTMLResponse(page())
+        async def costmap(request):
+            layer = request.path_params['layer']
+            if layer not in ('global', 'local'):
+                return JSONResponse({'ok': False, 'detail': 'Unknown costmap layer'}, status_code=404)
+            if self.navigation is None:
+                return JSONResponse({'ok': False, 'detail': 'Navigation is not configured'}, status_code=503)
+            try:
+                result = await asyncio.to_thread(self.navigation.costmap, layer)
+                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+            except (ValueError, OSError) as error:
+                return JSONResponse({'ok': False, 'detail': str(error)}, status_code=503)
         return [Route("/outdoor", outdoor_page, methods=["GET"]),
                 Route("/api/outdoor/state", self.state, methods=["GET"]),
+                Route("/api/outdoor/costmaps/{layer}", costmap, methods=["GET"]),
                 Route("/api/outdoor/{op}", self.operation, methods=["POST"])]

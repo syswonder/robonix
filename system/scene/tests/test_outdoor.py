@@ -136,3 +136,26 @@ def test_collision_and_external_version_change_hide_stale_semantics(scene):
     assert client.get('/api/state').json()['annotations']==[]
     assert client.delete('/api/regions/missing').status_code==409
     assert client.post('/api/annotations',json=dict(kind='poi',name='blocked',points=[[2.,0.]])).status_code==400
+
+
+def test_costmap_http_facade_is_read_only_and_failures_are_independent(scene):
+    from types import SimpleNamespace
+    from outdoor_nav.scene import SceneNavigation
+    from outdoor_nav.http import ApiError
+    from scene_service.outdoor import OutdoorScene
+    client,backend,binding,annotations,calls=scene
+    reader=SceneNavigation(execution_enabled=False)
+    requests=[]
+    def costmap(layer):
+        requests.append(layer)
+        if layer=='local':raise ApiError(503,'Waiting for local costmap')
+        return {'frame_id':'map','image':'global-grid','age_s':4.,'stale':True}
+    reader.costmap=costmap
+    facade=OutdoorScene(None,binding,None,None,None,None,{},reader)
+    from starlette.applications import Starlette
+    cost_client=TestClient(Starlette(routes=facade.routes(lambda:'')))
+    assert cost_client.get('/api/outdoor/costmaps/global').json()['image']=='global-grid'
+    assert cost_client.get('/api/outdoor/costmaps/local').status_code==503
+    assert cost_client.get('/api/outdoor/costmaps/invalid').status_code==404
+    assert requests==['global','local']
+    assert not calls

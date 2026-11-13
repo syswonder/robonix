@@ -927,3 +927,14 @@ The navigation service stops before gait changes and waits for fresh confirmatio
 timeouts appear as failed tasks in Scene. Stairs segments pause local avoidance
 under the deployment policy, then restore it on flat sections. Capture and resume
 are refused during active navigation. These integrations require field validation.
+
+
+### 室外定位状态与代价地图
+
+室外页面顶部显示 IMU 采样/姿态龄期、串口状态、定位与航向来源及最近 20 条中断/恢复事件。
+采样恢复不表示姿态精度已恢复；这些信息不改变导航准入条件。事件在定位服务内存中记录，重启清空。
+「代价地图」沿用 outdoorNav `b3798b8` 的单图叠加：全局紫色、局部青色，转换到 map 坐标显示，支持图层开关、定位山猫、全图和鼠标浏览。
+顶部默认仅显示定位、IMU 和导航核心状态，其余数据与事件通过“详细信息”展开。
+数据超过 3 秒标注过期，过期坐标变换不用于绘制。仅打开标签页时每秒刷新，采集中也可查看。
+部署在 `outdoor_navigation.navigation_http_url` 设置本机导航 HTTP 地址（山猫为 `http://127.0.0.1:19985`）；
+浏览器通过只读 `/api/outdoor/costmaps/global` 和 `/api/outdoor/costmaps/local` 获取快照，检查模式也可使用。
