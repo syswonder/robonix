@@ -33,6 +33,7 @@ Common configuration:
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
+- `--vlm-reasoning-effort` / `ROBONIX_VLM_REASONING_EFFORT`: optional reasoning effort sent to the model API.
 - `--vlm-context-window-tokens` / `ROBONIX_VLM_CONTEXT_WINDOW_TOKENS`: optional operator override for the deployed model's total context capacity.
 - `--vlm-format` / `ROBONIX_VLM_FORMAT`: API dialect. Only `openai` is currently supported.
 - `--config` / `ROBONIX_CONFIG_PATH`: optional YAML config file.

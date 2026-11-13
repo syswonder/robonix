@@ -131,6 +131,9 @@ manifest blocks are translated into CLI flags and also passed intact through
 that Soma is added automatically when the deployment contains primitives or
 skills.
 
+The optional `system.pilot.vlm.reasoning_effort` manifest setting is forwarded
+to Pilot's OpenAI-compatible request.
+
 For example, this enables Vitals without a separate terminal or global
 `RUST_LOG` setting:
 

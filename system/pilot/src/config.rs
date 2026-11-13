@@ -39,6 +39,8 @@ pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Optional OpenAI-compatible reasoning effort sent with each request.
+    pub reasoning_effort: Option<String>,
     /// Context limit declared by the deployment. This wins over provider
     /// metadata and the built-in registry because a proxy may expose a logical
     /// model name while routing to a smaller physical context window.
@@ -98,6 +100,10 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VLM_MODEL")]
     pub vlm_model: Option<String>,
 
+    /// Model reasoning effort (low, medium, high, etc.), when supported.
+    #[arg(long, env = "ROBONIX_VLM_REASONING_EFFORT")]
+    pub vlm_reasoning_effort: Option<String>,
+
     /// Deployment-specific total context window. Required when Pilot cannot
     /// obtain a capacity from provider metadata.
     #[arg(long, env = "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS")]
@@ -147,6 +153,9 @@ struct FileVlmConfig {
     api_key: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Optional API reasoning effort supplied by the configuration file.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     #[serde(default)]
     api_format: Option<String>,
     #[serde(default)]
@@ -201,6 +210,10 @@ impl PilotConfig {
             .or(file_vlm.model)
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
+        let reasoning_effort = args
+            .vlm_reasoning_effort
+            .or(file_vlm.reasoning_effort)
+            .filter(|s| !s.trim().is_empty());
         let context_window_tokens = args
             .vlm_context_window_tokens
             .or(file_vlm.context_window_tokens)
@@ -214,6 +227,7 @@ impl PilotConfig {
                 upstream,
                 api_key,
                 model,
+                reasoning_effort,
                 context_window_tokens,
                 api_format,
             },
