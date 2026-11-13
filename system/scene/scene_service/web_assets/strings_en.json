@@ -1,4 +1,8 @@
 {
+  "camera.battery": "Battery {percent}%",
+  "camera.charging": "Charging",
+  "camera.batteryStale": "Battery stale (last {percent}%)",
+  "camera.batteryUnavailable": "Battery unavailable",
   "camera.fps": "Frame rate (fps)",
   "camera.width": "Image width",
   "camera.original": "Original size",

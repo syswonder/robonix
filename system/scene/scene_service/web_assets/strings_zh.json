@@ -1,4 +1,8 @@
 {
+  "camera.battery": "电量 {percent}%",
+  "camera.charging": "充电中",
+  "camera.batteryStale": "电量已过期（上次 {percent}%）",
+  "camera.batteryUnavailable": "电量暂不可用",
   "camera.fps": "帧率（帧/秒）",
   "camera.width": "图像宽度",
   "camera.original": "原始尺寸",

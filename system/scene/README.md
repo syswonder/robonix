@@ -4,6 +4,9 @@ Robonix system service that maintains the **current best estimate** of what's in
 
 Scene maintains current environment state from observations. Memory services handle long-term recall; hardware services control the robot. Scene does not send robot commands.
 
+The native annotation profile uses `OUTDOOR_SERVICE_PYTHON` for build and runtime
+when supplied by an outdoor deployment; otherwise it creates its own annotation venv.
+
 The `/cam` page controls preview frame rate, image width and JPEG quality.
 These settings are saved in the browser and affect browser traffic; camera
 capture and robot topic publishing keep their deployment settings. Width is
@@ -888,12 +891,18 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. Occupancy-based semantic goal tools reject outdoor maps.
 
+Choose **Mark place**, click the map, and enter a name beside the point. Saved places display their names and persist with that map. In **View**, click a place to inspect its coordinates, rename or reposition it, delete it, or choose **Plan**. Editing uses the same name field; click the map to change the position before saving. In **Plan**, select a place on the map or under **Existing destinations**, then preview the route before confirming execution. Place destinations must be within 2 m of a surveyed road.
+
+Temporary start and goal markers and route previews appear only in **Plan**. Switching tabs preserves the selection so planning can continue when returning.
+
 For native ROS manual annotation without perception models, build with `bash scripts/build_annotate.sh` and select `package_manifest.annotate-native.yaml` in the deployment. Set `ROS_SETUP` for a nonstandard ROS installation. Keep `rbnx-build/data` persistent. The default web host is loopback; use SSH forwarding for access from a laptop. This profile uses `web_viewer: off` and the outdoor SVG page; the existing indoor Rerun deployment remains available.
 
 
 Camera and Logs are shared by the Indoor and Outdoor tabs. Their links preserve `map_type` across navigation and editor frames; Outdoor hides the indoor 3D/2D viewer links. Switching pages never loads a map.
 
 Camera uses the existing Atlas/ROS RGB-D preview by default. To reuse a locally running four-camera viewer, set Scene `camera_viewer_port` to its loopback HTTP port (for example `8080`). Scene forwards its page, snapshots, camera status, battery and image settings through `/camera-viewer/` on the same Scene origin. This compatibility input starts no driver and provides no perception/model inference. Unset it or use `0` for the standard ROS camera preview.
+
+To keep the standard camera preview and show battery status from that local viewer, set `camera_battery_port: 8080` instead. Battery status refreshes every five seconds; unavailable or stale readings are labelled explicitly. The battery display is disabled by default.
 
 ### Outdoor reference execution
 

@@ -140,7 +140,7 @@ class MapMetaStore:
         draw = ImageDraw.Draw(image)
         for road in snapshot["network"]["roads"]:
             pixels = [((p["x"]-lo_x)/resolution, height-(p["y"]-lo_y)/resolution) for p in road["points"]]
-            draw.line(pixels, fill={"stairs":"#bb9fe9","flat":"#75a0c3"}.get(road["gait"],"#8b95a4"), width=4)
+            draw.line(pixels, fill={"stairs":"#ff6666","flat":"#75a0c3"}.get(road["gait"],"#8b95a4"), width=4)
         png, geometry = self._preview_paths(map_id)
         with self._lock:
             image.save(png)

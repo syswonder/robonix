@@ -14,6 +14,9 @@
     select, input { accent-color: #6aa9ff; }
     select { background: #202a38; color: inherit; padding: 4px; }
     #note, #transfer { width: 100%; color: #9ba9bb; }
+    #battery { color: #a8b1b6; }
+    #battery.fresh { color: #b9ec9f; }
+    #battery.low { color: #ffbf69; }
     /* Two stacked tiles, RGB on top of depth. Each tile takes half the
        viewport. Image fills the tile keeping aspect; the dark bg shows
        through letterboxing when the panel aspect doesn't match the
@@ -49,6 +52,7 @@
       <input id="quality" type="range" min="40" max="95" step="5" value="75"><output id="quality-value">75</output>
     </label>
     <span id="note" data-i18n="camera.previewOnly">Preview settings only; capture and robot publishing stay unchanged.</span>
+    <strong id="battery" role="status" aria-live="polite" hidden></strong>
     <span id="transfer" role="status" aria-live="polite">—</span>
   </div>
   <div id="stack">
@@ -70,6 +74,36 @@
     const width = document.getElementById('width');
     const quality = document.getElementById('quality');
     const transfer = document.getElementById('transfer');
+    async function updateBattery() {
+      const badge = document.getElementById('battery');
+      badge.hidden = false;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch('/camera-viewer/api/battery', {
+          cache: 'no-store', signal: controller.signal
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const battery = await response.json();
+        const valid = Number.isFinite(battery.percent) && battery.percent >= 0 && battery.percent <= 100;
+        badge.className = '';
+        if (battery.available === true && valid) {
+          badge.textContent = tv('camera.battery', {percent: battery.percent}) +
+            (battery.charging === true ? ' · ' + t('camera.charging') : '');
+          badge.className = battery.percent <= 20 ? 'low' : 'fresh';
+        } else {
+          badge.textContent = valid ? tv('camera.batteryStale', {percent: battery.percent}) :
+            t('camera.batteryUnavailable');
+        }
+      } catch (_) {
+        badge.textContent = t('camera.batteryUnavailable');
+        badge.className = '';
+      } finally {
+        clearTimeout(timeout);
+        setTimeout(updateBattery, 5000);
+      }
+    }
+    if ('__BATTERY_ENABLED__' === 'true') updateBattery();
     let lastRgbStamp = 0, lastDepthStamp = 0;
     let revision = 0, statsStarted = performance.now(), bytes = 0, freshFrames = 0;
     try {
