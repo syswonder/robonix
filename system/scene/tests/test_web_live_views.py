@@ -289,6 +289,45 @@ def test_live_view_inline_javascript_is_valid(html_name):
     subprocess.run([node, "--check"], input=script, text=True, check=True)
 
 
+def test_camera_battery_display_handles_fresh_stale_and_failed_readings():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    html = _web_module()._INDEX_CAM_HTML
+    function = html.split('    async function updateBattery()', 1)[1].split(
+        "    if ('__BATTERY_ENABLED__'", 1)[0]
+    program = """
+const assert = require('node:assert/strict');
+const badge = {};
+const document = {getElementById: () => badge};
+const t = key => key;
+const tv = (key, values) => key + ':' + values.percent;
+const setTimeout = () => 1, clearTimeout = () => {};
+let reading;
+const fetch = async () => {
+  if (reading instanceof Error) throw reading;
+  return {ok: true, json: async () => reading};
+};
+async function updateBattery()""" + function + """
+(async () => {
+  for (const [value, text, style] of [
+    [{available:true,percent:71}, 'camera.battery:71', 'fresh'],
+    [{available:true,percent:0,charging:true}, 'camera.battery:0 · camera.charging', 'low'],
+    [{available:false,percent:71}, 'camera.batteryStale:71', ''],
+    [{available:true,percent:null}, 'camera.batteryUnavailable', ''],
+    [new Error('offline'), 'camera.batteryUnavailable', '']
+  ]) {
+    reading = value;
+    await updateBattery();
+    assert.equal(badge.textContent, text);
+    assert.equal(badge.className, style);
+    assert.equal(badge.hidden, false);
+  }
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    subprocess.run([node], input=program, text=True, check=True)
+
+
 def test_every_navigation_target_preserves_its_map_type():
     from html.parser import HTMLParser
     from starlette.testclient import TestClient
@@ -466,6 +505,8 @@ def test_camera_viewer_uses_scene_origin_and_limits_forwarded_operations():
         def do_GET(self):
             calls.append((self.command, self.path))
             payload = b'camera-preview' if self.path.startswith('/frame') else b'{"cameras":{"front":{"available":true}}}'
+            if self.path == '/api/battery':
+                payload = b'{"percent":71,"available":true,"charging":false}'
             self.send_response(200)
             self.send_header('Content-Type', 'image/jpeg' if self.path.startswith('/frame') else 'application/json')
             self.send_header('Content-Length', str(len(payload)))
@@ -496,8 +537,16 @@ def test_camera_viewer_uses_scene_origin_and_limits_forwarded_operations():
         assert client.get('/camera-viewer/admin').status_code == 404
         assert client.post('/camera-viewer/api/settings',json={'x':'x'*4096}).status_code == 413
         assert calls == [('GET','/api/cameras'),('GET','/frame?cam=front&t=1'),('POST','/api/settings')]
+        battery_only = TestClient(web.make_app(
+            registry=_registry_with_no_objects(), camera_battery_port=server.server_port))
+        assert battery_only.get('/camera-viewer/api/battery').json() == {
+            'percent': 71, 'available': True, 'charging': False}
+        assert battery_only.get('/camera-viewer/').status_code == 404
+        assert battery_only.get('/camera-viewer/frame').status_code == 404
+        assert battery_only.post('/camera-viewer/api/battery', json={}).status_code == 404
         disabled = TestClient(web.make_app(registry=_registry_with_no_objects()))
         assert disabled.get('/camera-viewer/api/cameras').status_code == 404
+        assert disabled.get('/camera-viewer/api/battery').status_code == 404
     finally:
         server.shutdown()
         server.server_close()

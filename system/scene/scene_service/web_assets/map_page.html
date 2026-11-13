@@ -242,7 +242,7 @@ function draw() {
         for (const road of roads) {
             ctx.beginPath();
             road.points.map(p => w2p(p.x,p.y)).forEach(([x,y],i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
-            ctx.strokeStyle = road.gait === 'stairs' ? '#bb9fe9' : '#75a0c3';
+            ctx.strokeStyle = road.gait === 'stairs' ? '#ff6666' : '#75a0c3';
             ctx.lineWidth = 4; ctx.stroke();
             if (road.low_accuracy) {
                 ctx.strokeStyle='#e5b45e';ctx.lineWidth=7;ctx.setLineDash([3,8]);ctx.stroke();ctx.setLineDash([]);

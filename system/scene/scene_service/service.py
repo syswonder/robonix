@@ -1909,6 +1909,7 @@ async def _run_active(config: dict) -> None:
             map_providers=config.get("map_providers"),
             outdoor_navigation=config.get("outdoor_navigation"),
             camera_viewer_port=config.get("camera_viewer_port", 0),
+            camera_battery_port=config.get("camera_battery_port", 0),
         )
         web_uv = uvicorn.Config(
             app=web_app,

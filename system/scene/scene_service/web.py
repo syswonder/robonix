@@ -742,6 +742,7 @@ def make_app(*, registry: ObjectRegistry,
              rerun_sink: Any = None,
              map_providers: Optional[dict] = None,
              camera_viewer_port: int = 0,
+             camera_battery_port: int = 0,
              outdoor_navigation: Optional[dict] = None) -> Starlette:
     """The Scene web app: the pages, /api/state, region CRUD and the map
     library façade over robonix/service/map.
@@ -759,6 +760,8 @@ def make_app(*, registry: ObjectRegistry,
     """
     if isinstance(camera_viewer_port, bool) or not isinstance(camera_viewer_port, int) or not 0 <= camera_viewer_port <= 65535:
         raise ValueError("camera_viewer_port must be 0 (disabled) or a local TCP port")
+    if isinstance(camera_battery_port, bool) or not isinstance(camera_battery_port, int) or not 0 <= camera_battery_port <= 65535:
+        raise ValueError("camera_battery_port must be 0 (disabled) or a local TCP port")
     if map_binding is None:
         map_binding = {}
     if ops_lock is None:
@@ -1543,7 +1546,8 @@ def make_app(*, registry: ObjectRegistry,
 
     async def cam(request) -> HTMLResponse:
         if _bare(request):
-            return HTMLResponse(_INDEX_CAM_HTML)
+            return HTMLResponse(_INDEX_CAM_HTML.replace(
+                "__BATTERY_ENABLED__", "true" if camera_battery_port else "false"))
         kind = _page_map_type(request)
         if camera_viewer_port:
             return HTMLResponse(_shell_page("/cam", '<iframe src="/camera-viewer/" title="camera"></iframe>',
@@ -1551,9 +1555,11 @@ def make_app(*, registry: ObjectRegistry,
         return HTMLResponse(_framed("/cam", "scene — camera", kind))
 
     async def camera_viewer(request):
+        path = request.path_params["path"]
+        if camera_battery_port and path == "api/battery" and request.method == "GET":
+            return await _proxy(request, camera_battery_port, path, timeout_s=3., label="camera battery")
         if not camera_viewer_port:
             return PlainTextResponse("No local camera viewer configured", status_code=404)
-        path = request.path_params["path"]
         allowed = ("", "index.html", "api/cameras", "api/battery", "api/settings", "frame")
         if path not in allowed or (request.method == "POST" and path != "api/settings"):
             return PlainTextResponse("Unknown camera viewer operation", status_code=404)

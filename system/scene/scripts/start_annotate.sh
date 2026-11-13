@@ -18,4 +18,4 @@ export SCENE_GRAPH_CACHE_DIR="$PKG/rbnx-build/data/graph"
 export ROS_LOG_DIR="$PKG/rbnx-build/ros_logs"
 export ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-127.0.0.1}"
 mkdir -p "$ROS_LOG_DIR" "$SCENE_ANNOTATIONS_DIR" "$SCENE_MAP_META_DIR" "$SCENE_GRAPH_CACHE_DIR"
-exec "$PKG/rbnx-build/annotate-venv/bin/python" -m scene_service.service
+exec "${OUTDOOR_SERVICE_PYTHON:-$PKG/rbnx-build/annotate-venv/bin/python}" -m scene_service.service

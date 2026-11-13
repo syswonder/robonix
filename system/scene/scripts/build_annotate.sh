@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PY="$PKG/rbnx-build/annotate-venv/bin/python"
+PY="${OUTDOOR_SERVICE_PYTHON:-$PKG/rbnx-build/annotate-venv/bin/python}"
 if [[ ! -x "$PY" ]]; then
   uv venv --system-site-packages --python "${ROS_PYTHON:-/usr/bin/python3}" "$PKG/rbnx-build/annotate-venv"
 fi
