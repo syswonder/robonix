@@ -213,14 +213,27 @@ pub async fn execute(
     // Probe for both python3 and the module up front — the historical
     // silent-ignore on failure left packages with "0 generated Servicers"
     // at runtime and a debug session per missing dep.
-    let selected = select_codegen_python(python)?;
-    // Nothing chosen and the system python3 cannot generate stubs -- the
-    // case on a freshly installed machine, which has no grpcio-tools and
-    // often no pip. A pinned toolchain is prepared once instead of every
-    // package's build script having to know how.
-    let (python_selection, python_info) = match probe_python_grpc_tools(&selected.path) {
-        Ok(info) => (selected, info),
-        Err(_) if selected.source == "default" => {
+    //
+    // Unless a Python is named, the pinned toolchain rbnx manages is used.
+    // Whatever `python3` is on PATH may import grpc_tools yet mix versions
+    // (an app's venv with system site-packages plus a newer grpcio-tools in
+    // the user site), and its stubs then fail against the pinned runtime.
+    let (python_selection, python_info) = match select_codegen_python(python)? {
+        Some(selected) => {
+            let info = probe_python_grpc_tools(&selected.path)?;
+            if let Some(mismatch) = pinned_mismatch(&info) {
+                anyhow::bail!(
+                    "codegen Python selected by {} ({}) has {mismatch}; rbnx codegen needs \
+                     protobuf=={MANAGED_PROTOBUF}, grpcio-tools=={MANAGED_GRPC_TOOLS} and \
+                     grpcio=={MANAGED_GRPCIO}. Install those versions there, or unset \
+                     RBNX_CODEGEN_PYTHON and drop --python to use the managed toolchain.",
+                    selected.source,
+                    info.executable
+                );
+            }
+            (selected, info)
+        }
+        None => {
             let path = managed_codegen_python()?;
             let info = probe_python_grpc_tools(&path)?;
             (
@@ -231,7 +244,6 @@ pub async fn execute(
                 info,
             )
         }
-        Err(e) => return Err(e),
     };
     let python = &python_selection.path;
     println!(
@@ -256,7 +268,7 @@ pub async fn execute(
     proto_inputs.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
 
     let input_fingerprint = fingerprint_proto_inputs(&proto_inputs)?;
-    let mut protoc = Command::new(python);
+    let mut protoc = python_command(python);
     protoc
         .args(["-m", "grpc_tools.protoc", "-I"])
         .arg(&runtime_proto)
@@ -421,34 +433,55 @@ struct PythonSelection {
     source: String,
 }
 
+/// The Python named by `--python`, else by `RBNX_CODEGEN_PYTHON`; `None`
+/// means the managed toolchain.
 fn resolve_python_selection(
     cli: Option<PathBuf>,
     environment: Option<std::ffi::OsString>,
-) -> PythonSelection {
+) -> Option<PythonSelection> {
     if let Some(path) = cli {
-        return PythonSelection {
+        return Some(PythonSelection {
             path,
             source: "cli".to_string(),
-        };
+        });
     }
-    if let Some(path) = environment
-        && !path.is_empty()
-    {
-        return PythonSelection {
+    environment
+        .filter(|path| !path.is_empty())
+        .map(|path| PythonSelection {
             path: PathBuf::from(path),
             source: "environment".to_string(),
-        };
-    }
-    PythonSelection {
-        path: PathBuf::from("python3"),
-        source: "default".to_string(),
-    }
+        })
 }
 
-fn select_codegen_python(cli: Option<PathBuf>) -> Result<PythonSelection> {
-    let selection = resolve_python_selection(cli, std::env::var_os("RBNX_CODEGEN_PYTHON"));
+/// A command running `python` with the user site off, so packages under
+/// ~/.local never mix into the toolchain.
+fn python_command(python: &Path) -> Command {
+    let mut command = Command::new(python);
+    command.env("PYTHONNOUSERSITE", "1");
+    command
+}
+
+/// What differs from the pinned toolchain, if anything.
+fn pinned_mismatch(info: &PythonInfo) -> Option<String> {
+    let wrong: Vec<String> = [
+        ("protobuf", &info.protobuf, MANAGED_PROTOBUF),
+        ("grpcio-tools", &info.grpcio_tools, MANAGED_GRPC_TOOLS),
+        ("grpcio", &info.grpcio, MANAGED_GRPCIO),
+    ]
+    .into_iter()
+    .filter(|(_, found, wanted)| found.as_str() != *wanted)
+    .map(|(name, found, _)| format!("{name} {found}"))
+    .collect();
+    (!wrong.is_empty()).then(|| wrong.join(", "))
+}
+
+fn select_codegen_python(cli: Option<PathBuf>) -> Result<Option<PythonSelection>> {
+    let Some(selection) = resolve_python_selection(cli, std::env::var_os("RBNX_CODEGEN_PYTHON"))
+    else {
+        return Ok(None);
+    };
     let candidate = &selection.path;
-    let output = Command::new(candidate)
+    let output = python_command(candidate)
         .arg("--version")
         .output()
         .with_context(|| {
@@ -466,7 +499,7 @@ fn select_codegen_python(cli: Option<PathBuf>) -> Result<PythonSelection> {
             output.status
         );
     }
-    Ok(selection)
+    Ok(Some(selection))
 }
 
 // The managed toolchain's versions: the ones the Webots containers import
@@ -482,7 +515,7 @@ fn managed_codegen_python() -> Result<PathBuf> {
     let home = Config::robonix_home_dir()?;
     let venv = home.join("codegen-venv");
     let python = venv.join("bin").join("python");
-    if python.is_file() && probe_python_grpc_tools(&python).is_ok() {
+    if managed_python_ready(&python) {
         return Ok(python);
     }
     println!(
@@ -523,7 +556,7 @@ fn managed_codegen_python() -> Result<PathBuf> {
     if std::fs::rename(&staging, &venv).is_err() {
         // Another package finished first, or an old environment is in the
         // way. Keep a working one; replace a broken one.
-        if python.is_file() && probe_python_grpc_tools(&python).is_ok() {
+        if managed_python_ready(&python) {
             let _ = std::fs::remove_dir_all(&staging);
         } else {
             let _ = std::fs::remove_dir_all(&venv);
@@ -532,6 +565,13 @@ fn managed_codegen_python() -> Result<PathBuf> {
         }
     }
     Ok(python)
+}
+
+/// The managed Python exists and still has exactly the pinned versions; an
+/// older one is rebuilt rather than reused.
+fn managed_python_ready(python: &Path) -> bool {
+    python.is_file()
+        && probe_python_grpc_tools(python).is_ok_and(|info| pinned_mismatch(&info).is_none())
 }
 
 fn probe_python_grpc_tools(python: &Path) -> Result<PythonInfo> {
@@ -545,7 +585,7 @@ print(json.dumps({"executable": sys.executable, "version": sys.version.split()[0
                   "grpcio_tools": v("grpcio-tools"), "protobuf": v("protobuf"),
                   "grpcio": v("grpcio")}, sort_keys=True))
 "#;
-    let mod_probe = Command::new(python)
+    let mod_probe = python_command(python)
         .args(["-c", PROBE])
         .output()
         .with_context(|| format!("failed to spawn {} for grpc_tools probe", python.display()))?;
@@ -569,7 +609,7 @@ print(json.dumps({"executable": sys.executable, "version": sys.version.split()[0
             .map(str::to_owned)
             .with_context(|| format!("codegen Python probe omitted `{key}`"))
     };
-    let protoc_version = Command::new(python)
+    let protoc_version = python_command(python)
         .args(["-m", "grpc_tools.protoc", "--version"])
         .output()
         .with_context(|| {
@@ -674,7 +714,7 @@ if failed:
     raise SystemExit(f"{len(failed)} of {len(files)} generated modules failed import validation")
 print(f"validated {len(files)} generated Python modules")
 "#;
-    let output = Command::new(python)
+    let output = python_command(python)
         .arg("-c")
         .arg(VALIDATE)
         .arg(generated)
@@ -885,29 +925,61 @@ mod tests {
     }
 
     #[test]
-    fn python_selection_precedence_is_cli_then_environment_then_default() {
+    fn python_selection_precedence_is_cli_then_environment_then_managed() {
         let env = Some(std::ffi::OsString::from("/env/python"));
         assert_eq!(
             resolve_python_selection(Some(PathBuf::from("/cli/python")), env.clone()),
-            PythonSelection {
+            Some(PythonSelection {
                 path: PathBuf::from("/cli/python"),
                 source: "cli".to_string(),
-            }
+            })
         );
         assert_eq!(
             resolve_python_selection(None, env),
-            PythonSelection {
+            Some(PythonSelection {
                 path: PathBuf::from("/env/python"),
                 source: "environment".to_string(),
-            }
+            })
         );
+        assert_eq!(resolve_python_selection(None, None), None);
         assert_eq!(
-            resolve_python_selection(None, None),
-            PythonSelection {
-                path: PathBuf::from("python3"),
-                source: "default".to_string(),
-            }
+            resolve_python_selection(None, Some(std::ffi::OsString::new())),
+            None
         );
+    }
+
+    /// The failure seen through Robonix Console: a venv that imports
+    /// grpc_tools, but from a newer grpcio-tools in the user site next to the
+    /// pinned runtime. The probe must run with the user site off and the
+    /// mixed versions must be refused rather than used.
+    #[test]
+    fn a_python_mixing_toolchain_versions_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("mixed-python");
+        fs::create_dir_all(&root).unwrap();
+        let seen = root.join("user-site");
+        let python = root.join("python");
+        fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{PYTHONNOUSERSITE:-}}\" > '{}'\n\
+                 if [ \"$1\" = -c ]; then\n\
+                 echo '{{\"executable\": \"/mixed/bin/python\", \"version\": \"3.10.12\", \
+                 \"grpcio_tools\": \"1.83.0\", \"protobuf\": \"6.33.6\", \"grpcio\": \"1.80.0\"}}'\n\
+                 else echo 'libprotoc 31.1'; fi\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let info = probe_python_grpc_tools(&python).unwrap();
+        assert_eq!(fs::read_to_string(&seen).unwrap(), "1");
+        assert_eq!(
+            pinned_mismatch(&info).as_deref(),
+            Some("grpcio-tools 1.83.0")
+        );
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
