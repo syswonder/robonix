@@ -1503,7 +1503,6 @@ mod tests {
                 assert_eq!(fs::read(&outside).unwrap(), b"keep");
             },
         );
-
     }
 
     #[test]

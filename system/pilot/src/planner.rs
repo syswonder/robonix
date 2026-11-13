@@ -2774,8 +2774,9 @@ mod tests {
                                 TreeMeta {
                                     description: "active work".into(),
                                     control_only: false,
-                                    call_signatures: HashSet::new(),
+                                    call_signatures: HashMap::new(),
                                     steps: Vec::new(),
+                                    repeat_counts: HashMap::new(),
                                 },
                             );
                             let task = Task {
