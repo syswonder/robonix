@@ -973,7 +973,24 @@ mod tests {
         .unwrap();
         fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let info = probe_python_grpc_tools(&python).unwrap();
+        // A test thread that forks while the script is still open for writing
+        // hands the write descriptor to its child until that child execs, and
+        // executing the script meanwhile fails with ETXTBSY. Wait it out.
+        let info = (0..100)
+            .find_map(|_| match probe_python_grpc_tools(&python) {
+                Err(e)
+                    if e.chain().any(|c| {
+                        c.downcast_ref::<std::io::Error>()
+                            .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
+                    }) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
+                other => Some(other),
+            })
+            .expect("the fake python stayed busy")
+            .unwrap();
         assert_eq!(fs::read_to_string(&seen).unwrap(), "1");
         assert_eq!(
             pinned_mismatch(&info).as_deref(),
