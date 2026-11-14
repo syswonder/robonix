@@ -182,6 +182,11 @@ class AnnotationStore:
                 self._annotations = {}
                 self._load(current_generation=generation)
 
+    def snapshot(self, map_id: str, *, generation: Optional[int] = None) -> Path:
+        """Write another map's snapshot without changing the live partition."""
+        with self._lock:
+            return self._save_locked(map_id=sanitize_map_id(map_id), generation=generation)
+
     def delete_map(self, map_id: str) -> bool:
         """Delete exactly one persisted annotation partition."""
         target = sanitize_map_id(map_id)
@@ -227,20 +232,23 @@ class AnnotationStore:
                     "annotation(s) marked stale for user confirmation", reason, n,
                 )
 
-    def _save_locked(self) -> None:
+    def _save_locked(self, *, map_id: Optional[str] = None,
+                     generation: Optional[int] = None) -> Path:
         """Atomically write the current state (caller holds the lock or is
         __init__).
         """
+        path = self._path if map_id is None else self._base / f"{map_id}.json"
         payload = {
-            "map_id": self._map_id,
-            "generation": self._generation,
+            "map_id": self._map_id if map_id is None else map_id,
+            "generation": self._generation if map_id is None else generation,
             "annotations": [a.to_json() for a in self._annotations.values()],
         }
-        tmp = self._path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
         )
-        os.replace(tmp, self._path)
+        os.replace(tmp, path)
+        return path
 
     # list()/get() hand out the LIVE Annotation objects — treat them as read-
     # only.

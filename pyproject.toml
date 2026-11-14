@@ -27,7 +27,7 @@
 
 [project]
 name = "robonix"
-version = "1.1.0b1"
+version = "1.1.0"
 description = "Robonix monorepo (Rust crates + Python packages + system services)."
 requires-python = ">=3.10"
 
@@ -39,6 +39,7 @@ exclude = ["services/verifiers"]
 members = [
     "pylib/*",        # shared Python libs (robonix-api, …)
     "system/scene",   # only Python-implemented system component today
+    "system/chronos/clock", # optional Python bindings for the Rust clock library
     "services/memory",
     "services/memsearch",
     "services/speech",

@@ -32,6 +32,29 @@ calling remain available to other consumers. Omitted values default to `true`.
 
 The wire schema lives in [`proto/atlas.proto`](proto/atlas.proto).
 
+Sensor declarations may include `CapabilityTimeDescriptor` with their clock
+domain, acquisition semantics and pipeline uncertainty. Atlas validates and
+retains it with the declaration, returns it in Query and Connect, and preserves
+the absence of a known fixed delay. Rebuild protobuf bindings to use these fields.
+
+Python declarations carrying time metadata propagate `AlreadyExists` for a
+duplicate capability instead of reporting success with the old descriptor.
+Unregister and register the provider again before replacing its declarations.
+Repeating a declaration without `time_descriptor` retains legacy success and
+keeps the stored descriptor. Old Python Query and Connect response bindings
+expose `time_descriptor=None`; regenerate them to consume stored metadata.
+
+`AtlasRegistry::connect` returns `(channel_id, endpoint, params, time_descriptor)`;
+direct registry callers must handle the fourth value. The existing
+`AtlasClient::connect_capability` keeps its three-value return; callers that
+need metadata use `connect_capability_with_time`.
+
+The `Atlas Python metadata` CI job builds Atlas, generates Python bindings from
+this schema, and runs `pylib/robonix-api/tests/test_atlas_time_descriptor.py`
+against an Atlas process. The tests cover provider declaration, Query, Connect,
+channel cleanup, optional delay presence, the old-stub declaration error, and
+reads with old response types.
+
 ## Namespace diagnostics
 
 A provider's namespace is its primary grouping for discovery and operator

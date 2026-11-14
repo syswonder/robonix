@@ -7,6 +7,10 @@ use crate::reference::{LinuxSystemReference, ReferenceError, read_linux_monotoni
 
 /// One best-effort reading of the configured reference-time scale.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(frozen, get_all, skip_from_py_object, module = "robonix_chronos_clock")
+)]
 pub struct VirtualReferenceTime {
     pub timestamp_ns: i64,
     pub generation: u64,
@@ -19,12 +23,20 @@ pub struct VirtualReferenceTime {
 
 /// One local monotonic reading for durations, deadlines, and status age.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(frozen, get_all, skip_from_py_object, module = "robonix_chronos_clock")
+)]
 pub struct VirtualSteadyTime {
     pub timestamp_ns: u64,
 }
 
 /// A reference reading paired with local steady time; Linux uses the sampling midpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(frozen, get_all, skip_from_py_object, module = "robonix_chronos_clock")
+)]
 pub struct VirtualClockSnapshot {
     pub reference: VirtualReferenceTime,
     pub steady: VirtualSteadyTime,

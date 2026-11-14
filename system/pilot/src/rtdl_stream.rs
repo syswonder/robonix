@@ -3,7 +3,8 @@
 use crate::pb::executor::ExecuteStreamInput;
 use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
 use crate::planner::{
-    self, CapabilityTargetMap, MetaPlanOp, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlEnvelope,
+    self, CapabilityTargetMap, MetaPlanOp, RTDL_DO, RTDL_IF, RTDL_PARALLEL, RTDL_REPEAT,
+    RTDL_SEQUENCE, RTDL_WHILE, RtdlEnvelope,
 };
 use crate::tasks::{self, TaskFields};
 use anyhow::{Result, bail, ensure};
@@ -345,8 +346,9 @@ impl RtdlIncrementalParser {
                     let token = &self.text[self.string_start..];
                     // These values never contain RTDL children, so inspect
                     // their containers only once at closure.
-                    const OPAQUE_KEYS: [&str; 10] = [
+                    const OPAQUE_KEYS: [&str; 11] = [
                         "args",
+                        "condition",
                         "op_id",
                         "description",
                         "op",
@@ -544,11 +546,16 @@ impl RtdlIncrementalParser {
         *count += 1;
         ensure!(*count <= MAX_NODES, "RTDL exceeds 256 nodes");
         ensure!(depth <= MAX_DEPTH, "RTDL nesting exceeds 32");
-        if let Partial::Object(fields, _) = value
-            && let Some(Partial::Array(children, _)) = fields.get("children")
-        {
-            for child in children {
-                Self::check_limits(child, depth + 1, count)?;
+        if let Partial::Object(fields, _) = value {
+            if let Some(Partial::Array(children, _)) = fields.get("children") {
+                for child in children {
+                    Self::check_limits(child, depth + 1, count)?;
+                }
+            }
+            for key in ["then", "else", "body"] {
+                if let Some(child) = fields.get(key) {
+                    Self::check_limits(child, depth + 1, count)?;
+                }
             }
         }
         Ok(())
@@ -576,16 +583,18 @@ impl RtdlIncrementalParser {
             return Ok(true);
         }
         ensure!(
-            ["sequence", "parallel", "do"].contains(&op),
+            ["sequence", "parallel", "do", "if", "repeat", "while"].contains(&op),
             "unknown RTDL operator `{op}`"
         );
         for key in fields.keys() {
             ensure!(
                 ["op", "op_id", "description"].contains(&key.as_str())
-                    || if op == "do" {
-                        ["cap", "args", "children"].contains(&key.as_str())
-                    } else {
-                        key == "children"
+                    || match op {
+                        "do" => ["cap", "args", "bind", "children"].contains(&key.as_str()),
+                        "if" => ["condition", "then", "else"].contains(&key.as_str()),
+                        "repeat" => ["count", "body"].contains(&key.as_str()),
+                        "while" => ["condition", "body", "max_iterations"].contains(&key.as_str()),
+                        _ => key == "children",
                     },
                 "unexpected field `{key}` in RTDL"
             );
@@ -618,6 +627,77 @@ impl RtdlIncrementalParser {
                 parent,
                 closed: true,
             });
+            return Ok(true);
+        }
+        if matches!(op, "if" | "repeat" | "while") {
+            // A control node cannot run until its condition, bound and body are final.
+            // Buffer this subtree while other completed prefixes can still execute.
+            if !closed {
+                return Ok(false);
+            }
+            let condition_json = if matches!(op, "if" | "while") {
+                let condition = fields
+                    .get("condition")
+                    .and_then(Partial::value)
+                    .ok_or_else(|| anyhow::anyhow!("{op}.condition is required"))?;
+                crate::expression::validate_expr(&condition).map_err(anyhow::Error::msg)?;
+                serde_json::to_string(&condition)?
+            } else {
+                String::new()
+            };
+            let limit = if op == "if" {
+                0
+            } else {
+                let key = if op == "repeat" {
+                    "count"
+                } else {
+                    "max_iterations"
+                };
+                fields
+                    .get(key)
+                    .and_then(Partial::value)
+                    .as_ref()
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value <= 10_000 && (op != "while" || *value > 0))
+                    .ok_or_else(|| anyhow::anyhow!("{op}.{key} has an invalid limit"))?
+                    as u32
+            };
+            let description = pick_description(
+                description,
+                parent.is_none().then_some(label).flatten(),
+                op.into(),
+            );
+            out.push(Candidate {
+                node: RtdlNode {
+                    node_kind: match op {
+                        "if" => RTDL_IF,
+                        "repeat" => RTDL_REPEAT,
+                        _ => RTDL_WHILE,
+                    },
+                    description,
+                    condition_json,
+                    repeat_count: if op == "repeat" { limit } else { 0 },
+                    max_iterations: if op == "while" { limit } else { 0 },
+                    ..Default::default()
+                },
+                parent,
+                closed: true,
+            });
+            let body_key = if op == "if" { "then" } else { "body" };
+            let body = fields
+                .get(body_key)
+                .ok_or_else(|| anyhow::anyhow!("{op}.{body_key} is required"))?;
+            ensure!(
+                self.walk(body, Some(index), depth + 1, label, out)?,
+                "incomplete {op}.{body_key}"
+            );
+            if let Some(otherwise) = fields.get("else") {
+                ensure!(op == "if", "else is only valid for if");
+                ensure!(
+                    self.walk(otherwise, Some(index), depth + 1, label, out)?,
+                    "incomplete if.else"
+                );
+            }
             return Ok(true);
         }
         let Some(Partial::Array(children, _)) = fields.get("children") else {
@@ -671,6 +751,15 @@ impl RtdlIncrementalParser {
             .unwrap_or_else(|| Some(Value::Object(Map::new())))
             .filter(Value::is_object)
             .ok_or_else(|| anyhow::anyhow!("do.args must be an object"))?;
+        crate::expression::validate_expr(&args).map_err(anyhow::Error::msg)?;
+        let bind = match fields.get("bind") {
+            None => String::new(),
+            Some(value) => value
+                .string()
+                .filter(|name| !name.is_empty() && name.trim() == *name)
+                .ok_or_else(|| anyhow::anyhow!("do.bind must be a non-empty string"))?
+                .into(),
+        };
         let (provider_id, contract_id) = self
             .targets
             .get(cap)
@@ -684,6 +773,7 @@ impl RtdlIncrementalParser {
                 args_json: serde_json::to_string(&args)?,
                 ..Default::default()
             }),
+            bind,
             ..Default::default()
         })
     }
@@ -738,7 +828,7 @@ mod tests {
     /// Production finalization requires all envelope fields and validates completed task metadata.
     #[test]
     fn finish_enforces_envelope_schema() {
-        let valid = serde_json::json!({
+        let mut valid = serde_json::json!({
             "content": "done", "rtdl_description": "", "message_updates": [], "rtdl_parent_task_id": "T1", "task_updates": [],
             "rtdl": {"op": "sequence", "children": []}
         });
@@ -781,6 +871,13 @@ mod tests {
         let (envelope, meta_op) = p.finish().unwrap();
         assert!(envelope.task_fields.updates.is_empty());
         assert!(meta_op.is_none());
+
+        for key in tasks::REPLY_FIELDS {
+            valid.as_object_mut().unwrap().remove(key);
+        }
+        let mut p = parser();
+        p.push(&valid.to_string()).unwrap();
+        assert_eq!(p.finish().unwrap().0.task_fields, TaskFields::default());
     }
 
     /// Finalization preserves complete metadata and builds no-call trees without wire traffic.
@@ -1136,6 +1233,8 @@ mod tests {
     #[test]
     fn invalid_envelope_and_call_fields_never_commit() {
         for raw in [
+            r#"Let me check the scene first.
+{"content":"","rtdl_description":"check","message_updates":[],"rtdl_parent_task_id":"T1","rtdl":{"op":"do","cap":"run"},"task_updates":[]}"#,
             r#"{"content":7,"rtdl":{"op":"do","description":"d","cap":"run","args":{}}}"#,
             r#"{"task_update":[0,1],"rtdl":{}}"#,
             r#"{"task_update":{"goal":[0,1]}}"#,
@@ -1146,6 +1245,7 @@ mod tests {
             let mut p = parser();
             assert!(p.push(raw).is_err(), "{raw}");
             assert!(!p.committed());
+            assert!(p.take_messages().is_empty());
         }
     }
 

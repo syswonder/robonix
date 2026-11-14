@@ -45,6 +45,14 @@ bash examples/webots/boot.sh
 command. The wrapper is required when selecting the full variant because it
 keeps Soma and simulated health on the same robot description.
 
+## Navigation recovery
+
+`config/nav2_params.yaml` and `config/navigate_to_pose.xml` configure Nav2 for
+this deployment. Recovery preserves a 2 m square centered on the robot when
+clearing costmaps, so remembered nearby obstacles remain blocked after they
+leave the head camera's view. Replanning, retries, spin, wait, and backup use
+the Nav2 Humble defaults.
+
 ## TIAGo variants
 
 The default `lite` variant is the existing TIAGo base and body without an arm:

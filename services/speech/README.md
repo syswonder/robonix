@@ -5,7 +5,7 @@ ASR, TTS, streaming TTS, dialog state, and speaker helper capabilities.
 
 Backends:
 
-- `local` (default): Whisper one-shot ASR, FunASR streaming ASR, Edge TTS.
+- `local` (default): Whisper one-shot ASR, sherpa-onnx int8 Paraformer streaming ASR, Edge TTS.
 - `tencent`: Tencent Cloud real-time ASR WebSocket and TextToVoice TTS API.
 - `custom`: load ASR/TTS backend classes from `module:Class` environment
   variables without changing Liaison or speech capability contracts.
@@ -65,13 +65,37 @@ response. One-shot synthesis and `speech/speak` also stop below 4 MiB of decoded
 PCM so the result fits the core client's default gRPC receive limit; use the
 streaming TTS capability for larger output.
 
-With `SPEECH_BACKEND=tencent`, the build installs only the cloud client and
-audio adaptation dependencies. It does not install or warm FunASR, Whisper,
+With `SPEECH_BACKEND=tencent`, the build installs cloud client, audio adaptation
+and wake-word dependencies. It does not install or warm Whisper,
 Torch, CUDA, or Edge TTS. The `local` backend keeps those dependencies in the
 `local` optional dependency set and preloads its models during build.
 
 The TTS contract returns 16 kHz mono `pcm_s16le` bytes in both local and Tencent
 modes so existing audio speaker primitives can play the response directly.
+
+## Local streaming ASR
+
+The build downloads the bilingual int8 Paraformer model into
+`rbnx-build/models/sherpa-onnx-streaming-paraformer-bilingual-zh-en`.
+Streaming inference defaults to CPU without loading torch. `SHERPA_ASR_DIR`
+selects a different model directory; `SHERPA_ASR_ENCODER`,
+`SHERPA_ASR_DECODER` and `SHERPA_ASR_TOKENS` override individual files.
+`SHERPA_ASR_THREADS` defaults to 2.
+
+`SHERPA_ASR_PROVIDER` selects the sherpa-onnx execution provider (default:
+`cpu`). To request CUDA, install a GPU-enabled sherpa-onnx 1.13.4 build
+compatible with the board, driver and model into this package's venv after
+`rbnx build`, then export `SHERPA_ASR_PROVIDER=cuda` before starting the
+service. Reapply the GPU runtime installation after rebuilding: the build
+script installs the default CPU wheel set. Installing `onnxruntime-gpu`
+alone does not replace the native runtime linked by sherpa-onnx.
+
+Provider strings are passed directly to sherpa-onnx, without board-specific
+selection. Its build and model determine which providers work. Logs show
+the requested provider; unsupported providers or operators may fall back
+to CPU. The bundled int8 Paraformer can execute partly on CPU even when
+CUDA is selected, so profile the target board before choosing it. This
+setting does not change Whisper, wake-word detection or TTS.
 
 ## Wake word
 
@@ -148,3 +172,33 @@ Streaming ASR yields event dictionaries; one-shot ASR returns a dictionary with
 
 The backend may call any implementation internally: a local model, a cloud API,
 or an existing gRPC stub. Do not change Liaison for algorithm swaps.
+
+## Streaming configuration and events
+
+Manifest `sherpa_asr_dir`, `sherpa_asr_threads` (default 2), and
+`sherpa_asr_provider` (default cpu) override SHERPA_ASR_DIR,
+SHERPA_ASR_THREADS, and SHERPA_ASR_PROVIDER. The build installs the same
+sherpa-onnx 1.13.4 wheel family as Voiceprint. GPU providers require a
+compatible runtime; the requested provider alone does not prove GPU execution.
+
+Streaming partial events carry text deltas. The final event carries the full
+transcript and replaces all earlier partials, including recognition revisions.
+Custom streaming backends must follow this rule. Upgrade Liaison and Speech
+together; older Liaison versions append final text and can duplicate words.
+
+Model downloads honor RBNX_GH_MIRROR (empty selects GitHub directly).
+KWS and ASR release archives have pinned SHA256 checksums; only required
+runtime files are extracted into a staging directory. A failed transfer,
+checksum or extraction leaves the previous model directory intact. Verified
+runtime files are checked again before reuse. With ROBONIX_MODEL_CACHE_DIR set,
+verified archives are cached under its `speech/` directory by SHA256, checked
+again on each cache hit, and published atomically under a per-digest lock.
+A digest-keyed mirror request and KWS's official GitHub release asset API
+provide alternate downloads. KWS also tries gh-proxy.org after the official
+endpoints fail; every response must match the pinned archive checksum. Checksum failures report both expected and actual SHA256 values.
+ASR retains the int8 encoder and decoder; unused FP32 graphs are not extracted.
+
+At end of input, Paraformer receives lookahead padding before final decoding,
+following the [upstream streaming example](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.4/python-api-examples/online-decode-files.py).
+This flushes words near the end of a recording; it does not wait for additional
+microphone audio.

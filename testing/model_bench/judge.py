@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from bench import HERE, OUT_OF_CREDIT, logs_for_results, read_env
+from bench import HERE, OUT_OF_CREDIT, completion_fails, logs_for_results, read_env
 
 if __package__:
     from .bundle import scrub, write_bundle
@@ -85,7 +85,6 @@ def main() -> None:
         if provenance is not None:
             provenance["judge_model"] = a.model
             data["meta"]["provenance"] = scrub(provenance, [env["VLM_API_KEY"]])
-        data["meta"]["judge_model"] = a.model
         for r in data["results"]:
             case = cases[r["id"]]
             if "judge" not in case:
@@ -103,9 +102,11 @@ def main() -> None:
             r["judge_key"] = key
             data["meta"]["judge_model"] = a.model
             f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
-        f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        if provenance is not None:
+            f.write_text(json.dumps(data, ensure_ascii=False, indent=1))
         rs = data["results"]
-        passed = sum(not r["fails"] and all(v["met"] for v in r.get("verdicts") or []) for r in rs)
+        passed = sum(not completion_fails(r["final"], r.get("pilot_failed", False), r.get("finished", True))
+                     and not r["fails"] and all(v["met"] for v in r.get("verdicts") or []) for r in rs)
         print(f"{f.name}: {passed}/{len(rs)} cases pass", flush=True)
     print(f"judge {a.model}: {used['calls']} calls, {used['prompt_tokens']} prompt + {used['completion_tokens']} completion tokens")
     # What is uploaded to Robonix Hub: the judged files, as one archive.

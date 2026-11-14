@@ -57,6 +57,18 @@ class McpParams:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityTimeDescriptor:
+    """Static binding between one sensor capability and its clock domain."""
+
+    domain_id: str
+    timestamp_semantics: str
+    is_hardware_timestamped: bool = False
+    pipeline_delay_ns: int | None = None
+    pipeline_uncertainty_ns: int = 0
+    supports_per_point_timestamp: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class FieldSpec:
     name: str
     type_name: str
@@ -79,6 +91,7 @@ class Capability:
     description: str = ""
     namespace_mismatch: bool = False
     params: GrpcParams | Ros2Params | McpParams | None = None
+    time_descriptor: CapabilityTimeDescriptor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +143,7 @@ class Channel:
     endpoint: str
     channel_id: str
     params: GrpcParams | Ros2Params | McpParams | None = None
+    time_descriptor: CapabilityTimeDescriptor | None = None
     _closer: Any = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -194,6 +208,31 @@ def from_pb_capability(pb_cap) -> Capability:
         description=pb_cap.description,
         namespace_mismatch=getattr(pb_cap, "namespace_mismatch", False),
         params=from_pb_params(transport, pb_cap.params),
+        time_descriptor=from_pb_time_descriptor(
+            pb_cap.time_descriptor
+            if hasattr(pb_cap, "time_descriptor")
+            and pb_cap.HasField("time_descriptor")
+            else None
+        ),
+    )
+
+
+def from_pb_time_descriptor(pb_time) -> CapabilityTimeDescriptor | None:
+    """Convert optional timing metadata without requiring a new Atlas stub."""
+    if pb_time is None:
+        return None
+    has_delay = False
+    try:
+        has_delay = pb_time.HasField("pipeline_delay_ns")
+    except (ValueError, AttributeError):
+        has_delay = False
+    return CapabilityTimeDescriptor(
+        domain_id=pb_time.domain_id,
+        timestamp_semantics=pb_time.timestamp_semantics,
+        is_hardware_timestamped=pb_time.is_hardware_timestamped,
+        pipeline_delay_ns=pb_time.pipeline_delay_ns if has_delay else None,
+        pipeline_uncertainty_ns=int(pb_time.pipeline_uncertainty_ns),
+        supports_per_point_timestamp=pb_time.supports_per_point_timestamp,
     )
 
 

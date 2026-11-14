@@ -26,6 +26,7 @@ requests = []
 streamed_before_tail = []
 mode = "concurrent"
 sent = set()
+response_at = 0.0
 
 
 def port():
@@ -89,11 +90,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self):
+        global response_at
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         text = json.dumps(request["messages"])
         requests.append(request)
         trace = shlex.quote(str(TRACE))
-        if mode == "concurrent":
+        request_mode = mode
+        if request_mode in {"delayed", "silent"}:
+            if request_mode == "delayed" and not response_at:
+                response_at = time.monotonic() + 6
+            delay = (
+                max(0, response_at - time.monotonic())
+                if request_mode == "delayed" else 6
+            )
+            time.sleep(delay)
+            data = envelope("T1", status="done")
+            data["rtdl_parent_task_id"] = None
+            marker = None
+        elif request_mode == "stalled":
+            data = envelope("T1", f"printf D >> {trace}")
+            marker = "D"
+        elif request_mode == "concurrent":
             if "A" not in sent:
                 sent.add("A")
                 data = envelope(
@@ -171,7 +188,9 @@ class Handler(BaseHTTPRequestHandler):
                 f"action {marker} did not start before task_updates"
             )
             streamed_before_tail.append(marker)
-        if mode == "malformed" and marker == "C":
+        if request_mode == "stalled":
+            time.sleep(6)
+        if request_mode == "malformed" and marker == "C":
             time.sleep(0.15)
             emit('"task_updates":BROKEN}')
         else:
@@ -274,6 +293,38 @@ async def check(pilot_address):
         "PASS: malformed tail retains one task-owned tree and its completed result without replay"
     )
     print("streamed before trailing updates:", streamed_before_tail)
+
+    global response_at
+    mode = "delayed"
+    response_at = 0.0
+    start = len(requests)
+    await consume("delayed-open", "delayed", "wait-for-vlm")
+    attempts = requests[start:]
+    assert len(attempts) == 2, len(attempts)
+    assert attempts[0] == attempts[1], "opening retry changed the prompt"
+    assert any(
+        event.get("session_id") == "delayed-open"
+        and event.get("event_kind") == 4
+        for event in observed
+    ), observed
+    print("PASS: delayed VLM opening retries the same request once and finishes")
+
+    for failed_mode, session, expected_attempts in [
+        ("silent", "silent-open", 2),
+        ("stalled", "stalled-stream", 1),
+    ]:
+        mode = failed_mode
+        start = len(requests)
+        try:
+            await consume(session, session, "timeout-test")
+        except grpc.aio.AioRpcError as error:
+            assert error.code() == grpc.StatusCode.INTERNAL, error
+            assert "timeout" in error.details() or "deadline" in error.details(), error
+        else:
+            raise AssertionError(f"{failed_mode} unexpectedly finished")
+        assert len(requests) - start == expected_attempts, requests[start:]
+    assert actions().count("D") == 1, actions()
+    print("PASS: opening retries are bounded; a stalled executing stream is not replayed")
     await channel.close()
 
 
@@ -288,6 +339,7 @@ env = {
     "SCRIBE_CONSOLE_LEVEL": "warn",
     "SCRIBE_FILE_LEVEL": "debug",
     "ROBONIX_PILOT_MAX_TOOL_ROUNDS": "12",
+    "ROBONIX_PILOT_VLM_IDLE_TIMEOUT_SECS": "5",
 }
 processes = []
 

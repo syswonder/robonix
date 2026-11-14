@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/gripper/info"
+version = "1"
+kind = "primitive"
+idl = "gripper/srv/GetGripperInfo.srv"
+description = "Report opening-width and gripping-force ranges, accepted grip request forms, and configurable effort and speed settings."
+
+[mode]
+type = "rpc"

@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -28,16 +29,11 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("do not require the complete gripper body", prompt)
         self.assertIn("without two identifiable opposing jaws is insufficient", prompt)
 
-    def test_vlm_context_explains_the_verification_target(self):
-        """Identify target-defining fields separately from supporting context."""
-        text = vlm.describe_context(envelope())
-        target_section, supporting_section = text.split("Supporting call context", 1)
-        for field in ("target_contract_id", "target_description", "target_args"):
-            self.assertIn(field, target_section)
-        for field in ("target_provider_id", "target_output"):
-            self.assertIn(field, supporting_section)
-        self.assertIn("never as visual proof", supporting_section)
-        self.assertIn(json.dumps(envelope()["target_args"]), text)
+    def test_vlm_context_preserves_target_and_output_as_separate_fields(self):
+        context = json.loads(vlm.describe_context(envelope()))
+        for key in ("target_contract_id", "target_description", "target_args",
+                    "target_provider_id", "target_output"):
+            self.assertEqual(context[key], envelope()[key])
 
     def test_context_json_or_string(self):
         for value in ({}, [], "original text", None):
@@ -57,25 +53,45 @@ class ParsingTests(unittest.TestCase):
                 core.parse_envelope(raw)
 
     def test_missing_camera_is_rejected(self):
-        for args in ({}, None, {"camera_provider_id": " "}, {"camera_provider_id": 1}):
+        for args in ({}, None, {"camera_provider_id": " "}, {"camera_provider_id": 1},
+                     {"camera_provider_ids": []}, {"camera_provider_ids": "head"},
+                     {"camera_provider_ids": ["head", " "]},
+                     {"camera_provider_ids": ["head", " head "]},
+                     {"camera_provider_id": "head", "camera_provider_ids": ["wrist"]}):
             data = envelope()
             data["verifier_args"] = args
             with self.assertRaises(ValueError):
                 core.parse_envelope(json.dumps(data))
 
+    def test_single_and_multiple_camera_configuration(self):
+        self.assertEqual(core.camera_provider_ids({"camera_provider_id": " wrist "}), ["wrist"])
+        self.assertEqual(core.camera_provider_ids({"camera_provider_ids": [" head ", "wrist"]}),
+                         ["head", "wrist"])
+
     def test_strict_verdict(self):
         """Check strict verdict."""
         for verdict in (True, False):
             self.assertEqual(vlm.parse_verdict(json.dumps(
-                {"passed": verdict, "detail": " evidence "})),
+                {"observable": True, "passed": verdict, "detail": " evidence "})),
                 {"passed": verdict, "detail": "evidence"})
-        for raw in ('{"passed":"false","detail":"x"}', '{"passed":1,"detail":"x"}',
-                    '{"passed":true,"detail":""}', '{"passed":false,"detail":null}',
-                    '{"passed":true,"passed":false,"detail":"x"}',
-                    '{"passed":true,"detail":"x","confidence":1}',
+        for raw in ('{"observable":true,"passed":"false","detail":"x"}',
+                    '{"observable":true,"passed":1,"detail":"x"}',
+                    '{"observable":true,"passed":true,"detail":""}',
+                    '{"observable":true,"passed":false,"detail":null}',
+                    '{"observable":true,"passed":true,"passed":false,"detail":"x"}',
+                    '{"observable":true,"passed":true,"detail":"x","confidence":1}',
+                    '{"observable":"true","passed":false,"detail":"x"}',
+                    '{"observable":false,"passed":true,"detail":"x"}',
+                    '{"passed":true,"detail":"x"}',
                     '[]', 'null', 'not json', '```json\n{}\n```'):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 vlm.parse_verdict(raw)
+
+    def test_unobservable_verdict_is_not_a_rejection(self):
+        with self.assertRaises(vlm.InsufficientEvidence) as caught:
+            vlm.parse_verdict(json.dumps({"observable": False, "passed": False,
+                                         "detail": "occluded; secret-model-content"}))
+        self.assertNotIn("secret-model-content", str(caught.exception))
 
     def test_vlm_configuration(self):
         """Check vlm configuration."""
@@ -109,15 +125,14 @@ class ParsingTests(unittest.TestCase):
         """Check color conversion."""
         import io
         from PIL import Image as PillowImage
-        from sensor_msgs.msg import Image
         for encoding, pixel in (("rgb8", [255, 0, 0]), ("bgr8", [0, 0, 255])):
-            msg = Image(height=4, width=4, encoding=encoding, step=12, data=pixel * 16)
+            msg = SimpleNamespace(height=4, width=4, encoding=encoding, step=12, data=pixel * 16)
             jpeg = camera.encode_jpeg(msg)
             decoded = PillowImage.open(io.BytesIO(jpeg)).getpixel((0, 0))
             self.assertGreater(decoded[0], 240)
             self.assertLess(decoded[2], 10)
         with self.assertRaises(ValueError):
-            camera.encode_jpeg(Image())
+            camera.encode_jpeg(SimpleNamespace(encoding=""))
 
     def test_verification_frame_is_private_and_call_id_is_sanitized(self):
         """Save the exact model JPEG without permitting call-id path traversal."""
@@ -134,14 +149,13 @@ class ParsingTests(unittest.TestCase):
 
     def test_padding_and_invalid_image_shapes(self):
         """Check padding and invalid image shapes."""
-        from sensor_msgs.msg import Image
-        padded = Image(height=2, width=2, encoding="rgb8", step=8,
-                       data=([255, 0, 0] * 2 + [0, 0]) * 2)
+        padded = SimpleNamespace(height=2, width=2, encoding="rgb8", step=8,
+                                 data=([255, 0, 0] * 2 + [0, 0]) * 2)
         self.assertTrue(camera.encode_jpeg(padded).startswith(bytes([255, 216])))
         for bad in (
-            Image(height=2, width=2, encoding="rgb8", step=5, data=[0] * 10),
-            Image(height=2, width=2, encoding="rgb8", step=6, data=[0] * 11),
-            Image(height=2, width=2, encoding="16UC1", step=4, data=[0] * 8),
+            SimpleNamespace(height=2, width=2, encoding="rgb8", step=5, data=[0] * 10),
+            SimpleNamespace(height=2, width=2, encoding="rgb8", step=6, data=[0] * 11),
+            SimpleNamespace(height=2, width=2, encoding="16UC1", step=4, data=[0] * 8),
         ):
             with self.assertRaises(ValueError):
                 camera.encode_jpeg(bad)
@@ -156,7 +170,52 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
             result = await core.verify("call", json.dumps(envelope()), observe, evaluate)
             self.assertIs(result["passed"], passed)
             observe.assert_awaited_once_with("wrist")
-            evaluate.assert_awaited_once_with(envelope(), b"image")
+            evaluate.assert_awaited_once_with(envelope(), {"wrist": b"image"})
+
+    async def test_insufficient_evidence_keeps_a_safe_unavailable_reason(self):
+        with self.assertRaisesRegex(RuntimeError, "unavailable.*insufficient visual evidence") as caught:
+            await core.verify("call", json.dumps(envelope()), AsyncMock(return_value=b"image"),
+                              AsyncMock(side_effect=vlm.InsufficientEvidence("secret-model-content")))
+        self.assertNotIn("secret-model-content", str(caught.exception))
+
+    async def test_multiple_cameras_are_captured_concurrently_and_keep_identity(self):
+        entered = set()
+        both = asyncio.Event()
+
+        async def observe(provider):
+            entered.add(provider)
+            if len(entered) == 2:
+                both.set()
+            await asyncio.wait_for(both.wait(), 1)
+            return provider.encode()
+
+        data = envelope()
+        data["verifier_args"] = {"camera_provider_ids": ["head", "wrist"]}
+        evaluate = AsyncMock(return_value={"passed": True, "detail": "visible"})
+        await core.verify("call", json.dumps(data), observe, evaluate)
+        evaluate.assert_awaited_once_with(data, {"head": b"head", "wrist": b"wrist"})
+
+    async def test_camera_failure_cancels_other_captures_and_skips_model(self):
+        entered = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def observe(provider):
+            if provider == "missing":
+                await entered.wait()
+                raise RuntimeError("camera missing")
+            entered.set()
+            try:
+                await asyncio.sleep(60)
+            finally:
+                stopped.set()
+
+        data = envelope()
+        data["verifier_args"] = {"camera_provider_ids": ["missing", "head"]}
+        evaluate = AsyncMock()
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await core.verify("call", json.dumps(data), observe, evaluate)
+        self.assertTrue(stopped.is_set())
+        evaluate.assert_not_called()
 
     async def test_observation_failure_skips_model_and_redacts(self):
         """Check observation failure skips model and redacts."""
@@ -182,9 +241,10 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01 if provider == "a" else 0)
             return provider.encode()
 
-        async def evaluate(context, jpeg):
-            self.assertEqual(jpeg.decode(), context["verifier_args"]["camera_provider_id"])
-            return {"passed": True, "detail": jpeg.decode()}
+        async def evaluate(context, images):
+            provider = context["verifier_args"]["camera_provider_id"]
+            self.assertEqual(images, {provider: provider.encode()})
+            return {"passed": True, "detail": provider}
 
         results = await asyncio.gather(*(
             core.verify(p, json.dumps(envelope(p)), observe, evaluate) for p in ("a", "b")))
@@ -222,6 +282,126 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
             await core.verify("call", json.dumps(envelope()), AsyncMock(return_value=b"x"),
                               AsyncMock(return_value={"passed": True, "detail": "x"}))
         self.assertEqual(budgets, [50, 5, 40])
+
+
+class ServicePhaseTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from vlm_verifier import service
+        self.service = service
+        self.cache = {}
+        self.config = vlm.VlmConfig("http://localhost/v1", "test-secret", "fake-vision")
+        self.capture = AsyncMock(return_value=b"image")
+        self.judge = AsyncMock(return_value={"passed": True, "detail": "visible"})
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        for target, name, value in ((service, "_config", self.config),
+                                    (service, "_before_images", self.cache),
+                                    (service, "CAMERAS", SimpleNamespace(capture=self.capture)),
+                                    (service.vlm, "judge", self.judge),
+                                    (service.camera, "save_verification_frame", Mock(return_value=Path("frame.jpg")))):
+            stack.enter_context(patch.object(target, name, value))
+
+    async def request(self, phase, provider="wrist", call_id="call", cameras=None):
+        data = envelope(provider)
+        data["phase"] = phase
+        if cameras is not None:
+            data["verifier_args"] = {"camera_provider_ids": cameras}
+        return await self.service.verify(self.service.Verify_Request(call_id=call_id, args_json=json.dumps(data)))
+
+    async def test_before_and_after_send_one_ordered_pair(self):
+        self.capture.side_effect = [b"before", b"after"]
+        self.assertTrue((await self.request("before")).passed)
+        self.judge.assert_not_called()
+        self.assertTrue((await self.request("after")).passed)
+        self.assertEqual(self.judge.call_args.args[2:], ({"wrist": b"before"}, {"wrist": b"after"}))
+        self.judge.assert_awaited_once()
+        self.assertFalse(self.cache)
+
+    async def test_multiple_camera_pairs_are_labelled_and_kept_separate(self):
+        self.capture.side_effect = [b"head-before", b"wrist-before", b"head-after", b"wrist-after"]
+        await self.request("before", cameras=["head", "wrist"])
+        await self.request("after", cameras=["head", "wrist"])
+        self.assertEqual(self.judge.call_args.args[2:], (
+            {"head": b"head-before", "wrist": b"wrist-before"},
+            {"head": b"head-after", "wrist": b"wrist-after"}))
+        self.assertFalse(self.cache)
+
+    async def test_changed_camera_list_cannot_consume_another_view(self):
+        await self.request("before", cameras=["head", "wrist"])
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", cameras=["head"])
+        self.judge.assert_not_called()
+
+    async def test_unobservable_after_consumes_before_without_returning_a_verdict(self):
+        await self.request("before")
+        self.judge.side_effect = vlm.InsufficientEvidence()
+        with self.assertRaisesRegex(RuntimeError, "unavailable.*insufficient visual evidence"):
+            await self.request("after")
+        self.assertFalse(self.cache)
+
+    async def test_missing_duplicate_mismatched_and_consumed_before_fail_closed(self):
+        with self.assertRaises(ValueError):
+            await self.request(None)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", "other")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        self.judge.assert_not_called()
+
+    async def test_pending_cache_is_bounded_and_expired_images_are_removed(self):
+        now = self.service.time.monotonic()
+        self.cache.update({str(i): (now, {}, {"wrist": b"image"}) for i in range(64)})
+        await self.request("before")
+        self.assertEqual(len(self.cache), 64)
+        self.assertNotIn("0", self.cache)
+        self.assertIn("call", self.cache)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", call_id="0")
+        self.cache.clear()
+        self.cache.update({str(i): (float("-inf"), {}, {"wrist": b"image"}) for i in range(64)})
+        await self.request("before")
+        self.assertEqual(list(self.cache), ["call"])
+        self.judge.assert_not_called()
+
+    async def test_pending_camera_bytes_are_bounded(self):
+        with patch.object(self.service, "MAX_PENDING_BYTES", 8):
+            await self.request("before", call_id="first")
+            await self.request("before", call_id="second")
+        self.assertEqual(list(self.cache), ["second"])
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after", call_id="first")
+        self.judge.assert_not_called()
+
+    async def test_expired_before_makes_after_unavailable(self):
+        await self.request("before")
+        created, context, images = self.cache["call"]
+        self.cache["call"] = (created - self.service.BEFORE_TTL - 1, context, images)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("after")
+        self.assertFalse(self.cache)
+        self.judge.assert_not_called()
+
+    async def test_duplicate_before_preserves_original_images(self):
+        self.capture.side_effect = [b"original", b"replacement", b"after"]
+        await self.request("before")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await self.request("before")
+        await self.request("after")
+        self.assertEqual(self.judge.call_args.args[2:],
+                         ({"wrist": b"original"}, {"wrist": b"after"}))
+
+    async def test_oversized_camera_set_does_not_evict_pending_images(self):
+        with patch.object(self.service, "MAX_PENDING_BYTES", 8):
+            await self.request("before", call_id="first")
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                await self.request("before", call_id="second", cameras=["head", "wrist"])
+        self.assertEqual(list(self.cache), ["first"])
+        self.judge.assert_not_called()
 
 
 if __name__ == "__main__":

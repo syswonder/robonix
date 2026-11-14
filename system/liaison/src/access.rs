@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use crate::pb::voiceprint;
 
-pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.25;
+pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.55;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AccessDecision {

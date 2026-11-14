@@ -78,8 +78,10 @@ fn leaf_terminal_state(success: bool, cancelled: bool) -> u32 {
 }
 
 /// Dispatch one RTDL `do` node and stream node_state events.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_call(
     call: &CapabilityCall,
+    bind: &str,
     node: NodeEventContext,
     tx: Sender<Result<RtdlEvent, Status>>,
     mut atlas: AtlasClient,
@@ -111,10 +113,23 @@ pub(crate) async fn execute_call(
         )
         .await;
 
-    let async_group = if call.provider_id == provider_id {
-        Ok(None)
-    } else {
-        async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
+    let before = verification::capture_before(
+        verification.as_ref(),
+        call,
+        &node,
+        &provider_id,
+        &mut atlas,
+        &runtime,
+    )
+    .await;
+    let async_group = match before {
+        Err(error) => Err(format!("result verification unavailable: {error}")),
+        Ok(()) if runtime.is_cancelled(&node.plan_id).await => Err("plan canceled".to_string()),
+        Ok(()) if call.provider_id == provider_id => Ok(None),
+        Ok(()) => {
+            async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id)
+                .await
+        }
     };
 
     let (mut result, mut state) = match async_group {
@@ -146,7 +161,8 @@ pub(crate) async fn execute_call(
     let eligible_for_verification = result.success
         && state == RtdlNodeStateEnum::Succeeded as u32
         && !runtime.is_cancelled(&node.plan_id).await;
-    let overlap = eligible_for_verification
+    let overlap = bind.is_empty()
+        && eligible_for_verification
         && verification.overlap()
         && verification.rule_for(call).is_some();
 
@@ -204,6 +220,21 @@ pub(crate) async fn execute_call(
 
     if runtime.is_cancelled(&node.plan_id).await {
         state = RtdlNodeStateEnum::Canceled as u32;
+    }
+    if state == RtdlNodeStateEnum::Succeeded as u32 && !bind.is_empty() {
+        runtime
+            .context(&node.plan_id)
+            .await
+            .store(bind, &result.output)
+            .await;
+        info!(
+            "[executor/rtdl] plan_id={} node={} op_id={} kind=do bind stored name='{}' output_bytes={}",
+            node.plan_id,
+            node.node_index,
+            node.op_id,
+            bind,
+            result.output.len()
+        );
     }
     runtime
         .record_op_state(&node.plan_id, &node.op_id, state)
@@ -334,6 +365,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let execution = execute_call(
             &call,
+            "",
             NodeEventContext {
                 plan_id: "p".into(),
                 node_index: 1,
@@ -361,6 +393,7 @@ mod tests {
         assert!(execution.verifier.is_none());
         let terminal = rx.recv().await.unwrap().unwrap().node_state.unwrap();
         assert_eq!(terminal.state, RtdlNodeStateEnum::Failed as u32);
+        assert!(!terminal.leaf_result.unwrap().output.is_empty());
         assert!(rx.try_recv().is_err());
         atlas_server.abort();
     }

@@ -76,8 +76,13 @@ export ROBONIX_WEBOTS_WORLD="${ROBONIX_WEBOTS_WORLD:-office.wbt}"
 export ROBONIX_TIAGO_VARIANT="${ROBONIX_TIAGO_VARIANT:-lite}"
 export ROBONIX_WEBOTS_ROBOT="${ROBONIX_WEBOTS_ROBOT:-}"
 
+DETACH=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --detach)
+      DETACH=1
+      shift
+      ;;
     --world|-w)
       [[ $# -ge 2 ]] || { echo "[sim/start] --world requires a value" >&2; exit 2; }
       export ROBONIX_WEBOTS_WORLD="$2"
@@ -94,12 +99,12 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]"
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf] [--detach]"
       exit 0
       ;;
     *)
       echo "[sim/start] unknown argument: $1" >&2
-      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf]" >&2
+      echo "Usage: $0 [--world WORLD.wbt] [--tiago-variant lite|full] [--robot ROBOT.urdf] [--detach]" >&2
       exit 1
       ;;
   esac
@@ -132,11 +137,13 @@ echo "[sim/start] using robot URDF: $ROBONIX_WEBOTS_ROBOT"
 # it. Falls back to :0 so headless / non-X bash still gets a sensible
 # default the docker compose env interpolation can use. Without this,
 # users repeatedly forgot to `export DISPLAY=:0` and Webots / rviz2
-# came up invisible.
+# came up invisible. Each probe is bounded by `timeout`: on a Wayland 
+# host the leftover Xwayland sockets accept connections but never 
+# answer `xset q`, which otherwise hangs startup forever.
 if [[ -z "${DISPLAY:-}" ]]; then
     if command -v xset &>/dev/null; then
         for d in :0 :1 :10; do
-            if DISPLAY="$d" xset q &>/dev/null; then
+            if DISPLAY="$d" timeout 3 xset q &>/dev/null; then
                 export DISPLAY="$d"
                 echo "[sim/start] auto-detected DISPLAY=$DISPLAY"
                 break
@@ -339,4 +346,7 @@ echo "[sim/start] rviz2 log: $RVIZ_LOG"
 # Stay foreground tailing logs. Ctrl-C stops the log follower; run stop.sh to
 # tear down this simulator instance. Robonix components remain owned by
 # `rbnx shutdown` and are never touched here.
+if [[ "$DETACH" == "1" ]]; then
+    exit 0
+fi
 exec "${DC[@]}" logs -f

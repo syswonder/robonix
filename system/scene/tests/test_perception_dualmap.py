@@ -59,6 +59,51 @@ def test_to_map_object_shapes_local_objects():
     print("  [PASS] test_to_map_object_shapes_local_objects")
 
 
+def test_keyframe_indices_and_periodic_merge_publication(monkeypatch):
+    import numpy as np
+    from scene_service.ingest import perception_dualmap
+
+    monkeypatch.setattr(perception_dualmap, "_image_msg_to_bgr", lambda _: np.zeros((2, 2, 3), dtype=np.uint8))
+    monkeypatch.setattr(perception_dualmap, "_depth_msg_to_metres", lambda _: np.ones((2, 2), dtype=np.float32))
+    for populated, keyframes, expected_merges in ((False, 19, 0), (True, 19, 1), (True, 18, 0)):
+        detector = _detector()
+        detector._world_frame_fn = lambda: "map"
+        detector._map_frame = "map"
+        detector._rgb_msg = detector._depth_msg = lambda: object()
+        detector._cam_info = lambda: types.SimpleNamespace(fx=1., fy=1., cx=0., cy=0.)
+        detector._build_camera_to_map_transform = lambda **_: np.eye(4)
+        detector._is_keyframe = lambda *_: True
+        indices = []
+        detector._dm_data_input = lambda **data: indices.append(data["idx"])
+        detector._dm = types.SimpleNamespace(
+            set_data_input=lambda _: None, process_detections=lambda: None,
+            calculate_observations=lambda: None, get_curr_observations=lambda: [],
+            update_state=lambda: None, update_data=lambda: None,
+        )
+        merges, publications = [], []
+        tracks = [_obj("track", 0, n=3)] if populated else []
+        def merge():
+            if not tracks:
+                raise RuntimeError("stack expects a non-empty TensorList")
+            merges.append(True)
+        detector._lm = types.SimpleNamespace(
+            local_map=tracks, set_curr_idx=indices.append,
+            process_observations=lambda _: None, get_global_observations=lambda: [],
+            clear_global_observations=lambda: None, merge_local_map=merge,
+        )
+        detector._gm = None
+        detector._dm_names = ["chair"]
+        detector._keyframes = keyframes
+        # Skipped frames must not age tracks in DualMap's active window.
+        detector._tick_idx = keyframes * 8
+        detector._project_to_registry = lambda: publications.append(True)
+        detector._tick_locked()
+        assert detector._consecutive_failures == 0
+        assert len(merges) == expected_merges
+        assert publications == [True]
+        assert indices == [keyframes, keyframes]
+
+
 def test_classes_file_from_manifest():
     d = _detector(classes=["chair", " table ", ""])
     path = d._write_classes_file()
@@ -148,6 +193,72 @@ def test_keyframe_gate_follows_dualmap_rule():
     print("  [PASS] test_keyframe_gate_follows_dualmap_rule")
 
 
+def test_world_frame_change_discards_old_tracks_before_transform_recovers(monkeypatch):
+    import asyncio
+    import numpy as np
+    from scene_service.ingest import perception_dualmap
+    from scene_service.state.object_registry import ObjectRegistry
+
+    registry = ObjectRegistry()
+    frame = ["odom"]
+    detector = _detector()
+    detector._registry = registry
+    detector._world_frame_fn = lambda: frame[0]
+    detector._map_frame = "odom"
+    loop = asyncio.new_event_loop()
+    detector._asyncio_loop = loop
+    snapshot = {
+        "uuid": "old-track", "cls": "cabinet", "x": 1.0, "y": 2.0,
+        "z": 0.5, "yaw": 0.0, "size_x": 0.3, "size_y": 0.3,
+        "size_z": 0.3, "confidence": 0.9,
+    }
+    try:
+        loop.run_until_complete(detector._apply_snapshot([snapshot]))
+        (cabinet,) = registry.all_objects()
+        assert cabinet.pose.frame_id == "odom"
+        detector._lm = types.SimpleNamespace(local_map=["old-track"])
+        detector._gm = types.SimpleNamespace(global_map=["old-track"])
+        detector._map_objects = ["old-track"]
+        detector._all_objects = ["old-track"]
+        detector._held_uuids = {"old-track"}
+        detector._last_kf_pose = np.eye(4)
+        detector._last_frame_key = (1, 0)
+        detector._rgb_msg = lambda: object()
+        detector._depth_msg = lambda: object()
+        detector._cam_info = lambda: types.SimpleNamespace(fx=1.0, fy=1.0)
+        detector._build_camera_to_map_transform = lambda **kwargs: None
+        monkeypatch.setattr(perception_dualmap, "_image_msg_to_bgr",
+                            lambda _: np.zeros((1, 1, 3), dtype=np.uint8))
+        monkeypatch.setattr(perception_dualmap, "_depth_msg_to_metres",
+                            lambda _: np.ones((1, 1), dtype=np.float32))
+
+        detector._tick_locked()
+        loop.run_until_complete(asyncio.sleep(0))
+        assert detector._lm.local_map == ["old-track"]
+        assert detector._gm.global_map == ["old-track"]
+        assert detector._held_uuids == {"old-track"} and not cabinet.missing
+
+        frame[0] = "map"
+        detector._tick_locked()
+        loop.run_until_complete(asyncio.sleep(0))
+
+        assert detector._lm.local_map == []
+        assert detector._gm.global_map == []
+        assert detector._map_objects == [] and detector._all_objects == []
+        assert not detector._held_uuids
+        assert detector._last_kf_pose is None and detector._last_frame_key is None
+        assert cabinet.missing
+        assert cabinet.pose.frame_id == "odom"
+
+        loop.run_until_complete(detector._apply_snapshot([
+            {**snapshot, "uuid": "new-track"},
+        ]))
+        assert list(registry.all_objects()) == [cabinet]
+        assert not cabinet.missing and cabinet.pose.frame_id == "map"
+    finally:
+        loop.close()
+
+
 def test_merged_objects_keep_the_dominant_uid():
     d = _detector()
     a = types.SimpleNamespace(uid="A", observations=[object(), object(), object()], is_merged=False)
@@ -158,6 +269,40 @@ def test_merged_objects_keep_the_dominant_uid():
     d._keep_merged_uids([a, b, untouched])
     assert merged.uid == "A" and merged.is_merged is False and untouched.uid == "C"
     print("  [PASS] test_merged_objects_keep_the_dominant_uid")
+
+
+def test_queued_snapshot_cannot_relabel_old_coordinates_after_frame_change():
+    import asyncio
+    import numpy as np
+    from scene_service.state.object_registry import ObjectRegistry
+
+    detector = _detector()
+    detector._registry = ObjectRegistry()
+    frame = ["odom"]
+    detector._world_frame_fn = lambda: frame[0]
+    detector._map_frame = "odom"
+    detector._map_objects = [{
+        "id": "track", "class_name": "cabinet", "conf": [0.9],
+        "pcd": types.SimpleNamespace(points=np.array([
+            [0.0, 0.0, 0.5], [0.0, 0.3, 0.5],
+            [0.3, 0.0, 0.5], [0.3, 0.3, 0.5],
+        ])),
+    }]
+    loop = asyncio.new_event_loop()
+    detector._asyncio_loop = loop
+    try:
+        detector._project_to_registry()
+        frame[0] = "map"
+        loop.run_until_complete(asyncio.sleep(0))
+        assert not list(detector._registry.all_objects())
+
+        detector._map_frame = "map"
+        detector._project_to_registry()
+        loop.run_until_complete(asyncio.sleep(0))
+        (cabinet,) = detector._registry.all_objects()
+        assert cabinet.pose.frame_id == "map" and cabinet.bbox.frame_id == "map"
+    finally:
+        loop.close()
 
 
 def test_lifecycle_overrides_reach_dualmaps_config():

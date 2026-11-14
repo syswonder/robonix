@@ -18,8 +18,8 @@ source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
 
 # Robonix ros2_idl overlay (generated `map` interface package — mapping's
 # latched lifecycle broadcast that scene's map binding subscribes to).
-# Built by scripts/build.sh onto the bind-mounted rbnx-build/; when absent
-# scene logs a warning and falls back to static map binding.
+# Packaged images carry this overlay; legacy images use the workspace build.
+# When absent, Scene falls back to static map binding.
 ROS2_IDL_SETUP=/scene/rbnx-build/codegen/ros2_idl/install/setup.bash
 if [ -f "$ROS2_IDL_SETUP" ]; then
     # shellcheck disable=SC1090
@@ -53,12 +53,10 @@ configure_zenoh_session
 
 cd /scene
 
-# Scene's launcher regenerates these stubs with this image's own protobuf
-# toolchain and validates every module before the service container starts.
-# It also bind-masks /scene/rbnx-build/codegen/proto_gen with this same output:
-# robonix-api deliberately discovers and prepends that conventional directory
-# at provider construction time.  Without the mask it would supersede this
-# PYTHONPATH entry with host gencode from a potentially newer runtime.
+# Generate stubs with the image's protobuf toolchain: during image construction
+# for packaged images, or in the launcher for legacy workspace-mounted images.
+# The conventional proto_gen path must resolve to the same output because
+# robonix-api prepends it when constructing a provider.
 SCENE_PROTO_GEN=/scene/rbnx-build/codegen/scene_proto_gen
 if [ ! -f "$SCENE_PROTO_GEN/atlas_pb2.py" ] \
    || [ ! -f "$SCENE_PROTO_GEN/robonix_contracts_pb2_grpc.py" ]; then
@@ -67,23 +65,12 @@ if [ ! -f "$SCENE_PROTO_GEN/atlas_pb2.py" ] \
 fi
 export PYTHONPATH="$SCENE_PROTO_GEN:/scene/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 
-# robonix-api lives in the workspace pylib dir, also bind-mounted.
+# Both packaged and workspace-mounted images expose the API here.
 if [ -d /robonix-api ]; then
     export PYTHONPATH="/robonix-api:${PYTHONPATH}"
 fi
 
 mkdir -p /scene/rbnx-build/data
-
-ZENOHD_PID=
-BRIDGE_PID=
-
-cleanup() {
-    kill -TERM "$BRIDGE_PID" 2>/dev/null || true
-    kill -TERM "$ZENOHD_PID" 2>/dev/null || true
-    wait "$BRIDGE_PID" 2>/dev/null || true
-    wait "$ZENOHD_PID" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
 
 # Brief wait so the router is listening before scene_service tries to
 # connect. Without this rmw_zenoh_cpp's first node creation can fail

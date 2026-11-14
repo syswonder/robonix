@@ -27,9 +27,9 @@
 #
 #     RBNX_BUILD_PROXY=0 ./this-script.sh
 #
-#   To use proxy automatically when env vars exist:
+#   Proxy forwarding is opt-in; use existing proxy variables with:
 #
-#     ./this-script.sh
+#     RBNX_BUILD_PROXY=auto ./this-script.sh
 
 set -euo pipefail
 
@@ -46,10 +46,19 @@ IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 # package manifest's `build:` line:
 #   x86-docker     x86_64 + docker, ROS2 + cu128 torch in image  [default]
 #   jetson-docker  arm64 Jetson + docker, L4T base (docker/Dockerfile.jetson)
-#   jetson-native  arm64 Jetson + host ROS2 + host JetPack torch — no docker;
-#                  builds rbnx-build/venv (--system-site-packages) for the
-#                  light pure-python deps only.
+#   jetson-native  host ROS 2, isolated application environment and GPU checks.
 TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
+INFERENCE="${SCENE_CG_INFERENCE:-torch}"
+INFERENCE="$(printf '%s' "$INFERENCE" | tr '[:upper:]' '[:lower:]' | xargs)"
+export SCENE_CG_INFERENCE="$INFERENCE"
+case "$INFERENCE" in
+    torch) ;;
+    tensorrt)
+        export SCENE_PERCEPTION_BACKEND="${SCENE_PERCEPTION_BACKEND:-concept_graphs}"
+        ;;
+    *) echo "[build] SCENE_CG_INFERENCE must be torch or tensorrt" >&2; exit 2 ;;
+esac
+
 
 # ROS distro the scene image is built against. Robonix does not bind to a
 # single ROS release: pick it here and the Dockerfile threads it through
@@ -74,13 +83,34 @@ if [[ "$CLEAN" == "1" ]]; then
 fi
 mkdir -p "$BUILD/data"
 
+if [[ "$TARGET" == "jetson-native" ]]; then
+    # Serialize dependency installation through model preparation/publication.
+    exec 9>"$BUILD/.native-build.lock"
+    flock 9
+    SETUP_PYTHON="${SCENE_NATIVE_PYTHON:-/usr/bin/python3}"
+    if [[ ! -x "$SETUP_PYTHON" && "$SETUP_PYTHON" == "$PKG/$BUILD/native/"* ]]; then
+        SETUP_PYTHON=/usr/bin/python3
+    fi
+    "$SETUP_PYTHON" "$PKG/scripts/prepare_native.py" --setup
+    source "$BUILD/native-candidate.sh"
+    export PATH="$(dirname "$SCENE_NATIVE_PYTHON"):$PATH"
+    export RBNX_CODEGEN_PYTHON="$SCENE_NATIVE_PYTHON"
+    PIP_IDX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+    for req in scene-base scene-perception-native; do
+        "$SCENE_NATIVE_PYTHON" -m pip install -r "docker/requirements/${req}.txt" --index-url "$PIP_IDX"
+    done
+    if [[ "$INFERENCE" == "tensorrt" ]]; then
+        for req in scene-perception-export scene-perception-engines; do
+            "$SCENE_NATIVE_PYTHON" -m pip install -r "docker/requirements/$req.txt" --index-url "$PIP_IDX"
+        done
+    fi
+
+fi
+
+
 # ── 1. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-# --ros2 also emits rbnx-build/codegen/ros2_idl: the generated ROS 2
-# interface overlay carrying map/msg/MapLifecycle (mapping's latched map
-# identity broadcast, which scene's map binding subscribes to). It is
-# colcon-built inside the scene image after the docker build below and
-# sourced by docker/entrypoint.sh; without it scene falls back to static
-# map binding (SCENE_MAP_ID / config) with a warning.
+# MapLifecycle needs a generated ROS message overlay so Scene can follow
+# Mapping's map identity broadcasts on both Native and Docker deployments.
 FLAGS=(--mcp --ros2)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
@@ -89,12 +119,17 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 # Docker runtime Python stubs are regenerated and import-validated offline by
 # scripts/start.sh with the exact interpreter and libraries baked into $IMG.
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
+if [[ "$TARGET" == "jetson-native" ]]; then
+    "$SCENE_NATIVE_PYTHON" - "$ROS_DISTRO" <<'PY'
+import sys
+from scripts.prepare_native import prepare_ros_overlay
+prepare_ros_overlay(sys.argv[1])
+PY
+fi
 
 # ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
-# Pulled out of the docker build because direct CDN connections from some
-# drop mid-stream on multi-hundred-MB transfers; an out-of-band download
-# with curl --retry-all-errors is much more robust, and the resulting
-# files become a cache-key-stable COPY into the image.
+# Download large weights on the host with curl retries and resume support.
+# COPY the cached files into the image.
 #
 # RBNX_GH_MIRROR:
 #   Prefix prepended to github.com URLs.
@@ -119,7 +154,7 @@ copy_cached_weight() {
     local src="$1"
     local dest="$2"
     mkdir -p "$(dirname "$dest")"
-    if [[ "$src" == "$dest" ]]; then
+    if [[ "$src" == "$dest" || "$src" -ef "$dest" ]]; then
         return 0
     fi
     cp -f "$src" "$dest"
@@ -203,83 +238,91 @@ fetch_hf_weight() {
     fetch_weight_candidates "$dest" "${candidates[@]}"
 }
 
+SCENE_PROFILE="$(printf '%s' "${SCENE_PROFILE:-lite}" | tr '[:upper:]' '[:lower:]' | xargs)"
+export SCENE_PROFILE
+MODEL_PATHS_TEXT="$(PYTHONPATH="$PKG:${PYTHONPATH:-}" python3 - "$WEIGHTS_DIR" <<'PYMODELS'
+import sys
+from scene_service.inference_config import model_config, model_defaults
+for models in (model_config(weights_dir=sys.argv[1]), model_defaults(weights_dir=sys.argv[1])):
+    for key in ("yolo", "sam", "clip_pretrained"):
+        print(models[key])
+PYMODELS
+)"
+mapfile -t MODEL_PATHS <<< "$MODEL_PATHS_TEXT"
+for variable in SCENE_YOLO_WORLD_WEIGHTS SCENE_MOBILE_SAM_WEIGHTS SCENE_CLIP_PRETRAINED; do
+    if [[ -n "${!variable:-}" && ! -s "${!variable}" ]]; then
+        echo "[build] error: $variable must name an existing local checkpoint: ${!variable}" >&2
+        exit 1
+    fi
+done
+
 fetch_weight \
     "https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8l-world.pt" \
-    "$WEIGHTS_DIR/yolov8l-world.pt"
+    "${MODEL_PATHS[0]}"
 
-fetch_weight \
-    "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
-    "$WEIGHTS_DIR/mobile_sam.pt"
-
-# open_clip normally resolves this symbolic pretrained name through the
-# Hugging Face metadata API during the Docker build. Fetch the model file on
-# the host instead, using the same retry/cache path as the other scene weights,
-# then COPY it into both Docker variants. RBNX_HF_MIRROR controls the mirror;
-# the canonical huggingface.co URL is always the fallback.
-OPEN_CLIP_WEIGHTS="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
-fetch_hf_weight \
-    "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
-    "open_clip_pytorch_model.bin" \
-    "$OPEN_CLIP_WEIGHTS"
-
-# ── 2a. jetson-native: host venv, no docker ────────────────────────────────
-# The heavy CUDA wheels (torch / torchvision / ultralytics / open3d) come from
-# the host JetPack stack via --system-site-packages; we only pip-install the
-# light pure-python deps on top. Mirrors mapping_rbnx's native target.
-if [[ "$TARGET" == "jetson-native" ]]; then
-    # No venv on purpose. A --system-site-packages venv can't see the host
-    # JetPack torch (it's typically a `pip install --user` in ~/.local), and
-    # forcing the user-site onto PYTHONPATH drags shadowing shims (e.g. enum34)
-    # ahead of the stdlib and breaks the interpreter. The host python already
-    # has the correct sys.path order AND sees the JetPack torch — so install
-    # scene's light pure-python deps into the user site alongside it.
-    PY=python3
-    PIP_IDX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-    echo "[build] jetson-native: host python ($("$PY" --version 2>&1)), pip install --user"
-    "$PY" -c "import torch" 2>/dev/null || {
-        echo "[build] error: host python has no torch — install the JetPack CUDA" >&2
-        echo "        stack first (see scene README 'Jetson native prerequisites'):" >&2
-        echo "        pip install --user --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 torch torchvision" >&2
-        exit 1
-    }
-    "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
-    # torch & friends are already satisfied by the host stack, so pip skips
-    # them; only the missing pure-python deps get installed.
-    for req in scene-base scene-perception-core scene-perception-heavy; do
-        f="docker/requirements/${req}.txt"
-        [[ -f "$f" ]] || continue
-        echo "[build] pip install --user -r $f"
-        "$PY" -m pip install --user -r "$f" --index-url "$PIP_IDX" \
-            || echo "[build] warning: some deps in $f failed (perception may degrade)"
-    done
-    # concept-graphs (perception backbone) — editable, no deps.
-    CG="$PKG/rbnx-build/concept-graphs"
-    GH="${RBNX_GH_MIRROR-https://ghfast.top/}"
-    if [[ ! -d "$CG/.git" ]]; then
-        echo "[build] cloning concept-graphs"
-        git clone --depth 1 --branch ali-dev \
-            "${GH%/}/https://github.com/concept-graphs/concept-graphs.git" "$CG" \
-        || git clone --depth 1 --branch ali-dev \
-            https://github.com/concept-graphs/concept-graphs.git "$CG"
+# The x86 image also carries Lite weights for its default runtime configuration.
+if [[ "$SCENE_PROFILE" != full || "$TARGET" == x86-docker ]]; then
+    SAM_DEST="${MODEL_PATHS[1]}"
+    CLIP_DEST="${MODEL_PATHS[2]}"
+    if [[ "$SCENE_PROFILE" == full ]]; then
+        SAM_DEST="$WEIGHTS_DIR/mobile_sam.pt"
+        CLIP_DEST="$WEIGHTS_DIR/open_clip_pytorch_model.bin"
     fi
-    "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
+    fetch_weight \
+        "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
+        "$SAM_DEST"
+    fetch_hf_weight \
+        "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" \
+        "open_clip_pytorch_model.bin" \
+        "$CLIP_DEST"
+fi
+if [[ "$SCENE_PROFILE" == full ]]; then
+    fetch_weight \
+        "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam_l.pt" \
+        "${MODEL_PATHS[1]}"
+    fetch_hf_weight \
+        "laion/CLIP-ViT-H-14-laion2B-s32B-b79K" \
+        "open_clip_pytorch_model.bin" \
+        "${MODEL_PATHS[2]}"
+fi
+
+if [[ "$TARGET" == x86-docker ]]; then
+    FULL_CONTEXT="$PKG/docker/_build/full-models"
+    rm -rf "$FULL_CONTEXT"
+    mkdir -p "$FULL_CONTEXT"
+    copy_cached_weight "${MODEL_PATHS[0]}" "$WEIGHTS_DIR/yolov8l-world.pt"
+    if [[ "$SCENE_PROFILE" == full ]]; then
+        copy_cached_weight "${MODEL_PATHS[1]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[4]}")"
+        copy_cached_weight "${MODEL_PATHS[2]}" "$FULL_CONTEXT/$(basename "${MODEL_PATHS[5]}")"
+    else
+        copy_cached_weight "${MODEL_PATHS[1]}" "${MODEL_PATHS[4]}"
+        copy_cached_weight "${MODEL_PATHS[2]}" "${MODEL_PATHS[5]}"
+    fi
+fi
+
+if [[ "$TARGET" == "jetson-docker" ]]; then
+    python3 "$PKG/scripts/prepare_docker.py" --build
+    exit 0
+fi
+
+# ── 2a. Native dependencies inside the selected Scene environment ────────
+if [[ "$TARGET" == "jetson-native" ]]; then
+    PY="$SCENE_NATIVE_PYTHON"
     # Validate the host-staged open_clip checkpoint without contacting the
     # Hugging Face metadata API. Also pre-warm Ultralytics YOLO-World's text
     # encoder path:
-    # YOLOWorld.set_classes() uses openai/clip via Ultralytics' weights_dir,
-    # not open_clip's HF cache. If this is left to start_native, first boot can
+    # YOLOWorld.set_classes() uses openai/clip, not open_clip's HF cache.
+    # If this is left to start_native, first boot can
     # spend minutes downloading ViT-B-32.pt and miss the scene/object test flow.
-    YCD="$PKG/rbnx-build/data/ultralytics"
+    YCD="${YOLO_CONFIG_DIR:-$PKG/rbnx-build/data/ultralytics}"
     UWD="$YCD/weights"
     mkdir -p "$YCD" "$UWD"
-    SCENE_CLIP_PRETRAINED="$OPEN_CLIP_WEIGHTS" \
-        "$PY" -c "import os, open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained=os.environ['SCENE_CLIP_PRETRAINED'])" \
+    "$PY" -c "import open_clip; from scene_service.inference_config import model_config; m=model_config(); open_clip.create_model_and_transforms(m['clip_model'], pretrained=m['clip_pretrained'])" \
         || {
-            echo "[build] error: open_clip could not load $OPEN_CLIP_WEIGHTS" >&2
+            echo "[build] error: open_clip could not load the selected model; check SCENE_PROFILE and model paths" >&2
             exit 1
         }
-    YOLO_CONFIG_DIR="$YCD" "$PY" <<PY \
-        || echo "[build] warning: failed to persist Ultralytics settings"
+    YOLO_CONFIG_DIR="$YCD" "$PY" <<PY
 from ultralytics.utils import SETTINGS
 
 SETTINGS.update({
@@ -289,8 +332,8 @@ SETTINGS.update({
     "sync": False,
 })
 PY
-    YOLO_CONFIG_DIR="$YCD" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY \
-        || echo "[build] warning: ultralytics CLIP prefetch failed (scene start will fail fast until build succeeds)"
+    YOLO_CONFIG_DIR="$YCD" SCENE_YOLO_WORLD_WEIGHTS="${MODEL_PATHS[0]}" HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" "$PY" <<PY
+import os
 from pathlib import Path
 from ultralytics.utils import WEIGHTS_DIR
 
@@ -315,15 +358,14 @@ classes = [
     "door", "doorway", "fire extinguisher", "person",
 ]
 
-model = YOLO("$WEIGHTS_DIR/yolov8l-world.pt")
+model = YOLO(os.environ["SCENE_YOLO_WORLD_WEIGHTS"])
 model.set_classes(classes)
 PY
-    ULTRALYTICS_CLIP="$UWD/clip/ViT-B-32.pt"
-    if [[ ! -s "$ULTRALYTICS_CLIP" ]]; then
-        echo "[build] error: missing $ULTRALYTICS_CLIP after prefetch" >&2
-        exit 1
+    # Compile before service startup: Atlas registration has a short deadline.
+    if [[ "$INFERENCE" == "tensorrt" ]]; then
+        YOLO_CONFIG_DIR="$YCD" "$PY" "$PKG/scripts/prepare_models.py"
     fi
-    "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
+    "$PY" "$PKG/scripts/prepare_native.py" --verify
     echo "[build] done (jetson-native)."
     exit 0
 fi
@@ -333,12 +375,11 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "[build] error: target $TARGET needs docker on PATH" >&2
     exit 1
 fi
-# jetson-docker uses the L4T-based Dockerfile; x86-docker the default one.
 SCENE_DOCKERFILE="docker/Dockerfile"
-[[ "$TARGET" == "jetson-docker" ]] && SCENE_DOCKERFILE="docker/Dockerfile.jetson"
 
 DOCKER_BUILD_FLAGS=(
     --network=host
+    --build-arg "SCENE_CG_INFERENCE=$INFERENCE"
     --pull=false
     --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}"
     --build-arg "ROS_BASE_IMAGE=${ROS_BASE_IMAGE}"
@@ -422,6 +463,27 @@ esac
 
 echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
 docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
+
+if [[ "$INFERENCE" == "tensorrt" ]]; then
+    # GPU compilation runs after image construction, before service replacement.
+    TRT_GPU=(--gpus all)
+    mkdir -p "$BUILD/tensorrt"
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e USER=scene -e LOGNAME=scene "${TRT_GPU[@]}" -e NVIDIA_DRIVER_CAPABILITIES=all \
+        -e SCENE_CG_INFERENCE=tensorrt -e SCENE_ONNX_DIR=/scene-models/onnx \
+        -e SCENE_ENGINE_CACHE_DIR=/scene-models/engines \
+        -e SCENE_PROFILE="${SCENE_PROFILE:-lite}" \
+        -e SCENE_PERCEPTION_BACKEND="$SCENE_PERCEPTION_BACKEND" \
+        -e SCENE_CLIP_MODEL="${SCENE_CLIP_MODEL:-}" \
+        -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
+        -v "$PKG:/scene:ro" -v "$PKG/$BUILD/tensorrt:/scene-models" \
+        --entrypoint bash "$IMG" -ec '
+            mkdir -p /tmp/Ultralytics
+            cp /opt/ultralytics/Ultralytics/settings.json /tmp/Ultralytics/
+            export YOLO_CONFIG_DIR=/tmp
+            exec "$@"
+        ' scene-prepare python3 /scene/scripts/prepare_models.py
+fi
+
 
 # DualMap, the default backend, is a layer over the image above (start.sh uses
 # it when present). SCENE_PERCEPTION_BACKEND=concept_graphs skips it.

@@ -90,6 +90,12 @@ properties:
           Model id sent with each request and used to look up the context
           window. Must not be blank.
 
+      reasoning_effort:
+        type: string
+        description: >-
+          Optional reasoning effort sent to an OpenAI-compatible model API.
+          Set only when the selected model supports this field.
+
       api_format:
         type: string
         enum: [openai]

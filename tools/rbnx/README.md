@@ -16,6 +16,8 @@ make install
 This builds the Cargo workspace and copies `rbnx` (plus the other system
 binaries) into `~/.cargo/bin`, then runs `rbnx setup` to register this
 clone as the Robonix source tree (`~/.robonix/config.yaml`).
+`CARGO_HOME` overrides the Cargo installation root; `ROBONIX_HOME` overrides
+the Robonix configuration directory.
 
 You can also install just `rbnx`:
 
@@ -73,6 +75,9 @@ consumers.
 
 ### What a boot leaves behind
 
+When boot prepares an unbuilt system package, it uses the deployment's
+`manifest:` selector, including Jetson Native and Docker variants.
+
 During boot, `rbnx` compares package manifest transport declarations with Atlas
 registrations, including Soma-managed primitives and skills. It warns once per
 mismatch; missing registrations are reported only while the package is ACTIVE.
@@ -125,6 +130,9 @@ manifest blocks are translated into CLI flags and also passed intact through
 `--config-json`. Components not present in the manifest are not started, except
 that Soma is added automatically when the deployment contains primitives or
 skills.
+
+The optional `system.pilot.vlm.reasoning_effort` manifest setting is forwarded
+to Pilot's OpenAI-compatible request.
 
 For example, this enables Vitals without a separate terminal or global
 `RUST_LOG` setting:

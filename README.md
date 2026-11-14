@@ -56,7 +56,73 @@ The [System Architecture](#system-architecture) section lists every component.
 
 ## Quick Start
 
-### Prerequisites
+Robonix runs on the robot. It can be installed and managed through Robonix Console, a web console on the robot, or built from source and run with the `rbnx` command-line interface (CLI). Tasks are given through [Robonix Client](https://github.com/syswonder/robonix-client) on your computer or Android phone.
+
+### Robonix Console
+
+The steps below run the TIAGo robot in the Webots simulator and give it a first task from your own computer or phone. The simulator runs on a Linux computer that plays the role of the robot: Ubuntu 22.04 (x86_64 or aarch64), with Docker installed. The user who runs the installer must be able to run `docker` without `sudo` (for example, as a member of the `docker` group), because the simulator is started as that user. Below, `ROBOT_IP` stands for an address at which your computer or phone can reach the robot computer, such as a LAN or VPN address; once Robonix Console is installed, its **Overview** page lists the robot's addresses under **Robot Host**.
+
+#### Set up the robot
+
+On the robot computer, in a terminal, as a regular user:
+
+```bash
+curl -fsSL https://hub.robonix.ai/install | bash
+```
+
+The installer installs Robonix and Robonix Console. It asks for the model that Pilot, the Robonix planner, uses to plan tasks: an OpenAI-compatible endpoint URL, an API key, and a model name.
+
+#### Use Robonix Console
+
+1. In a browser on the robot computer, open `http://127.0.0.1:4880` and sign in with a [Robonix Hub](https://hub.robonix.ai/) account. From another computer, first run `ssh -N -L 4880:127.0.0.1:4880 USER@ROBOT_IP` there.
+2. On the **Overview** page of Robonix Console, click **Choose a robot configuration**, select **PAL Robotics TIAGo**, and click **Create deployment**.
+3. On the same page, click **Boot hooks**, enter the two commands below, and click **Save**:
+
+   | Field | Command |
+   |---|---|
+   | Before boot | `bash sim/start.sh --detach` |
+   | After exit | `bash sim/stop.sh` |
+
+4. On the same page, click **Allow other machines** and confirm, so that Robonix Client can connect from your computer or phone. Use this only on a trusted network.
+5. Click **Start**. The first start builds the simulator and takes several minutes; **View run logs** shows the progress.
+
+#### Use Robonix Client
+
+Robonix Client is the operator's app: it gives the robot tasks by text or voice, shows the plan and each capability call as the robot carries it out, and displays the robot's camera view, health, and logs. It runs on a computer or a phone that can reach the robot at `ROBOT_IP`.
+
+To give tasks from a computer, first install [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the Python that Robonix Client needs:
+
+```bash
+# Linux or macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Open a new terminal, then install Robonix Client and start it with the robot's address:
+
+```bash
+uv tool install --python 3.11 git+https://github.com/syswonder/robonix-client.git
+robonix-client --robot-host ROBOT_IP
+```
+
+Open `http://127.0.0.1:7860` on that computer.
+
+To give tasks from a phone, Robonix Client is currently available for Android 8.0 or later. Install the APK from the [latest release](https://github.com/syswonder/robonix-client-android/releases/latest), enter `ROBOT_IP` as **Robot Host** in **Settings**, and tap **Save** and connect.
+
+Once the client reaches the robot, it shows **Connected**. Send `Turn left 90 degrees, take a photo, and describe what you see`. TIAGo turns in the simulator, the reply describes what the camera sees, and the RTDL tree shows the `navigate` and `snapshot` calls.
+
+#### Other setups
+
+- **A real robot**: run the installer on the robot and install its robot configuration from the catalog instead of TIAGo.
+- **Change the planning model**: the model entered during installation is kept on the **Settings** page of Robonix Console under **Robot variables**, as **VLM endpoint URL**, **VLM key**, and **VLM model**. Change it there and restart Robonix.
+
+### Command line
+
+#### Prerequisites
 
 Install these from their own documentation first — Robonix does not provide or install them for you.
 
@@ -74,7 +140,7 @@ Rust and uv install into your home directory, so put them on `PATH` before conti
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 ```
 
-### Install Robonix
+#### Install Robonix
 
 ```bash
 git clone --recursive https://github.com/syswonder/robonix.git

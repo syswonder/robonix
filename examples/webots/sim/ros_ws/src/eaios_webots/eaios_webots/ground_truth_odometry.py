@@ -17,9 +17,11 @@ drift the reference exists to measure.
 from __future__ import annotations
 
 import math
+import threading
 
 import rclpy
 from nav_msgs.msg import Odometry
+from rclpy.executors import SingleThreadedExecutor
 
 DEFAULT_TOPIC = "/webots/ground_truth/odom"
 DEFAULT_FRAME_ID = "world"
@@ -100,6 +102,15 @@ class GroundTruthOdometry:
             return
 
         self._publisher = self._node.create_publisher(Odometry, self._topic, 10)
+        # A zero-time global spin can starve this TimeSource during graph churn.
+        self._executor = SingleThreadedExecutor(context=self._node.context)
+        self._executor.add_node(self._node)
+        self._executor_thread = threading.Thread(
+            target=self._executor.spin,
+            name="webots-ground-truth-clock",
+            daemon=True,
+        )
+        self._executor_thread.start()
         self._node.get_logger().info(
             f"publishing ground-truth odometry on {self._topic} "
             f"({self._frame_id} -> {self._child_frame_id})"
@@ -108,7 +119,6 @@ class GroundTruthOdometry:
     def step(self):  # noqa: D102 - driver-called hook
         if self._publisher is None:
             return
-        rclpy.spin_once(self._node, timeout_sec=0)
 
         position = self._self_node.getPosition()
         orientation = self._self_node.getOrientation()
