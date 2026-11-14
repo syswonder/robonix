@@ -88,9 +88,36 @@ struct DeclaredEndpoint {
     /// Provider-supplied natural-language description for this
     /// Capability. Empty means "fall back to contract default".
     description: String,
+    /// Optional structured binding from this sensor stream to a clock domain.
+    time_descriptor: Option<CapabilityTimeDescriptorState>,
     /// Diagnostic only: this endpoint's contract is outside the provider's
     /// primary namespace without an explicit cross-namespace opt-in.
     namespace_mismatch: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityTimeDescriptorState {
+    domain_id: String,
+    timestamp_semantics: String,
+    is_hardware_timestamped: bool,
+    pipeline_delay_ns: Option<u64>,
+    pipeline_uncertainty_ns: u64,
+    supports_per_point_timestamp: bool,
+}
+
+impl From<&CapabilityTimeDescriptorState> for pb::CapabilityTimeDescriptor {
+    /// Copy stored static timing into the public protobuf without changing
+    /// optional fixed-delay presence.
+    fn from(value: &CapabilityTimeDescriptorState) -> Self {
+        Self {
+            domain_id: value.domain_id.clone(),
+            timestamp_semantics: value.timestamp_semantics.clone(),
+            is_hardware_timestamped: value.is_hardware_timestamped,
+            pipeline_delay_ns: value.pipeline_delay_ns,
+            pipeline_uncertainty_ns: value.pipeline_uncertainty_ns,
+            supports_per_point_timestamp: value.supports_per_point_timestamp,
+        }
+    }
 }
 
 fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S::Ok, S::Error> {
@@ -146,6 +173,7 @@ impl CapabilityProviderState {
             params: Some((&e.params).into()),
             description: e.description.clone(),
             namespace_mismatch: e.namespace_mismatch,
+            time_descriptor: e.time_descriptor.as_ref().map(Into::into),
         }
     }
 }
@@ -541,9 +569,35 @@ impl AtlasRegistry {
         params: pb::TransportParams,
         description: &str,
     ) -> Result<String, Status> {
+        self.declare_with_time(
+            provider_id,
+            contract_id,
+            transport,
+            proposed,
+            params,
+            description,
+            None,
+        )
+        .await
+    }
+
+    /// Declare one transport binding with optional structured sensor timing.
+    /// Existing callers use `declare`, which preserves the metadata-free path.
+    #[allow(clippy::too_many_arguments)] // Mirrors DeclareCapabilityRequest exactly.
+    pub async fn declare_with_time(
+        &self,
+        provider_id: &str,
+        contract_id: &str,
+        transport: Transport,
+        proposed: &str,
+        params: pb::TransportParams,
+        description: &str,
+        time_descriptor: Option<pb::CapabilityTimeDescriptor>,
+    ) -> Result<String, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         let params = parse_params(transport, Some(params))?;
+        let time_descriptor = time_descriptor.map(parse_time_descriptor).transpose()?;
         let proposed = proposed.trim().to_string();
 
         let mut state = self.inner.write().await;
@@ -597,6 +651,7 @@ impl AtlasRegistry {
             endpoint: endpoint.clone(),
             params,
             description: description.to_string(),
+            time_descriptor,
             namespace_mismatch,
         });
         info!("[atlas] declare {provider_id} {contract_id} via {transport:?} -> {endpoint}");
@@ -699,7 +754,15 @@ impl AtlasRegistry {
         provider_id: &str,
         contract_id: &str,
         transport: Transport,
-    ) -> Result<(String, String, pb::TransportParams), Status> {
+    ) -> Result<
+        (
+            String,
+            String,
+            pb::TransportParams,
+            Option<pb::CapabilityTimeDescriptor>,
+        ),
+        Status,
+    > {
         let consumer_id = Self::require("consumer_id", consumer_id)?.to_string();
         let provider_id = Self::require("provider_id", provider_id)?.to_string();
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
@@ -725,6 +788,7 @@ impl AtlasRegistry {
             })?;
         let endpoint = ep.endpoint.clone();
         let params: pb::TransportParams = (&ep.params).into();
+        let time_descriptor = ep.time_descriptor.as_ref().map(Into::into);
 
         let channel_id = format!("ch-{}", Uuid::new_v4().simple());
         state.channels.insert(
@@ -743,7 +807,7 @@ impl AtlasRegistry {
             "[atlas] connect '{consumer_id}' -> '{provider_id}' \
              {contract_id} via {transport:?} -> {endpoint} ({channel_id})"
         );
-        Ok((channel_id, endpoint, params))
+        Ok((channel_id, endpoint, params, time_descriptor))
     }
 
     /// Idempotent: returns `true` if a channel was removed, `false` if
@@ -781,6 +845,33 @@ impl AtlasRegistry {
         serde_json::to_string_pretty(&*state)
             .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))
     }
+}
+
+/// Validate required clock-domain and acquisition-event identities while
+/// retaining numeric zero as a valid exact delay or uncertainty.
+fn parse_time_descriptor(
+    value: pb::CapabilityTimeDescriptor,
+) -> Result<CapabilityTimeDescriptorState, Status> {
+    let domain_id = value.domain_id.trim();
+    let timestamp_semantics = value.timestamp_semantics.trim();
+    if domain_id.is_empty() {
+        return Err(Status::invalid_argument(
+            "time_descriptor.domain_id required",
+        ));
+    }
+    if timestamp_semantics.is_empty() {
+        return Err(Status::invalid_argument(
+            "time_descriptor.timestamp_semantics required",
+        ));
+    }
+    Ok(CapabilityTimeDescriptorState {
+        domain_id: domain_id.to_string(),
+        timestamp_semantics: timestamp_semantics.to_string(),
+        is_hardware_timestamped: value.is_hardware_timestamped,
+        pipeline_delay_ns: value.pipeline_delay_ns,
+        pipeline_uncertainty_ns: value.pipeline_uncertainty_ns,
+        supports_per_point_timestamp: value.supports_per_point_timestamp,
+    })
 }
 
 /// Whether Atlas can mint a fresh endpoint name for this transport without
@@ -1112,6 +1203,51 @@ mod endpoint_tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].capabilities.len(), 1);
         assert!(providers[0].capabilities[0].namespace_mismatch);
+    }
+
+    /// Supplying a partial descriptor fails explicitly, while omitting the
+    /// descriptor preserves the old declaration behavior.
+    #[tokio::test]
+    async fn time_descriptor_requires_domain_and_semantics() {
+        let registry = AtlasRegistry::default();
+        registry
+            .register(
+                "lidar",
+                pb::Kind::Primitive,
+                "robonix/primitive/lidar",
+                "",
+                "",
+            )
+            .await
+            .expect("provider registration");
+        registry
+            .declare(
+                "lidar",
+                "robonix/primitive/lidar/lidar",
+                Transport::Ros2,
+                "/lidar/raw",
+                ros2_params(),
+                "",
+            )
+            .await
+            .expect("legacy declaration");
+        let error = registry
+            .declare_with_time(
+                "lidar",
+                "robonix/primitive/lidar/points",
+                Transport::Ros2,
+                "/lidar/points",
+                ros2_params(),
+                "",
+                Some(pb::CapabilityTimeDescriptor {
+                    domain_id: "".into(),
+                    timestamp_semantics: "scan_start".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect_err("empty timing domain");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -1583,6 +1719,7 @@ cross_namespace = true
                         qos_profile: "reliable".to_string(),
                     },
                     description: String::new(),
+                    time_descriptor: None,
                     namespace_mismatch: false,
                 }],
                 pushed_state: None,
@@ -1715,13 +1852,14 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = parse_transport(r.transport)?;
         let endpoint = self
             .registry
-            .declare(
+            .declare_with_time(
                 &r.provider_id,
                 &r.contract_id,
                 transport,
                 &r.endpoint,
                 r.params.unwrap_or_default(),
                 &r.description,
+                r.time_descriptor,
             )
             .await?;
         Ok(Response::new(pb::DeclareCapabilityResponse { endpoint }))
@@ -1747,7 +1885,7 @@ impl pb::atlas_server::Atlas for AtlasService {
     ) -> Result<Response<pb::ConnectCapabilityResponse>, Status> {
         let r = req.into_inner();
         let transport = parse_transport(r.transport)?;
-        let (channel_id, endpoint, params) = self
+        let (channel_id, endpoint, params, time_descriptor) = self
             .registry
             .connect(&r.consumer_id, &r.provider_id, &r.contract_id, transport)
             .await?;
@@ -1755,6 +1893,7 @@ impl pb::atlas_server::Atlas for AtlasService {
             channel_id,
             endpoint,
             params: Some(params),
+            time_descriptor,
         }))
     }
 

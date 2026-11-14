@@ -59,6 +59,9 @@ pub(crate) type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 pub(crate) const RTDL_SEQUENCE: u32 = 0;
 pub(crate) const RTDL_PARALLEL: u32 = 1;
 pub(crate) const RTDL_DO: u32 = 2;
+pub(crate) const RTDL_IF: u32 = 3;
+pub(crate) const RTDL_REPEAT: u32 = 4;
+pub(crate) const RTDL_WHILE: u32 = 5;
 
 pub(crate) struct DisplayCapability<'a> {
     pub(crate) display_name: String,
@@ -337,6 +340,8 @@ struct TreeMeta {
     /// visible lets the model target any semantic boundary in one control call
     /// instead of querying live state first or guessing what "current" means.
     steps: Vec<TreeStep>,
+    /// Declared repeat limits, keyed by op id, for interpreting terminal states.
+    repeat_counts: HashMap<String, u32>,
 }
 
 struct TreeStep {
@@ -354,6 +359,8 @@ enum TreeInterrupt {
     NodeState {
         plan_id: String,
         node_state: Box<RtdlNodeState>,
+        /// Whether to report this node's own failure detail to the model.
+        failed_without_leaf_result: bool,
     },
     /// A tree finished (or its Execute stream ended/errored). Carries one
     /// full `RtdlNodeState` record for every node that reached a terminal
@@ -362,7 +369,7 @@ enum TreeInterrupt {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
-        /// False when the latest leaf failure already requested recovery.
+        /// False when the latest result already requested recovery for a failure.
         replan: bool,
         /// True when this tree ended because it was canceled (a node reached
         /// CANCELED), as opposed to running to natural success/failure. A
@@ -438,6 +445,7 @@ async fn handle_interrupt(
         TreeInterrupt::NodeState {
             plan_id,
             node_state,
+            failed_without_leaf_result,
         } => {
             let mut ns = *node_state;
             // Carry the originating tree's id (the executor sets this too, but
@@ -449,28 +457,40 @@ async fn handle_interrupt(
             {
                 tree.call_signatures.remove(&ns.node_index);
             }
-            // VERIFYING is deliberately non-terminal. Feed only a leaf's
-            // post-verification final state so history never contains an
-            // optimistic result that must be corrected.
-            if is_terminal_executor_state(ns.state)
-                && let Some(r) = ns.leaf_result.as_ref()
-            {
+            // VERIFYING is non-terminal: optimistic call results must stay out of history.
+            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
+            if let Some(r) = ns.leaf_result.as_ref().filter(|_| terminal_leaf) {
                 let description = forest
                     .trees
                     .get(&plan_id)
                     .map(|meta| meta.description.as_str())
                     .unwrap_or("unknown tree");
                 feed_results_into_history(history, &plan_id, description, std::slice::from_ref(r));
+            } else if failed_without_leaf_result {
+                let feedback = serde_json::json!({
+                    "plan_id": plan_id,
+                    "node_index": ns.node_index,
+                    "op_id": ns.op_id,
+                    "description": ns.description,
+                    "operator_detail": ns.operator_detail,
+                });
+                history.push(Message::user(&format!(
+                    "Executor feedback for an RTDL node failure\n{feedback}"
+                )));
             }
-            // A non-success terminal leaf escalates to the VLM at once
+            if let Some(meta) = forest.trees.get(&plan_id)
+                && let Some(feedback) = repeat_result_message(&ns, &meta.repeat_counts)
+            {
+                history.push(Message::user(&feedback));
+            }
+            // Any non-success terminal outcome escalates to the VLM at once
             // rather than waiting for the whole tree to finish: the result is
             // already in context above, so the model can recover or abort
             // without blocking on still-running sibling branches. Successes
             // still batch at tree completion, which avoids per-node re-plan
             // storms.
-            let terminal_leaf = is_terminal_executor_state(ns.state) && ns.leaf_result.is_some();
-            let replan = terminal_leaf
-                && ns.state != RtdlNodeStateEnum::Succeeded as u32
+            let replan = (failed_without_leaf_result
+                || terminal_leaf && ns.state != RtdlNodeStateEnum::Succeeded as u32)
                 && !forest.kill_pending.contains(&plan_id)
                 && tasks.any_open();
             log_node_state(&plan_id, &ns);
@@ -579,17 +599,33 @@ async fn drive_plan(
                 if event.event_kind == RtdlEventEnum::NodeState as u32
                     && let Some(ns) = event.node_state
                 {
-                    // Forward every node state for live viz.
+                    // Operators report child failures after the children have reported theirs.
+                    let failed_without_leaf_result = ns.state == RtdlNodeStateEnum::Failed as u32
+                        && ns.leaf_result.is_none()
+                        && !ns.operator_detail.trim().is_empty()
+                        && !execution
+                            .plan
+                            .nodes
+                            .get(ns.node_index as usize)
+                            .into_iter()
+                            .flat_map(|node| &node.children)
+                            .any(|child| {
+                                results.iter().any(|result| {
+                                    result.node_index == *child
+                                        && result.state != RtdlNodeStateEnum::Succeeded as u32
+                                })
+                            });
                     let _ = interrupt_tx.send(TreeInterrupt::NodeState {
                         plan_id: plan_id.clone(),
                         node_state: Box::new(ns.clone()),
+                        failed_without_leaf_result,
                     });
                     // Collect the full RtdlNodeState for every node that reaches
                     // a terminal state (leaf and non-leaf). A non-success
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
                         forest_revision.fetch_add(1, Ordering::Release);
-                        if ns.leaf_result.is_some() {
+                        if ns.leaf_result.is_some() || failed_without_leaf_result {
                             replan_on_completion = ns.state == RtdlNodeStateEnum::Succeeded as u32;
                         }
                         if ns.state == RtdlNodeStateEnum::Canceled as u32 {
@@ -1122,6 +1158,18 @@ fn feed_results_into_history(
     history.extend(deferred_followups);
 }
 
+fn repeat_result_message(ns: &RtdlNodeState, counts: &HashMap<String, u32>) -> Option<String> {
+    if ns.node_kind != RTDL_REPEAT || ns.state != RtdlNodeStateEnum::Succeeded as u32 {
+        return None;
+    }
+    let count = counts.get(&ns.op_id)?;
+    Some(format!(
+        "Executor repeat result: plan_id={}, op_id={}, requested_count={count}, completed_iterations={count}. \
+         The repeat body ran exactly {count} times; a zero count did not invoke its body.",
+        ns.plan_id, ns.op_id
+    ))
+}
+
 /// Persist the exact capability calls handed to Executor so a later planning
 /// round can correlate terminal results with work it already dispatched.
 ///
@@ -1131,6 +1179,18 @@ fn feed_results_into_history(
 /// mandatory post-Completion round and allowed the same user step to be planned a
 /// second time from the robot's new state.
 fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: &str) {
+    let repeats: Vec<serde_json::Value> = plan
+        .nodes
+        .iter()
+        .filter(|node| node.node_kind == RTDL_REPEAT)
+        .map(|node| {
+            serde_json::json!({
+                "op_id": node.op_id,
+                "count": node.repeat_count,
+                "body_node_index": node.children.first(),
+            })
+        })
+        .collect();
     let calls: Vec<serde_json::Value> = plan
         .nodes
         .iter()
@@ -1154,10 +1214,11 @@ fn record_dispatched_plan(history: &mut Vec<Message>, plan: &Plan, description: 
     let record = serde_json::json!({
         "plan_id": plan.plan_id,
         "description": description,
+        "repeats": repeats,
         "calls": calls,
     });
     history.push(Message::user(&format!(
-        "Pilot harness dispatch record (already sent to Executor; not a new user request): {record}"
+        "Pilot harness dispatch record (plan node definitions sent to Executor; listed calls may not have run): {record}"
     )));
 }
 
@@ -1189,6 +1250,12 @@ async fn publish_stream(
             control_only: is_control_only(plan),
             call_signatures: plan_call_signatures(plan),
             steps: plan_steps(plan),
+            repeat_counts: plan
+                .nodes
+                .iter()
+                .filter(|node| node.node_kind == RTDL_REPEAT)
+                .map(|node| (node.op_id.clone(), node.repeat_count))
+                .collect(),
         },
     );
     let ended = live.complete || live.output.is_none();
@@ -1701,7 +1768,7 @@ pub async fn run_turn(
                     .recv()
                     .await
                     .context("execution feedback channel closed")?;
-                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state }
+                let failure_seen = matches!(&event, TreeInterrupt::NodeState { plan_id, node_state, .. }
                     if plan_id == &failed_plan_id && matches!(node_state.state, 3..=5));
                 handle_interrupt(event, forest, history, tasks, round, &session_id, tx).await;
                 if failure_seen {
@@ -2039,7 +2106,11 @@ Nodes are exactly one of:
 - {"op":"sequence","op_id":0,"description":"...","children":[...]}
 - {"op":"parallel","op_id":0,"description":"...","children":[...]}
 - {"op":"do","op_id":0,"description":"...","cap":"<exact capability_name>","args":{...}}
-Write op_id=0; Pilot assigns the real ID. Do not add node fields. Compose a task's known dependent steps into one sequence and its independent steps into one parallel tree; do not drip one known call per round. With no new call, return an empty sequence.
+- {"op":"if","op_id":0,"description":"...","condition":<expr>,"then":<node>,"else":<optional node>}
+- {"op":"repeat","op_id":0,"description":"...","count":0..10000,"body":<node>}
+- {"op":"while","op_id":0,"description":"...","condition":<expr>,"max_iterations":1..10000,"body":<node>}
+do may set bind. References: {"var":"name","path":["field",0]}; conditions: {"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}, or booleans. Bindings contain successful output; later sequential calls and loops overwrite them. Read only earlier completed nodes, never sibling parallel branches.
+Every node needs a description and op_id=0; Pilot assigns the real ID. Do not add node fields. Compose dependent steps into one sequence and independent steps into one parallel tree. With no new call, return an empty sequence with task_updates: [] if no task changes, or task_updates: [{"task_id":"T1","status":"done"}] to close task T1. in_progress with nothing running is rejected.
 
 Plan control is the entire rtdl value, never a nested node or capability: cancel_plan using an exact listed plan_id, or cancel_all, and only for plans listed in In-flight trees; with none listed, return an empty sequence. Never repeat a completed/cancelled control operation and never cancel an unrelated tree after another tree fails.
 
@@ -2050,7 +2121,7 @@ Tasks (ids from the status board):
 
 Resolve a named room through current Scene regions before navigation; never use a remembered grasp or observation pose as a room goal. A navigation SUCCEEDED result proves only the resolved requested destination; a zero-distance result does not prove that the robot moved. Never call a skill's cancel capability; Executor propagates RTDL cancellation.
 
-Copy each cap exactly from the current catalog. Executor feedback and dispatch records are scoped by plan_id/call_id and prove what was already sent; do not repeat a successful call.
+Copy each cap exactly from the current catalog. Scope feedback by plan_id/call_id. A dispatch record describes submitted RTDL nodes, not actual capability invocations. Use Executor leaf feedback to confirm calls that ran. A successful repeat result reports how many times its body ran, including zero. Do not repeat successful work.
 "#;
 
 /// One parsed RTDL envelope from the VLM.
@@ -2066,10 +2137,9 @@ pub(crate) struct RtdlEnvelope {
     pub(crate) task_fields: TaskFields,
 }
 
-/// Distinguish plan and node ids from those retained across Pilot restarts.
-pub(crate) static RUN_TAG: LazyLock<String> =
+/// Distinguishes this Pilot process's ids from ids restored with earlier sessions.
+pub static RUN_TAG: LazyLock<String> =
     LazyLock::new(|| Uuid::new_v4().simple().to_string()[..4].to_string());
-
 fn plan_call_count(plan: &Plan) -> usize {
     plan.nodes
         .iter()
@@ -2165,6 +2235,9 @@ fn rtdl_node_kind_name(kind: u32) -> String {
         RTDL_SEQUENCE => "sequence".to_string(),
         RTDL_PARALLEL => "parallel".to_string(),
         RTDL_DO => "do".to_string(),
+        RTDL_IF => "if".to_string(),
+        RTDL_REPEAT => "repeat".to_string(),
+        RTDL_WHILE => "while".to_string(),
         _ => format!("unknown({kind})"),
     }
 }
@@ -2203,6 +2276,22 @@ fn append_plan_node_summary(plan: &Plan, node_index: usize, depth: usize, out: &
             call_display_name(call),
             compact_preview(&call.args_json, 240)
         ));
+    }
+    match node.node_kind {
+        RTDL_IF | RTDL_WHILE => {
+            line.push_str(&format!(
+                " condition={}",
+                compact_preview(&node.condition_json, 240)
+            ));
+            if node.node_kind == RTDL_WHILE {
+                line.push_str(&format!(" max_iterations={}", node.max_iterations));
+            }
+        }
+        RTDL_REPEAT => line.push_str(&format!(" count={}", node.repeat_count)),
+        RTDL_DO if !node.bind.is_empty() => {
+            line.push_str(&format!(" bind={}", compact_preview(&node.bind, 160)));
+        }
+        _ => {}
     }
     out.push(line);
     for child in &node.children {
@@ -2267,7 +2356,7 @@ fn log_node_state(plan_id: &str, ns: &RtdlNodeState) {
         ));
     }
     line.push_str(&terminal_node_detail(ns));
-    debug!("{line}");
+    info!("{line}");
 }
 
 /// Pick the plan-level completion state shown in the forest completion log.
@@ -2421,12 +2510,12 @@ by planning capability calls available to you.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
 - Messages labelled `Executor feedback` are results of capability calls you
   already planned, not new user requests.
-- `Pilot harness dispatch record` messages are the authoritative record of RTDL
-  calls already sent to Executor. Correlate each result by `plan_id` and
-  `call_id`. When a recorded step succeeds, do not plan that same user-requested
-  step again from newly observed state; use the recorded args and result to
-  decide whether the success criterion is met. A genuinely different dependent
-  step may still use the same capability.
+- `Pilot harness dispatch record` messages describe the RTDL nodes submitted
+  to Executor, including repeat bodies that might run zero times. They do not
+  prove a capability was invoked. Correlate actual leaf results by `plan_id`
+  and `call_id`; a successful `Executor repeat result` gives the completed body
+  count. Do not plan a completed user-requested step again from newly observed
+  state. A genuinely different dependent step may still use the same capability.
 - If executor feedback already contains enough information to answer a task,
   answer in `content`, close the task as `done` in `task_updates`, and output an
   empty RTDL sequence. Do not repeat the same observation capability just to
@@ -2502,13 +2591,13 @@ for a running plan. Concretely:
 mod tests {
     use super::{
         CapabilityTargetMap, CatalogView, HistoryBudget, MetaPlanOp, RTDL_DO, RTDL_PARALLEL,
-        RTDL_PROTOCOL_REMINDER, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep, UsageTotals,
-        append_request_context, append_steer, assemble_planning_messages,
+        RTDL_PROTOCOL_REMINDER, RTDL_REPEAT, RTDL_SEQUENCE, RUN_TAG, TaskTable, TreeMeta, TreeStep,
+        UsageTotals, append_request_context, append_steer, assemble_planning_messages,
         build_capability_target_map, build_display_capabilities, build_forest_block,
         configured_vlm_idle_timeout, executor_active_snapshot, feed_results_into_history,
         format_plan_summary, invalid_cancel_target, is_control_only,
         is_legacy_plan_control_contract, is_terminal_executor_state, parse_meta_plan_op,
-        record_dispatched_plan, rtdl_node_kind_name, rtdl_state_name,
+        record_dispatched_plan, repeat_result_message, rtdl_node_kind_name, rtdl_state_name,
         should_replan_after_plan_done, skip_memory_prefetch, task_is_session_end,
         upsert_terminal_result,
     };
@@ -2717,8 +2806,7 @@ mod tests {
 
     #[test]
     fn later_round_protocol_is_compact_but_keeps_admission_rules() {
-        // The task fields' names are spelled out, which costs a few characters.
-        assert!(RTDL_PROTOCOL_REMINDER.len() < 2_100);
+        assert!(RTDL_PROTOCOL_REMINDER.len() < 3_000);
         for required in [
             "capability_name",
             "sequence",
@@ -2969,6 +3057,7 @@ mod tests {
                         description: description.into(),
                         capability: capability.into(),
                     }],
+                    repeat_counts: HashMap::new(),
                 },
             );
         }
@@ -3031,6 +3120,7 @@ mod tests {
                         capability: "navigate".into(),
                     },
                 ],
+                repeat_counts: HashMap::new(),
             },
         );
         let prompt = build_forest_block(&forest, &HashSet::new(), &TaskTable::default());
@@ -3248,6 +3338,7 @@ mod tests {
             upstream: format!("http://{model_address}"),
             api_key: String::new(),
             model: "test".into(),
+            reasoning_effort: None,
             context_window_tokens: None,
             api_format: "openai".into(),
         });
@@ -3351,6 +3442,7 @@ mod tests {
                     control_only: false,
                     call_signatures: super::plan_call_signatures(&plan),
                     steps: Vec::new(),
+                    repeat_counts: HashMap::new(),
                 },
             );
             let signature = super::call_signature(&call);
@@ -3367,6 +3459,7 @@ mod tests {
                 super::handle_interrupt(
                     super::TreeInterrupt::NodeState {
                         plan_id: "old".into(),
+                        failed_without_leaf_result: false,
                         node_state: Box::new(RtdlNodeState {
                             node_index,
                             state: state as u32,
@@ -3401,14 +3494,34 @@ mod tests {
     #[tokio::test]
     async fn failed_tree_completion_does_not_restart_recovery() {
         use crate::pb::executor::{RtdlEvent, RtdlPlanComplete};
-        for (later_success, requested_cancellation) in
-            [(false, false), (true, false), (false, true)]
-        {
+        for (leaf_failure, later_success, requested_cancellation) in [
+            (true, false, false),
+            (true, true, false),
+            (true, false, true),
+            (false, false, false),
+            (false, true, false),
+        ] {
             let mut execution = crate::stream_execution::StreamExecution::default();
             execution.plan.plan_id = "failed".into();
-            for (node_index, success, leaf) in
-                [(1, false, true), (0, false, false), (2, true, true)]
-            {
+            execution.plan.nodes = vec![
+                RtdlNode {
+                    children: vec![1, 2],
+                    ..Default::default()
+                },
+                RtdlNode::default(),
+                RtdlNode::default(),
+            ];
+            let cause = "condition evaluation: variable 'ready' is missing";
+            for (node_index, success, leaf, detail) in [
+                (
+                    1,
+                    false,
+                    leaf_failure,
+                    if leaf_failure { "" } else { cause },
+                ),
+                (0, false, false, "failed because a child failed"),
+                (2, true, true, ""),
+            ] {
                 if success && !later_success {
                     continue;
                 }
@@ -3416,6 +3529,7 @@ mod tests {
                     event_kind: super::RtdlEventEnum::NodeState as u32,
                     node_state: Some(RtdlNodeState {
                         node_index,
+                        operator_detail: detail.into(),
                         state: if success {
                             RtdlNodeStateEnum::Succeeded
                         } else {
@@ -3455,6 +3569,7 @@ mod tests {
                 control_only: false,
                 call_signatures: HashMap::new(),
                 steps: Vec::new(),
+                repeat_counts: HashMap::new(),
             };
             forest.trees.insert("failed".into(), meta());
             let mut tasks = TaskTable::default();
@@ -3475,6 +3590,16 @@ mod tests {
                 )
                 .await
             );
+
+            if !leaf_failure {
+                assert!(
+                    history.iter().any(|message| message
+                        .content
+                        .as_deref()
+                        .is_some_and(|text| text.contains(cause))),
+                    "replanning must see the direct failure reason"
+                );
+            }
 
             // Recovery dispatch precedes the old tree's parent failure and completion.
             forest.trees.insert("retry".into(), meta());
@@ -3502,6 +3627,12 @@ mod tests {
                 completion_seen |= completion;
             }
             assert!(completion_seen);
+            assert!(!history.iter().any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("failed because a child failed"))
+            }));
             assert!(!forest.trees.contains_key("failed"));
             assert!(forest.trees.contains_key("retry"));
             assert!(tasks.any_open());
@@ -3570,6 +3701,54 @@ mod tests {
     }
 
     #[test]
+    fn repeat_feedback_distinguishes_planned_body_from_completed_iterations() {
+        for count in [0, 3] {
+            let plan = Plan {
+                plan_id: format!("repeat-{count}"),
+                nodes: vec![
+                    RtdlNode {
+                        node_kind: RTDL_REPEAT,
+                        op_id: "repeat-op".into(),
+                        repeat_count: count,
+                        children: vec![1],
+                        ..Default::default()
+                    },
+                    RtdlNode {
+                        node_kind: RTDL_DO,
+                        op_id: "snapshot-op".into(),
+                        call: Some(CapabilityCall {
+                            call_id: format!("repeat-{count}:0"),
+                            provider_id: "tiago_camera".into(),
+                            contract_id: "robonix/primitive/camera/snapshot".into(),
+                            args_json: "{}".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut history = Vec::new();
+            record_dispatched_plan(&mut history, &plan, "camera boundary test");
+            let record = history[0].content.as_deref().unwrap();
+            assert!(record.contains("listed calls may not have run"));
+            assert!(record.contains(&format!("\"count\":{count}")));
+            let result = RtdlNodeState {
+                plan_id: plan.plan_id.clone(),
+                node_kind: RTDL_REPEAT,
+                op_id: "repeat-op".into(),
+                state: RtdlNodeStateEnum::Succeeded as u32,
+                ..Default::default()
+            };
+            let counts = HashMap::from([("repeat-op".to_string(), count)]);
+            let feedback = repeat_result_message(&result, &counts).unwrap();
+            assert!(feedback.contains(&format!("completed_iterations={count}")));
+            if count == 0 {
+                assert!(feedback.contains("did not invoke its body"));
+            }
+        }
+    }
+
+    #[test]
     fn cancel_target_must_be_live_and_not_already_requested() {
         let mut forest = HashMap::new();
         forest.insert(
@@ -3579,6 +3758,7 @@ mod tests {
                 control_only: false,
                 call_signatures: HashMap::new(),
                 steps: Vec::new(),
+                repeat_counts: HashMap::new(),
             },
         );
         let targets = vec!["7".to_string()];
@@ -3653,6 +3833,7 @@ mod tests {
                 }),
                 op_id: "op_1".into(),
                 description: "control action".into(),
+                ..Default::default()
             }],
         }
     }
@@ -3691,6 +3872,165 @@ mod tests {
         assert_eq!(rtdl_node_kind_name(RTDL_PARALLEL), "parallel");
         assert_eq!(rtdl_node_kind_name(RTDL_DO), "do");
         assert_eq!(rtdl_node_kind_name(99), "unknown(99)");
+    }
+
+    #[tokio::test]
+    #[ignore = "build robonix-atlas and robonix-executor binaries before running"]
+    async fn rtdl_controls_cross_the_executor_rpc_boundary() {
+        struct Processes(Vec<std::process::Child>);
+        impl Drop for Processes {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        fn address() -> std::net::SocketAddr {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let atlas_address = address();
+        let executor_address = address();
+        let mut processes = Processes(Vec::new());
+        processes.0.push(
+            std::process::Command::new(root.join("target/debug/robonix-atlas"))
+                .args(["--listen", &atlas_address.to_string(), "--capabilities"])
+                .arg(root.join("capabilities"))
+                .current_dir(work.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let _atlas = robonix_atlas::client::AtlasClient::connect_with_retry(
+            format!("http://{atlas_address}"),
+            100,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        processes.0.push(
+            std::process::Command::new(root.join("target/debug/robonix-executor"))
+                .args([
+                    "--atlas",
+                    &atlas_address.to_string(),
+                    "--listen",
+                    &executor_address.to_string(),
+                    "--id",
+                    "executor-rtdl-test",
+                    "--config-json",
+                    r#"{"verification":{"rules":[]}}"#,
+                ])
+                .current_dir(work.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let endpoint = format!("http://{executor_address}");
+        let mut connection = None;
+        for _ in 0..100 {
+            match super::RobonixSystemExecutorExecuteClient::connect(endpoint.clone()).await {
+                Ok(client) => {
+                    connection = Some(client);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let targets = HashMap::from([(
+            "executor.run_command".into(),
+            (
+                "executor-rtdl-test".into(),
+                "robonix/system/executor/builtin/run_command".into(),
+            ),
+        )]);
+        let tree = json!({"op":"sequence","children":[
+            {"op":"do","cap":"executor.run_command","bind":"observation",
+             "args":{"command":"printf '{\"ready\":false}'"}},
+            {"op":"while","condition":{"op":"not","args":[{"var":"observation","path":["ready"]}]},"max_iterations":3,
+             "body":{"op":"do","cap":"executor.run_command","bind":"observation",
+                     "args":{"command":"printf '{\"ready\":true,\"command\":\"printf repeated\"}'"}}},
+            {"op":"repeat","count":3,"body":{"op":"do","cap":"executor.run_command",
+             "args":{"command":{"var":"observation","path":["command"]}}}},
+            {"op":"if","condition":{"var":"observation","path":["ready"]},
+             "then":{"op":"do","cap":"executor.run_command","args":{"command":"printf selected"}},
+             "else":{"op":"do","cap":"executor.run_command","args":{}}}
+        ]});
+        let plan = expand_rtdl_to_plan(
+            &tree,
+            &targets,
+            "rpc-smoke".into(),
+            "smoke".into(),
+            0,
+            "conditions and loops",
+        )
+        .unwrap();
+        let mut stream = connection
+            .expect("Executor startup")
+            .execute(tonic::Request::new(plan))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut outputs = Vec::new();
+        let mut complete = false;
+        while let Some(event) = stream.message().await.unwrap() {
+            if let Some(result) = event.node_state.and_then(|state| state.leaf_result) {
+                assert!(result.success, "{}", result.error);
+                outputs.push(result.output);
+            }
+            if let Some(result) = event.plan_complete {
+                assert!(!result.any_failed);
+                complete = true;
+            }
+        }
+        assert!(complete);
+        assert_eq!(outputs.len(), 6);
+        assert_eq!(
+            outputs.iter().filter(|value| *value == "repeated").count(),
+            3
+        );
+        assert_eq!(outputs.last().unwrap(), "selected");
+    }
+
+    #[test]
+    fn rtdl_expands_nested_controls_and_rebindings() {
+        let targets = HashMap::from([(
+            "demo.observe".into(),
+            ("demo".into(), "robonix/test/observe".into()),
+        )]);
+        let tree = json!({"op":"sequence","children":[
+            {"op":"do","cap":"demo.observe","args":{},"bind":"observation"},
+            {"op":"while","condition":{"op":"eq","args":[{"var":"observation","path":["ready"]},false]},"max_iterations":3,
+             "body":{"op":"repeat","count":2,"body":{"op":"do","cap":"demo.observe","args":{},"bind":"observation"}}},
+            {"op":"if","condition":{"var":"observation","path":["ready"]},
+             "then":{"op":"sequence","children":[]},"else":{"op":"sequence","children":[]}}
+        ]});
+        let plan =
+            expand_rtdl_to_plan(&tree, &targets, "p".into(), "s".into(), 0, "observe").unwrap();
+        assert_eq!(plan.nodes[2].node_kind, super::RTDL_WHILE);
+        assert_eq!(plan.nodes[2].max_iterations, 3);
+        assert_eq!(plan.nodes[3].repeat_count, 2);
+        assert_eq!(plan.nodes[4].bind, "observation");
+        assert_eq!(plan.nodes[5].children.len(), 2);
+        for tree in [
+            json!({"op":"while","condition":true,"body":{"op":"sequence","children":[]}}),
+            json!({"op":"repeat","count":-1,"body":{"op":"sequence","children":[]}}),
+            json!({"op":"if","condition":{"op":"unknown","args":[]},"then":{"op":"sequence","children":[]}}),
+        ] {
+            assert!(
+                expand_rtdl_to_plan(&tree, &targets, "p".into(), "s".into(), 0, "bad").is_err()
+            );
+        }
     }
 
     #[test]

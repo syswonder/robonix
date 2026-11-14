@@ -104,6 +104,32 @@ jobs:
       - name: Test Python bindings
         run: python -m unittest discover -s system/chronos/clock/tests -p test_python.py
 
+  atlas-python:
+    name: Atlas Python metadata
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python test dependencies
+        run: python -m pip install -e './pylib/robonix-api[codegen]' pytest
+      - name: Build Atlas
+        run: cargo build --locked -p robonix-atlas --bin robonix-atlas
+      - name: Generate Atlas Python bindings
+        run: |
+          mkdir -p "$RUNNER_TEMP/atlas-python"
+          python -m grpc_tools.protoc -Isystem/atlas/proto \
+            --python_out="$RUNNER_TEMP/atlas-python" \
+            --grpc_python_out="$RUNNER_TEMP/atlas-python" \
+            system/atlas/proto/atlas.proto
+      - name: Test Python metadata round trips
+        env:
+          PYTHONPATH: ${{ runner.temp }}/atlas-python
+        run: python -m pytest -q pylib/robonix-api/tests/test_atlas_time_descriptor.py
+
   check:
     name: Rust (fmt + clippy + build + tests)
     runs-on: ubuntu-22.04
