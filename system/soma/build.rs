@@ -31,6 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for name in [
         "get_yaml.v1.toml",
         "get_urdf.v1.toml",
+        "get_urdf_asset_manifest.v1.toml",
+        "stream_urdf_asset.v1.toml",
         "footprint.v1.toml",
         "get_health.v1.toml",
         "health.v1.toml",

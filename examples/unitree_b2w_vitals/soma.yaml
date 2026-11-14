@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+urdf:
+  path: ./model/unitree_b2w_visual.urdf
+  root_link: base_link
+  model_name: unitree_b2w_visual
+
+robot:
+  id: unitree_b2w_visual
+  display_name: "Unitree B2-W"
+  family: quadruped
+  root_part: base
+  exports: []
+  components:
+    - id: base
+      display_name: "Base"
+      type: mobile_base
+      urdf_link: base_link
+      components:
+        - id: front_left_leg
+          display_name: "Front left leg"
+          type: leg
+          urdf_link: FL_hip
+          components:
+            - id: wheel
+              display_name: "Front left wheel"
+              type: wheel
+              urdf_joint: FL_foot_joint
+        - id: front_right_leg
+          display_name: "Front right leg"
+          type: leg
+          urdf_link: FR_hip
+          components:
+            - id: wheel
+              display_name: "Front right wheel"
+              type: wheel
+              urdf_joint: FR_foot_joint
+        - id: rear_left_leg
+          display_name: "Rear left leg"
+          type: leg
+          urdf_link: RL_hip
+          components:
+            - id: wheel
+              display_name: "Rear left wheel"
+              type: wheel
+              urdf_joint: RL_foot_joint
+        - id: rear_right_leg
+          display_name: "Rear right leg"
+          type: leg
+          urdf_link: RR_hip
+          components:
+            - id: wheel
+              display_name: "Rear right wheel"
+              type: wheel
+              urdf_joint: RR_foot_joint
+
+description:
+  summary: "A static Unitree B2-W visual model used to validate large external robot asset distribution."
+  can_do:
+    - "Render the official B2-W visual model in the Robonix Client Vitals page."
+    - "Exercise checksummed release downloads and large Soma asset streaming."
+  cannot_do:
+    - "Move or simulate the B2-W."
+    - "Report physical hardware telemetry."

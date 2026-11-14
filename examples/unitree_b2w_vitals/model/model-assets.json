@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "modelId": "unitree-b2w-visual",
+  "version": "unitree_ros-daadf41ee9afce8f90fdc09a98506012691fa122",
+  "artifact": {
+    "url": "https://github.com/LittleRookie1115/robonix-model-assets-test/releases/download/unitree-b2w-daadf41-r2/unitree-b2w-visuals-daadf41.tar.gz",
+    "bytes": 18316148,
+    "sha256": "fa4579b821f0fbac8376c6bcf0f5ce339a7f73b03b54ecb835f198f1276f5751"
+  },
+  "installRoots": [
+    "meshes",
+    "licenses"
+  ],
+  "files": {
+    "licenses/UNITREE_ROS_LICENSE-BSD-3-CLAUSE.txt": {
+      "bytes": 1558,
+      "sha256": "84aac59fd3246e3ddc49d1387644e8fcf43b0def4f0b9fe687f372e90446df2d"
+    },
+    "meshes/FL_calf.dae": {
+      "bytes": 926062,
+      "sha256": "e5656785b3981ae2fe325e8a76ff7538724b29a7e71b9359fedd5239218f413b"
+    },
+    "meshes/FL_foot.dae": {
+      "bytes": 962049,
+      "sha256": "1d84b9d1deb3225a6aac7154ff4a78d6e33faa7d98c7ee93a6977c6a94bb1ef6"
+    },
+    "meshes/FL_hip.dae": {
+      "bytes": 247428,
+      "sha256": "6eb84fd0647ae86aed557c8ec12e44c502a56ca892e061b6924f44ff4bbcac58"
+    },
+    "meshes/FL_thigh.dae": {
+      "bytes": 776753,
+      "sha256": "8dc0be62ea3ac04d1de915026b693d9ec0801c88c01bd211ceeeb171554dc681"
+    },
+    "meshes/FR_calf.dae": {
+      "bytes": 900212,
+      "sha256": "8b7e1d19a828147a24fe5d0ede135e27b9da4ab0268bf985069d3932c5a00878"
+    },
+    "meshes/FR_foot.dae": {
+      "bytes": 928144,
+      "sha256": "52035b4913e82932f47526b1346e64c4e0fd2c52373b3259fec1f6b3acaba5ce"
+    },
+    "meshes/FR_hip.dae": {
+      "bytes": 247539,
+      "sha256": "8ba46a2ddf23416ecf9508e9d78958287a59e7df352b47b6c4ec23b880f3b7db"
+    },
+    "meshes/FR_thigh.dae": {
+      "bytes": 776797,
+      "sha256": "8c26c85c53944ef8b41f8044575eb86843711fdebe898e9eb3ed26d028a74447"
+    },
+    "meshes/RL_calf.dae": {
+      "bytes": 926062,
+      "sha256": "e5656785b3981ae2fe325e8a76ff7538724b29a7e71b9359fedd5239218f413b"
+    },
+    "meshes/RL_foot.dae": {
+      "bytes": 962049,
+      "sha256": "9fe492ffdbedbb5626d4a086f5de3d775ddcfddf2d38e8f03f908201e7cde5eb"
+    },
+    "meshes/RL_hip.dae": {
+      "bytes": 243923,
+      "sha256": "f33ee7ffbc6ecd236ac9344962bd4c4f94610faed98d4f28b1e39d00e1134368"
+    },
+    "meshes/RL_thigh.dae": {
+      "bytes": 776166,
+      "sha256": "339ad86ed96c0b5fd6ec31071b22ecef09f9a5186f2093f37fae766a27301736"
+    },
+    "meshes/RR_calf.dae": {
+      "bytes": 900212,
+      "sha256": "8b7e1d19a828147a24fe5d0ede135e27b9da4ab0268bf985069d3932c5a00878"
+    },
+    "meshes/RR_foot.dae": {
+      "bytes": 928144,
+      "sha256": "e7c45104d3fd29c578aa3e3707ff0ac72cfeb45107f3900488ab4d5e9fa33ca6"
+    },
+    "meshes/RR_hip.dae": {
+      "bytes": 245102,
+      "sha256": "ae01fb34bd57c3c29a657537f7aa81c5fd7d4629cdb7ff8ffe9cc193661dd04b"
+    },
+    "meshes/RR_thigh.dae": {
+      "bytes": 776438,
+      "sha256": "6f8938173ffe0aeaaa005a82f082fa95994ca8d7e4e344495dcc6f21b6b2e5f4"
+    },
+    "meshes/base_link.dae": {
+      "bytes": 71748110,
+      "sha256": "f5c0b686a93270e77a9edc7145f922b6e8e4bfc5c818ca92e9edad0d954c183a"
+    }
+  }
+}

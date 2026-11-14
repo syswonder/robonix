@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+# Stream one URDF-local resource without loading the complete model into memory.
+string robot_id  # empty = default robot
+string path
+uint64 offset
+uint32 chunk_size
+---
+UrdfAssetChunk chunk
