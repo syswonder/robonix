@@ -1,0 +1,10 @@
+# Emergency hover: cancel the current motion.
+[contract]
+id      = "robonix/primitive/drone/hover"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Hover.srv"
+description = "Emergency hover: immediately cancel the current motion."
+
+[mode]
+type = "rpc"
