@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y \
     apt-get install -y cuda-toolkit-12-4 && \
     rm cuda-keyring_1.1-1_all.deb
 
+# Pilot searches saved capability output with rg; grep is the fallback.
+RUN apt-get update && apt-get install -y ripgrep
+
 # RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
 #     bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/miniconda3 && \
 #     rm Miniconda3-latest-Linux-x86_64.sh

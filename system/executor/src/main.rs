@@ -20,6 +20,7 @@ mod execution_context;
 mod expression;
 mod grpc_server;
 mod lifecycle;
+mod output_view;
 mod pb;
 mod plan_input;
 mod plan_scheduler;

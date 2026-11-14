@@ -221,6 +221,12 @@ Pilot uses the specific node error as model feedback when RTDL argument or
 condition evaluation fails or a while loop reaches its limit with the
 condition still true. It can start recovery while another branch is running.
 
+### Inspecting retained outputs
+
+Executor replaces long results with a reference to a saved file (see the
+Executor README). Pilot does not cut results again; the standing prompt tells
+the model to search the file with `run_command` instead of repeating the call.
+
 ## RTDL conditions and loops
 
 RTDL supports `if` (`condition`, `then`, optional `else`), `repeat` (`count`, `body`), and bounded `while` (`condition`, `max_iterations`, `body`). A `do.bind` stores successful, verified output in the plan's execution context. Reference it with `{"var":"name","path":["field",0]}` in arguments or conditions. Conditions accept booleans and `{"op":"eq|ne|lt|le|gt|ge|and|or|not","args":[...]}` expressions. Missing values and non-boolean conditions fail explicitly.

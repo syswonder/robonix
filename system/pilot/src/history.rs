@@ -35,13 +35,6 @@ fn is_image_value(v: &serde_json::Value) -> bool {
                 .is_some_and(|data| !data.is_empty()))
 }
 
-/// Return true only for payloads that [`tool_result_to_messages`] will map to
-/// an actual image follow-up. Callers use this to avoid retaining malformed
-/// image-shaped JSON without normal result-size bounds.
-pub fn is_image_output(output: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(output).is_ok_and(|value| is_image_value(&value))
-}
-
 /// Build history messages from one executor tool result.
 ///
 /// Normal path: a single `Message` with `role: "tool"` and `tool_call_id = call_id`,

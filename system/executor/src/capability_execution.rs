@@ -62,6 +62,8 @@ struct OverlapVerifier {
     policy: Arc<VerificationPolicy>,
     /// Successful capability result retained as the basis for the verified result.
     original: CapabilityCallResult,
+    /// Already retained output shared by VERIFYING and the final event.
+    output_view: Option<String>,
 }
 
 /// Map a completed leaf call to its RTDL state. Cancellation wins over the
@@ -174,10 +176,12 @@ pub(crate) async fn execute_call(
                 RtdlNodeStateEnum::Verifying as u32,
             )
             .await;
+        let view = crate::output_view::prepare(&result).await;
+        let output_view = Some(view.output.clone());
         let _ = tx
             .send(Ok(rtdl_events::node_state_from_result(
                 &node,
-                result.clone(),
+                view,
                 RtdlNodeStateEnum::Verifying as u32,
             )))
             .await;
@@ -193,6 +197,7 @@ pub(crate) async fn execute_call(
                 runtime,
                 policy: verification,
                 original: result,
+                output_view,
             }
             .run(),
         );
@@ -242,7 +247,7 @@ pub(crate) async fn execute_call(
     let _ = tx
         .send(Ok(rtdl_events::node_state_from_result(
             &node,
-            result.clone(),
+            crate::output_view::prepare(&result).await,
             state,
         )))
         .await;
@@ -260,6 +265,7 @@ pub(crate) async fn execute_call(
 impl OverlapVerifier {
     /// Run the verifier and publish the leaf's final state without side effects.
     async fn run(mut self) -> bool {
+        let original_output = self.original.output.clone();
         let verified = verification::verify_result(
             self.policy.as_ref(),
             &self.call,
@@ -277,12 +283,19 @@ impl OverlapVerifier {
         self.runtime
             .record_op_state(&self.node.plan_id, &self.node.op_id, state)
             .await;
+        let mut view = verified.clone();
+        if let Some(output) = self
+            .output_view
+            .filter(|_| verified.output == original_output)
+        {
+            view.output = output;
+        } else {
+            view = crate::output_view::prepare(&verified).await;
+        }
         let _ = self
             .tx
             .send(Ok(rtdl_events::node_state_from_result(
-                &self.node,
-                verified.clone(),
-                state,
+                &self.node, view, state,
             )))
             .await;
         if !verified.success {
@@ -416,6 +429,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");
         let verifier = OverlapVerifier {
+            // Pilot gets the already-saved reference; the verifier saw the original.
+            output_view: Some("saved-reference".into()),
             call: target_call.clone(),
             node: NodeEventContext {
                 plan_id: "p".into(),
@@ -452,7 +467,9 @@ mod tests {
         let final_state = event.node_state.unwrap();
         assert_eq!(final_state.node_index, 1);
         assert_eq!(final_state.state, RtdlNodeStateEnum::Failed as u32);
-        assert!(!final_state.leaf_result.unwrap().success);
+        let leaf = final_state.leaf_result.unwrap();
+        assert!(!leaf.success);
+        assert_eq!(leaf.output, "saved-reference");
         assert!(rx.try_recv().is_err());
         atlas_server.abort();
     }
@@ -479,6 +496,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let target_call = call("p:1");
         let verifier = OverlapVerifier {
+            output_view: None,
             call: target_call.clone(),
             node: NodeEventContext {
                 plan_id: "p".into(),

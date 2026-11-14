@@ -183,3 +183,31 @@ python3 scripts/test_execute_stream.py
 
 The cross-process test uses a local fake VLM, requires `grpcio` and
 `grpcio-tools`, and retains logs under `/tmp`.
+
+## Large capability outputs
+
+A leaf result longer than `ROBONIX_OUTPUT_INLINE_BYTES` (UTF-8 bytes, default
+32 KiB, read from the environment Executor starts with) is saved whole in a private directory under the system temporary
+directory (`TMPDIR`, usually `/tmp`). Pilot then receives a JSON reference with
+the file path, size, line count, completion time and a 512-character preview, and
+searches the file through `run_command` with `rg`, or `grep` and `sed` where `rg`
+is not installed. Verification and logs use the original result. Images are never
+saved.
+
+`run_command` copies the command's stdout and stderr to files in that directory,
+so Executor holds almost none of it in memory. Output that fits the inline limit
+is read back and the files are deleted. `read_file` returns a reference to a large
+file instead of its contents.
+
+Executor sets no size limit and never deletes saved files: available space is
+whatever the temporary directory has, and the operating system clears it. If a
+write fails, for example because the directory is full, the command still runs to
+completion, Executor logs a warning, and the result carries `storage_error` so the
+model tells the user. A failed save does not change the call's success.
+
+The inline limit is per result. Pilot's history budget comes from the model's
+context window, and history compaction cuts any single kept message to 20% of the
+history room. Keep the inline limit at or below that cut (32 KiB is about 8,192
+estimated tokens, so a room of at least 40,960 tokens) or compaction will drop
+the tail of results that were never saved. Without a declared context window
+Pilot does not compact at all.
