@@ -9,6 +9,20 @@ voiceprint itself. Those are separate providers discovered through Atlas.
 
 ## Architecture
 
+Local task, voice-event, wake and speaker-output timestamps use the in-process
+Chronos reference clock. Read and quality failures are returned through the
+existing RPC or event error path without substituting a timestamp. Source audio
+stamps and monotonic timeout handling are preserved. No running Chronos service
+is required.
+
+Hands-free turn failures are reported through error events or `last_error`
+without ending unrelated observer streams. If an error event cannot be
+timestamped, its original cause remains in the returned status and logs.
+Returning to listening preserves `last_error` until a successful wake clears it.
+Diagnostic WAV recording is skipped on clock failure; session IDs are encoded
+as one filename component so they cannot escape the configured save directory.
+Existing files and symbolic links are never overwritten by recording writes.
+
 ```
 User
   │
