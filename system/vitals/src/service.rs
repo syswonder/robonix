@@ -99,12 +99,22 @@ impl VitalsServiceImpl {
 
     /// Update the cached snapshot. Broadcasts to StreamVitals subscribers only
     /// when at least one component health transitions (OK→WARN, WARN→ERROR, etc.)
-    /// or when the snapshot is the first one collected.
+    /// or signal membership changes, including the first collected snapshot.
     pub async fn update_snapshot(&self, snapshot: VitalsSnapshot) {
         let mut state = self.state.write().await;
 
         // Check for health state transitions.
-        let mut changed = state.prev_health.is_empty(); // always send first snapshot
+        let names: std::collections::HashSet<_> = snapshot
+            .components
+            .iter()
+            .map(|component| component.name.as_str())
+            .collect();
+        let mut changed = state.prev_health.is_empty()
+            || state.prev_health.len() != names.len()
+            || state
+                .prev_health
+                .keys()
+                .any(|name| !names.contains(name.as_str()));
         for comp in &snapshot.components {
             let prev_h = state.prev_health.get(&comp.name).copied().unwrap_or(0);
             if comp.health != prev_h {
@@ -117,9 +127,12 @@ impl VitalsServiceImpl {
                     comp.threshold
                 );
                 // Log non-OK states more prominently.
-                if comp.health == crate::soma_ingest::HEALTH_WARN
-                    || comp.health == crate::soma_ingest::HEALTH_ERROR
-                {
+                if matches!(
+                    comp.health,
+                    crate::soma_ingest::HEALTH_WARN
+                        | crate::soma_ingest::HEALTH_ERROR
+                        | crate::soma_ingest::HEALTH_STALE
+                ) {
                     log::warn!("[vitals] ALERT: {} — {}", comp.name, comp.detail);
                 }
                 changed = true;
@@ -559,6 +572,30 @@ impl RobonixSystemVitalsStream for VitalsServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    /// Removing a signal broadcasts the new snapshot instead of hiding recovery.
+    async fn removed_health_signal_is_broadcast() {
+        let service = VitalsServiceImpl::new();
+        let mut events = service.state.read().await.broadcast_tx.subscribe();
+        service
+            .update_snapshot(VitalsSnapshot {
+                components: vec![crate::pb::vitals::ComponentHealth {
+                    name: "body/camera/fault".into(),
+                    health: crate::soma_ingest::HEALTH_ERROR,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await;
+        events.recv().await.unwrap();
+        service.update_snapshot(VitalsSnapshot::default()).await;
+        let recovered = tokio::time::timeout(std::time::Duration::from_millis(100), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(recovered.components.is_empty());
+    }
 
     #[tokio::test]
     async fn modules_get_returns_empty_snapshot_initially() {
