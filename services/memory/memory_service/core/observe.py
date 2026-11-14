@@ -66,6 +66,7 @@ async def _vlm_describe(
         return None
 
     import httpx
+    from robonix_api.llm import metrics
 
     # Build image content part
     img_b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -93,8 +94,10 @@ async def _vlm_describe(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, json=body, headers=headers)
+        with metrics.Call("memory", "observe", cfg["base_url"], cfg["model"]) as call:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(url, json=body, headers=headers)
+            call.finish(r)
             if r.status_code >= 400:
                 log.warning("observe: VLM returned %d: %s", r.status_code, r.text[:200])
                 return None
@@ -149,6 +152,7 @@ async def vlm_answer_question(
         return None
 
     import httpx
+    from robonix_api.llm import metrics
 
     # Load images from disk
     content_parts: List[Dict[str, Any]] = []
@@ -203,8 +207,10 @@ async def vlm_answer_question(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(url, json=body, headers=headers)
+        with metrics.Call("memory", "answer", cfg["base_url"], cfg["model"]) as call:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(url, json=body, headers=headers)
+            call.finish(r)
             if r.status_code >= 400:
                 log.warning("vlm_qa: VLM returned %d: %s", r.status_code, r.text[:200])
                 return None

@@ -420,6 +420,7 @@ class ImageRelationInferer:
                 user_message=user_message,
                 timeout=_LLM_TIMEOUT_SEC,
                 images=[image_b64],
+                operation="image_relations",
             )
         except Exception as e:  # noqa: BLE001
             log.warning("[image-rel] VLM call failed: %s: %s", type(e).__name__, e)

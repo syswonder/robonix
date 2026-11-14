@@ -231,6 +231,14 @@ if [[ -n "${SCRIBE_LOG_DIR:-}" && -d "${SCRIBE_LOG_DIR}" ]]; then
     EXTRA_MOUNTS+=(-v "${SCRIBE_LOG_DIR}:${SCRIBE_LOG_DIR}:ro")
 fi
 
+# Model usage records: writable, at the same path, so the in-container writer
+# appends to the deployment's llm-metrics directory.
+declare -a METRICS_ARGS=()
+if [[ -n "${ROBONIX_LLM_METRICS_DIR:-}" && -d "${ROBONIX_LLM_METRICS_DIR}" ]]; then
+    METRICS_ARGS+=(-v "${ROBONIX_LLM_METRICS_DIR}:${ROBONIX_LLM_METRICS_DIR}"
+        -e "ROBONIX_LLM_METRICS_DIR=${ROBONIX_LLM_METRICS_DIR}" -e "RBNX_BOOT_ID=${RBNX_BOOT_ID:-}")
+fi
+
 declare -a ZENOH_ARGS=()
 if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
     ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
@@ -369,5 +377,6 @@ docker run --rm --cidfile "$RUN_DIR/cid" \
     ${SOURCE_MOUNTS[@]+"${SOURCE_MOUNTS[@]}"} \
     -v "$SCENE_HOST_DATA_DIR":/data/robonix \
     ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+    ${METRICS_ARGS[@]+"${METRICS_ARGS[@]}"} \
     "$IMG" &
 wait "$!"

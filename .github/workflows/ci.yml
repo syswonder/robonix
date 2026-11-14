@@ -81,6 +81,23 @@ jobs:
           system/scene/tests/test_goal_planner.py
           system/scene/tests/test_malformed_grid_inputs.py
 
+  robonix-api-tests:
+    name: robonix-api unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Installs the package the way a consumer gets it, so an import the
+      # tests rely on cannot pass by accident through PYTHONPATH alone.
+      - name: Install robonix-api
+        run: python3 -m pip install ./pylib/robonix-api
+      - name: Install test dependencies
+        run: python3 -m pip install pytest
+      - name: Test robonix-api
+        run: python3 -m pytest -q pylib/robonix-api/tests
+
   chronos-python:
     name: Chronos Python bindings
     runs-on: ubuntu-22.04

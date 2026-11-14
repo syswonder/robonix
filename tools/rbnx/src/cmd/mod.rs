@@ -24,6 +24,7 @@ mod init;
 mod inspect;
 mod install;
 mod list;
+mod llm_usage;
 mod logs;
 mod package_new;
 mod path;
@@ -188,6 +189,10 @@ pub enum Commands {
         /// transcripts, which restore sessions after a restart).
         #[arg(long)]
         sessions: bool,
+        /// With `-f`, also wipe `rbnx-boot/llm-metrics/` (per-request model
+        /// usage records, which `rbnx llm-usage` sums).
+        #[arg(long)]
+        llm_metrics: bool,
     },
     /// Install a package from GitHub or local path
     ///
@@ -434,6 +439,20 @@ pub enum Commands {
         #[arg(long)]
         list_tags: bool,
     },
+    /// Sum the per-request model usage records by consumer, operation, host
+    /// and model: requests, outcomes and reported tokens.
+    LlmUsage {
+        /// Records directory (default: `$ROBONIX_LLM_METRICS_DIR`, else
+        /// `./rbnx-boot/llm-metrics`).
+        #[arg(short = 'd', long)]
+        dir: Option<PathBuf>,
+        /// Only records of this boot (`RBNX_BOOT_ID`, `boot_id` in a record).
+        #[arg(long)]
+        boot: Option<String>,
+        /// Print the totals as JSON lines instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -488,7 +507,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             file,
             cache,
             sessions,
-        } => clean::execute(config, package, file, cache, sessions).await,
+            llm_metrics,
+        } => clean::execute(config, package, file, cache, sessions, llm_metrics).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,
@@ -549,5 +569,6 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             json,
             list_tags,
         } => logs::execute(log_dir, tag, level, follow, json, list_tags).await,
+        Commands::LlmUsage { dir, boot, json } => llm_usage::execute(dir, boot.as_deref(), json),
     }
 }

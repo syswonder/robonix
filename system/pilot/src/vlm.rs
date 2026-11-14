@@ -16,10 +16,15 @@ use async_openai::types::chat::{
     FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
 };
 use futures_util::stream::{Stream, StreamExt};
+use robonix_llm_metrics::{Call, Status, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -369,6 +374,35 @@ pub struct VlmClient {
     /// would defeat reuse between independent tasks with the same standing
     /// prompt. It is opaque and is not derived from a user/session id.
     prompt_cache_key: String,
+    /// Where each request's usage record goes; `None` records nothing.
+    metrics_dir: Option<PathBuf>,
+}
+
+/// Items of one streamed completion, as returned by [`VlmClient::chat_stream`].
+///
+/// Dropping it abandons the request. [`VlmStream::mark_timed_out`] first
+/// tells the usage record that the caller gave up because the stream went
+/// idle, which is otherwise indistinguishable from a cancellation.
+pub struct VlmStream {
+    /// Items forwarded by the task reading the upstream reply.
+    items: tokio_stream::wrappers::ReceiverStream<Result<VlmStreamItem>>,
+    /// Set by the caller before dropping a stream it timed out.
+    timed_out: Arc<AtomicBool>,
+}
+
+impl VlmStream {
+    /// Record the request as `timeout` rather than `cancelled` once dropped.
+    pub fn mark_timed_out(&self) {
+        self.timed_out.store(true, Ordering::Release);
+    }
+}
+
+impl Stream for VlmStream {
+    type Item = Result<VlmStreamItem>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.items).poll_next(cx)
+    }
 }
 
 /// What the caller wants back from one completion.
@@ -566,6 +600,7 @@ impl VlmClient {
             reasoning_effort: cfg.reasoning_effort.clone(),
             configured_context_window_tokens: cfg.context_window_tokens,
             prompt_cache_key: Uuid::new_v4().simple().to_string(),
+            metrics_dir: robonix_llm_metrics::directory_from_env(),
         }
     }
 
@@ -653,13 +688,17 @@ impl VlmClient {
     ///   - `ToolCall` once per accumulated function call (after the upstream
     ///     finishes streaming all argument deltas)
     ///   - one final `Finish`
+    ///
+    /// `open_timeout` bounds opening the stream, retries included.
     pub async fn chat_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDef],
         prompt_cache_key: Option<&str>,
         reply_shape: ReplyShape,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
+        operation: &str,
+        open_timeout: Option<Duration>,
+    ) -> Result<VlmStream> {
         let oai_messages = build_openai_messages(messages)?;
         let oai_tools = build_openai_tools(tools)?;
 
@@ -708,99 +747,148 @@ impl VlmClient {
         // Optional fields go on the first rejection; the response format can
         // need a second step (see downgrade_response_format).
         let mut compatibility_fallbacks = 0_u8;
-        let response = loop {
-            let response = self
-                .inner
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .json(&request_body)
-                .send()
-                .await
-                .context("open VLM chat stream")?;
-            let status = response.status();
-            if status.is_success() {
-                break response;
-            }
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            let text = response.text().await.unwrap_or_default();
-            // Providers word a refused response_format in their own way
-            // (MiniMax: "Mismatch type string with value array"), so any 400 or
-            // 422 to a request carrying one steps it down; an unrelated error
-            // costs one more request and is reported as it was.
-            let format_refused = matches!(status.as_u16(), 400 | 422)
-                && request_body.get("response_format").is_some();
-            if (format_refused || rejects_optional_request_fields(status, &text))
-                && compatibility_fallbacks < 2
-            {
-                // Drop an optional field only when the error names it: removing
-                // the cache key with a refused format would forgo prompt
-                // caching, and stream_options the usage report, on every
-                // later request of the stream.
-                let lowered = text.to_ascii_lowercase();
-                let names_format =
-                    lowered.contains("response_format") || lowered.contains("json_schema");
-                let downgraded = if format_refused || names_format {
-                    downgrade_response_format(&mut request_body)
-                } else {
-                    None
+        let mut call = Call::start(
+            self.metrics_dir.as_deref(),
+            "pilot",
+            operation,
+            &self.api_base,
+            &self.model,
+            true,
+        );
+        let opened = async {
+            let opened = loop {
+                let sent = self
+                    .inner
+                    .post(&url)
+                    .bearer_auth(&self.api_key)
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .json(&request_body)
+                    .send()
+                    .await;
+                let response = match sent {
+                    Ok(response) => response,
+                    Err(error) => {
+                        call.finish(Status::TransportError, None);
+                        return Err(error).context("open VLM chat stream");
+                    }
                 };
-                let mut dropped: Vec<&str> = Vec::new();
-                if let Some(body) = request_body.as_object_mut() {
-                    for (field, named) in [
-                        ("stream_options", "stream_options"),
-                        ("stream_options", "include_usage"),
-                        ("prompt_cache_key", "prompt_cache_key"),
-                        ("prompt_cache_options", "prompt_cache_options"),
-                    ] {
-                        if lowered.contains(named) && body.remove(field).is_some() {
-                            dropped.push(field);
+                let status = response.status();
+                if status.is_success() {
+                    // Until the stream ends, dropping it means the caller gave up.
+                    call.finish(Status::Cancelled, Some(status.as_u16()));
+                    break (response, status.as_u16());
+                }
+                call.finish(Status::HttpError, Some(status.as_u16()));
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                let text = response.text().await.unwrap_or_default();
+                // Providers word a refused response_format in their own way
+                // (MiniMax: "Mismatch type string with value array"), so any 400 or
+                // 422 to a request carrying one steps it down; an unrelated error
+                // costs one more request and is reported as it was.
+                let format_refused = matches!(status.as_u16(), 400 | 422)
+                    && request_body.get("response_format").is_some();
+                if (format_refused || rejects_optional_request_fields(status, &text))
+                    && compatibility_fallbacks < 2
+                {
+                    // Drop an optional field only when the error names it: removing
+                    // the cache key with a refused format would forgo prompt
+                    // caching, and stream_options the usage report, on every
+                    // later request of the stream.
+                    let lowered = text.to_ascii_lowercase();
+                    let names_format =
+                        lowered.contains("response_format") || lowered.contains("json_schema");
+                    let downgraded = if format_refused || names_format {
+                        downgrade_response_format(&mut request_body)
+                    } else {
+                        None
+                    };
+                    let mut dropped: Vec<&str> = Vec::new();
+                    if let Some(body) = request_body.as_object_mut() {
+                        for (field, named) in [
+                            ("stream_options", "stream_options"),
+                            ("stream_options", "include_usage"),
+                            ("prompt_cache_key", "prompt_cache_key"),
+                            ("prompt_cache_options", "prompt_cache_options"),
+                        ] {
+                            if lowered.contains(named) && body.remove(field).is_some() {
+                                dropped.push(field);
+                            }
                         }
                     }
-                }
-                if dropped.is_empty() && downgraded.is_none() {
-                    bail!("open VLM chat stream: HTTP {status}: {text}");
-                }
-                // Name what changed rather than "retrying without them": a
-                // downgrade is not a removal, and a run that later reads as
-                // schema-guided needs this line to say it was not.
-                if let Some(now) = downgraded {
-                    robonix_scribe::warn!(
-                        "[pilot/vlm] upstream rejected response_format with HTTP {status}; \
+                    if dropped.is_empty() && downgraded.is_none() {
+                        bail!("open VLM chat stream: HTTP {status}: {text}");
+                    }
+                    // Name what changed rather than "retrying without them": a
+                    // downgrade is not a removal, and a run that later reads as
+                    // schema-guided needs this line to say it was not.
+                    if let Some(now) = downgraded {
+                        robonix_scribe::warn!(
+                            "[pilot/vlm] upstream rejected response_format with HTTP {status}; \
                          response_format is now {now} for the rest of this stream. RTDL shape \
                          is no longer schema-guided; admission still runs in Pilot. \
                          Upstream said: {text}"
-                    );
-                }
-                if !dropped.is_empty() {
-                    robonix_scribe::warn!(
-                        "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; \
+                        );
+                    }
+                    if !dropped.is_empty() {
+                        robonix_scribe::warn!(
+                            "[pilot/vlm] upstream rejected optional request fields with HTTP {status}; \
                          retrying without {}",
-                        dropped.join(", ")
+                            dropped.join(", ")
+                        );
+                    }
+                    compatibility_fallbacks += 1;
+                    call.retry();
+                    continue;
+                }
+                if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
+                    robonix_scribe::warn!(
+                        "[pilot/vlm] open stream HTTP {status}; retry {}/{} in {:.1}s",
+                        retry_index + 1,
+                        MAX_OPEN_RETRIES,
+                        delay.as_secs_f64()
+                    );
+                    tokio::time::sleep(delay).await;
+                    retry_index += 1;
+                    call.retry();
+                    continue;
+                }
+                bail!("open VLM chat stream: HTTP {status}: {text}");
+            };
+            anyhow::Ok(opened)
+        };
+        let opened = match open_timeout {
+            Some(limit) => match tokio::time::timeout(limit, opened).await {
+                Ok(opened) => opened,
+                Err(_) => {
+                    // Keep a 429 seen before a long Retry-After wait.
+                    let last = call.http_status();
+                    call.finish(Status::Timeout, last);
+                    bail!(
+                        "open VLM chat stream: no response within {:.1}s",
+                        limit.as_secs_f64()
                     );
                 }
-                compatibility_fallbacks += 1;
-                continue;
-            }
-            if let Some(delay) = open_retry_delay(status, retry_after.as_deref(), retry_index) {
-                robonix_scribe::warn!(
-                    "[pilot/vlm] open stream HTTP {status}; retry {}/{} in {:.1}s",
-                    retry_index + 1,
-                    MAX_OPEN_RETRIES,
-                    delay.as_secs_f64()
-                );
-                tokio::time::sleep(delay).await;
-                retry_index += 1;
-                continue;
-            }
-            bail!("open VLM chat stream: HTTP {status}: {text}");
+            },
+            None => opened.await,
         };
+        let (response, http_status) = opened?;
         let mut upstream = response.bytes_stream();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let abandoned = {
+            let timed_out = Arc::clone(&timed_out);
+            move || {
+                if timed_out.load(Ordering::Acquire) {
+                    Status::Timeout
+                } else {
+                    Status::Cancelled
+                }
+            }
+        };
 
         // Walk the upstream chunk-by-chunk, accumulating tool-call deltas by
         // index until the upstream finishes; then emit one ToolCall per index
@@ -809,14 +897,18 @@ impl VlmClient {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<VlmStreamItem>>(64);
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
-            let mut finish = "stop".to_string();
+            // Stays empty unless the upstream names a finish reason.
+            let mut finish = String::new();
             // HTTP chunks may end inside a UTF-8 character. Decode only after
             // a complete SSE line arrives (or the transport reaches EOF).
             let mut buf = Vec::new();
             let mut done = false;
             while !done {
                 let chunk = tokio::select! {
-                    _ = tx.closed() => return,
+                    () = tx.closed() => {
+                        call.finish(abandoned(), Some(http_status));
+                        return;
+                    }
                     chunk = upstream.next() => chunk,
                 };
                 let Some(chunk) = chunk else {
@@ -827,13 +919,26 @@ impl VlmClient {
                         buf.extend_from_slice(&bytes);
                         while let Some(pos) = buf.iter().position(|byte| *byte == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
-                            match process_stream_line(&line, &mut tc_acc, &mut finish, &tx).await {
-                                Ok(true) => {
+                            match process_stream_line(
+                                &line,
+                                &mut tc_acc,
+                                &mut finish,
+                                &tx,
+                                &mut call,
+                            )
+                            .await
+                            {
+                                Ok(Some(StreamEnd::Complete)) => {
                                     done = true;
                                     break;
                                 }
-                                Ok(false) => {}
+                                Ok(Some(StreamEnd::Abandoned)) => {
+                                    call.finish(abandoned(), Some(http_status));
+                                    return;
+                                }
+                                Ok(None) => {}
                                 Err(e) => {
+                                    call.finish(Status::TransportError, Some(http_status));
                                     let _ = tx.send(Err(e)).await;
                                     return;
                                 }
@@ -841,6 +946,7 @@ impl VlmClient {
                         }
                     }
                     Err(e) => {
+                        call.finish(Status::TransportError, Some(http_status));
                         let _ = tx
                             .send(Err(anyhow::anyhow!("VLM stream chunk error: {e}")))
                             .await;
@@ -848,13 +954,34 @@ impl VlmClient {
                     }
                 }
             }
-            if !done
-                && !buf.is_empty()
-                && let Err(e) = process_stream_line(&buf, &mut tc_acc, &mut finish, &tx).await
-            {
-                let _ = tx.send(Err(e)).await;
-                return;
+            if !done && !buf.is_empty() {
+                match process_stream_line(&buf, &mut tc_acc, &mut finish, &tx, &mut call).await {
+                    Ok(Some(StreamEnd::Abandoned)) => {
+                        call.finish(abandoned(), Some(http_status));
+                        return;
+                    }
+                    Ok(Some(StreamEnd::Complete)) => done = true,
+                    Ok(None) => {}
+                    Err(e) => {
+                        call.finish(Status::TransportError, Some(http_status));
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
             }
+            // A reply that ends without [DONE] or a finish reason was cut off;
+            // it is still passed on, but not counted as a complete answer. A
+            // consumer that stops reading the remaining items does not make a
+            // complete reply cancelled.
+            let complete = done || !finish.is_empty();
+            call.finish(
+                if complete {
+                    Status::Ok
+                } else {
+                    Status::TransportError
+                },
+                Some(http_status),
+            );
 
             for (_, tc) in tc_acc {
                 if tc.id.is_empty() && tc.name.is_empty() {
@@ -876,7 +1003,10 @@ impl VlmClient {
             let _ = tx.send(Ok(VlmStreamItem::Finish)).await;
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(VlmStream {
+            items: tokio_stream::wrappers::ReceiverStream::new(rx),
+            timed_out,
+        })
     }
 }
 
@@ -909,6 +1039,7 @@ mod tests {
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
         rejects_optional_request_fields, response_format_for,
     };
+    use robonix_llm_metrics::Call;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -1125,6 +1256,7 @@ mod tests {
                 &mut calls,
                 &mut finish,
                 &tx,
+                &mut Call::start(None, "test", "test", "", "", true),
             )
             .await
             .unwrap();
@@ -1146,6 +1278,7 @@ mod tests {
             &mut calls,
             &mut finish,
             &tx,
+            &mut Call::start(None, "test", "test", "", "", true),
         )
         .await
         .unwrap();
@@ -1228,9 +1361,17 @@ mod tests {
             reasoning_effort: effort.map(str::to_owned),
             configured_context_window_tokens: None,
             prompt_cache_key: "local-test".into(),
+            metrics_dir: None,
         };
         let stream = client
-            .chat_stream(&[super::Message::user("test")], &[], None, ReplyShape::Text)
+            .chat_stream(
+                &[super::Message::user("test")],
+                &[],
+                None,
+                ReplyShape::Text,
+                "test",
+                None,
+            )
             .await
             .unwrap();
         let items = tokio::time::timeout(Duration::from_secs(10), stream.collect::<Vec<_>>())
@@ -1291,6 +1432,214 @@ mod tests {
         assert!(matches!(&items[0], Ok(VlmStreamItem::TextDelta(value)) if value == "中文")); // i18n-ok: multibyte UTF-8 test fixture
         assert!(matches!(&items[1], Ok(VlmStreamItem::Finish)));
     }
+
+    /// Answer one request with a canned HTTP reply, holding the socket open
+    /// when `hold` so the client keeps waiting for more of the body.
+    async fn canned(response: Vec<u8>, hold: bool) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buf).await.unwrap();
+                assert!(count > 0, "client closed before sending its request");
+                request.extend_from_slice(&buf[..count]);
+            }
+            socket.write_all(&response).await.unwrap();
+            if hold {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    /// A canned HTTP reply carrying `body` as the whole SSE stream.
+    fn chat_response(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn test_client(base: &str, metrics_dir: &std::path::Path) -> super::VlmClient {
+        super::VlmClient {
+            inner: reqwest::Client::builder().no_proxy().build().unwrap(),
+            api_base: base.to_string(),
+            api_key: "local-test".into(),
+            model: "local-test".into(),
+            configured_context_window_tokens: None,
+            prompt_cache_key: "local-test".into(),
+            metrics_dir: Some(metrics_dir.to_path_buf()),
+        }
+    }
+
+    /// Open a text stream for `operation` against `base`.
+    async fn open(
+        base: &str,
+        metrics_dir: &std::path::Path,
+        operation: &str,
+        open_timeout: Option<Duration>,
+    ) -> anyhow::Result<super::VlmStream> {
+        test_client(base, metrics_dir)
+            .chat_stream(
+                &[super::Message::user("test")],
+                &[],
+                None,
+                ReplyShape::Text,
+                operation,
+                open_timeout,
+            )
+            .await
+    }
+
+    /// Records written under `directory` for `operation`, waiting for the
+    /// background reader to write one when `wait` is set.
+    async fn records(
+        directory: &std::path::Path,
+        operation: &str,
+        wait: bool,
+    ) -> Vec<serde_json::Value> {
+        let path = directory.join(format!("pilot-{}.jsonl", std::process::id()));
+        for _ in 0..100 {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let found: Vec<serde_json::Value> = text
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|record| record["operation"] == operation)
+                .collect();
+            if !found.is_empty() || !wait {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Vec::new()
+    }
+
+    /// Every exit path writes one record with the outcome it really had.
+    #[tokio::test]
+    async fn chat_stream_records_each_outcome() {
+        use futures_util::StreamExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+
+        let complete = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{"delta": {"content": "hi"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            })
+        );
+        let (base, server) = canned(chat_response("200 OK", &complete), false).await;
+        let stream = open(&base, dir, "done", None).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        server.await.unwrap();
+        let [record] = records(dir, "done", true).await.try_into().unwrap();
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["input_tokens"], 3);
+        assert_eq!(record["attempts"], 1);
+
+        // The connection closes before [DONE] or a finish reason.
+        let cut = "data: {\"choices\":[{\"delta\":{\"content\":\"h\"}}]}\n\n";
+        let (base, server) = canned(chat_response("200 OK", cut), false).await;
+        let stream = open(&base, dir, "cut", None).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        server.await.unwrap();
+        let [record] = records(dir, "cut", true).await.try_into().unwrap();
+        assert_eq!(
+            (record["status"].as_str(), record["http_status"].as_u64()),
+            (Some("transport_error"), Some(200))
+        );
+
+        let rejected = chat_response("400 Bad Request", r#"{"error":"bad model"}"#);
+        let (base, server) = canned(rejected, false).await;
+        let error = open(&base, dir, "rejected", None)
+            .await
+            .err()
+            .expect("a 400 must fail the request");
+        assert!(format!("{error:#}").contains("400"), "{error:#}");
+        server.await.unwrap();
+        let [record] = records(dir, "rejected", false).await.try_into().unwrap();
+        assert_eq!(
+            (record["status"].as_str(), record["http_status"].as_u64()),
+            (Some("http_error"), Some(400))
+        );
+
+        // Content-Length larger than the body keeps the reply in flight.
+        let pending = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "data: {\"choices\":[]}\n\n".len() + 4096,
+            "data: {\"choices\":[]}\n\n"
+        );
+        for (operation, idle) in [("abandoned", false), ("idle", true)] {
+            let (base, server) = canned(pending.clone().into_bytes(), true).await;
+            let stream = open(&base, dir, operation, None).await.unwrap();
+            if idle {
+                stream.mark_timed_out();
+            }
+            drop(stream);
+            let [record] = records(dir, operation, true).await.try_into().unwrap();
+            server.abort();
+            let expected = if idle { "timeout" } else { "cancelled" };
+            assert_eq!(record["status"], expected, "{operation}");
+        }
+
+        // A refused optional field is dropped and the request sent again.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let replies = [
+            chat_response("400 Bad Request", r#"{"error":"unknown stream_options"}"#),
+            chat_response("200 OK", &complete),
+        ];
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for reply in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..count]);
+                }
+                socket.write_all(&reply).await.unwrap();
+            }
+        });
+        let stream = open(&base, dir, "fallback", None).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+        server.await.unwrap();
+        let [record] = records(dir, "fallback", true).await.try_into().unwrap();
+        assert_eq!(
+            (record["status"].as_str(), record["attempts"].as_u64()),
+            (Some("ok"), Some(2))
+        );
+
+        // No response headers at all: opening times out.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", silent.local_addr().unwrap());
+        let error = open(&base, dir, "silent", Some(Duration::from_millis(200)))
+            .await
+            .err()
+            .expect("a silent upstream must time out");
+        assert!(format!("{error:#}").contains("no response"), "{error:#}");
+        let [record] = records(dir, "silent", false).await.try_into().unwrap();
+        assert_eq!(record["status"], "timeout");
+        drop(silent);
+    }
+}
+
+/// How the stream walk ended, as far as the record is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    /// The upstream finished the reply; the record can be `ok`.
+    Complete,
+    /// The consumer stopped reading, so the reply was abandoned.
+    Abandoned,
 }
 
 #[derive(Default)]
@@ -1307,34 +1656,36 @@ async fn process_stream_line(
     tc_acc: &mut BTreeMap<u32, AccumulatedToolCall>,
     finish: &mut String,
     tx: &tokio::sync::mpsc::Sender<Result<VlmStreamItem>>,
-) -> Result<bool> {
+    call: &mut Call,
+) -> Result<Option<StreamEnd>> {
     let line = std::str::from_utf8(line)
         .context("VLM SSE line contains invalid UTF-8")?
         .trim();
     if line.is_empty() || line.starts_with(':') {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(data) = line.strip_prefix("data:") else {
-        return Ok(false);
+        return Ok(None);
     };
     let data = data.trim();
     if data == "[DONE]" {
-        return Ok(true);
+        return Ok(Some(StreamEnd::Complete));
     }
 
     let v: Value = serde_json::from_str(data)
         .with_context(|| format!("deserialize VLM stream chunk: {data}"))?;
+    call.observe(&v);
     if let Some(usage) = parse_usage(&v)
         && tx.send(Ok(VlmStreamItem::Usage(usage))).await.is_err()
     {
-        return Ok(true);
+        return Ok(Some(StreamEnd::Abandoned));
     }
     let Some(choice) = v
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
     else {
-        return Ok(false);
+        return Ok(None);
     };
 
     if let Some(content) = choice
@@ -1347,7 +1698,7 @@ async fn process_stream_line(
             .await
             .is_err()
     {
-        return Ok(true);
+        return Ok(Some(StreamEnd::Abandoned));
     }
     // A thinking model streams this for as long as it reasons, with no
     // `content` in sight. Forward it so the planner's idle timer measures the
@@ -1368,7 +1719,7 @@ async fn process_stream_line(
             .await
             .is_err()
     {
-        return Ok(true);
+        return Ok(Some(StreamEnd::Abandoned));
     }
     if let Some(tc_chunks) = choice
         .get("delta")
@@ -1394,28 +1745,17 @@ async fn process_stream_line(
     if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
         *finish = fr.to_string();
     }
-    Ok(false)
+    Ok(None)
 }
 
-/// Read the standard Chat Completions usage shape without requiring every
-/// OpenAI-compatible provider to deserialize optional detail fields equally.
+/// The chunk's usage when it reports both prompt and completion counts.
 fn parse_usage(value: &Value) -> Option<VlmUsage> {
-    let usage = value.get("usage")?.as_object()?;
-    let prompt_tokens = usage.get("prompt_tokens")?.as_u64()?;
-    let completion_tokens = usage.get("completion_tokens")?.as_u64()?;
-    let cached_tokens = usage
-        .get("prompt_tokens_details")
-        .and_then(Value::as_object)
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64);
+    let usage = Usage::from_response(value);
     Some(VlmUsage {
-        prompt_tokens,
-        completion_tokens,
-        cached_tokens,
-        model: value
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        prompt_tokens: usage.input_tokens?,
+        completion_tokens: usage.output_tokens?,
+        cached_tokens: usage.cached_input_tokens,
+        model: usage.provider_model,
     })
 }
 

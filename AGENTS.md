@@ -41,8 +41,8 @@ Third-party skills are not vendored into the repository. These are recommended f
 Robonix is an **embodied AI operating system**: a monorepo with Rust system
 components, Python packages, capability contracts, IDL libraries, examples, and
 documentation. The Rust workspace lives at the repository root in `Cargo.toml`;
-current Rust members are `system/{atlas,executor,liaison,pilot,scribe,soma,vitals}`
-and `tools/{rbnx,codegen}`. The twelve system component directories live under
+current Rust members are `system/{atlas,executor,liaison,llm-metrics,pilot,scribe,soma,vitals}`
+and `tools/{rbnx,codegen}`. The thirteen system component directories live under
 `system/`; several are documentation/planning components today, while
 `system/scene` is a Python package managed by uv. Python workspace packages are
 listed in the root `pyproject.toml`: shared libraries in `pylib/*`, reference

@@ -65,7 +65,8 @@ async def caption_one(registry, views, map_binding, llm, tried: dict,
             _SYSTEM_PROMPT + _LANGUAGE.get(
                 os.environ.get("SCENE_CAPTION_LANG", "zh"), _LANGUAGE["zh"]),
             f"The object is a {obj.label}.",
-            images=[base64.b64encode(jpeg).decode("ascii")])
+            images=[base64.b64encode(jpeg).decode("ascii")],
+            operation="caption")
         caption = str((reply or {}).get("caption") or "").strip()
         if not caption:
             continue

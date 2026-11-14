@@ -1,0 +1,94 @@
+{
+  "cases": [
+    {
+      "name": "openai body with cache and reasoning",
+      "body": {
+        "model": "gpt-5.5-2026-01-01",
+        "usage": {
+          "prompt_tokens": 1200,
+          "completion_tokens": 80,
+          "total_tokens": 1280,
+          "prompt_tokens_details": {
+            "cached_tokens": 900
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 32
+          }
+        }
+      },
+      "expected": {
+        "input_tokens": 1200,
+        "output_tokens": 80,
+        "cached_input_tokens": 900,
+        "reasoning_tokens": 32,
+        "provider_model": "gpt-5.5-2026-01-01"
+      }
+    },
+    {
+      "name": "deepseek cache hit field",
+      "body": {
+        "usage": {
+          "prompt_tokens": 500,
+          "completion_tokens": 10,
+          "prompt_cache_hit_tokens": 400,
+          "prompt_cache_miss_tokens": 100
+        }
+      },
+      "expected": {
+        "input_tokens": 500,
+        "output_tokens": 10,
+        "cached_input_tokens": 400,
+        "reasoning_tokens": null,
+        "provider_model": null
+      }
+    },
+    {
+      "name": "stream chunk without usage",
+      "body": {
+        "model": "m",
+        "choices": [
+          {
+            "delta": {
+              "content": "hi"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "input_tokens": null,
+        "output_tokens": null,
+        "cached_input_tokens": null,
+        "reasoning_tokens": null,
+        "provider_model": "m"
+      }
+    },
+    {
+      "name": "invalid counts are unknown",
+      "body": {
+        "usage": {
+          "prompt_tokens": -1,
+          "completion_tokens": "7",
+          "prompt_tokens_details": null
+        }
+      },
+      "expected": {
+        "input_tokens": null,
+        "output_tokens": null,
+        "cached_input_tokens": null,
+        "reasoning_tokens": null,
+        "provider_model": null
+      }
+    },
+    {
+      "name": "not an object",
+      "body": null,
+      "expected": {
+        "input_tokens": null,
+        "output_tokens": null,
+        "cached_input_tokens": null,
+        "reasoning_tokens": null,
+        "provider_model": null
+      }
+    }
+  ]
+}
