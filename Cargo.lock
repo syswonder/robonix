@@ -3153,6 +3153,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "prost",
  "protoc-bin-vendored",
  "reqwest 0.13.4",
@@ -3234,6 +3235,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "heck",
  "robonix-scribe",
  "serde",
  "serde_json",

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Tonic-generated wire types. `contract_proto_modules.rs` is emitted by
+// Tonic-generated wire types and Channel bindings. `contract_proto_modules.rs` is emitted by
 // robonix-codegen (build.rs) and declares `pub mod <pkg>` for each proto
 // package, ordered so prost `super::sibling` references resolve.
 //

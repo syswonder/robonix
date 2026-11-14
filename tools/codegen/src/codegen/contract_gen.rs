@@ -11,6 +11,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "contract_channel_gen.rs"]
+mod channel_gen;
+
 use super::msg_parser::{MsgField, MsgResolver, MsgTypeRef, SrvSpec};
 use super::proto_gen::proto_package_name;
 
@@ -213,32 +216,7 @@ pub fn generate(
     for ((_, c), (_, in_t, out_t)) in contracts.iter().zip(proto_types.iter()) {
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
-        // RPC method name:
-        //   - srv-backed contracts (rpc / rpc_*_stream): use the .srv
-        //     filename basename (canonical PascalCase). Existing
-        //     consumers across the codebase expect this.
-        //   - msg-backed contracts (topic_in / topic_out): use the
-        //     contract_id leaf (e.g. `robonix/primitive/audio/mic` →
-        //     `mic` → CamelCased to `Mic`). Don't use the .msg basename
-        //     (`AudioChunk` etc.) — that would change the wire-level
-        //     gRPC method name and break existing client code.
-        let idl_kind = parse_idl_path(c.contract.idl.trim()).map(|(_, kind, _)| kind);
-        let method_raw = if idl_kind == Some("srv") {
-            parse_idl_path(c.contract.idl.trim())
-                .map(|(_, _, name)| name.to_string())
-                .unwrap_or_else(|| c.contract.id.clone())
-        } else {
-            c.contract
-                .id
-                .rsplit_once('/')
-                .map(|(_, leaf)| leaf.to_string())
-                .unwrap_or_else(|| c.contract.id.clone())
-        };
-        // RPC method names must be UpperCamelCase. `.srv` filenames are
-        // already CamelCase by ROS convention so this is identity for
-        // them; the fallback (contract id leaf, e.g. `scan_2d` for
-        // topic-style contracts) gets normalised here.
-        let method = upper_camel(&method_raw);
+        let method = contract_method_name(c);
         writeln!(
             &mut out,
             "// contract: {} (v{})",
@@ -272,7 +250,7 @@ pub fn generate(
         );
     }
 
-    super::contract_proto_modules_gen::write(out_dir, verbose)?;
+    channel_gen::generate(&contracts, &proto_types, resolver, out_dir, verbose)?;
     Ok(())
 }
 
@@ -785,6 +763,16 @@ fn parse_ros_path(s: &str) -> Option<(&str, &str, &str)> {
         return None;
     }
     Some((parts[0], parts[1], parts[2]))
+}
+
+fn contract_method_name(contract: &ContractToml) -> String {
+    let (_, kind, name) = parse_idl_path(contract.contract.idl.trim()).unwrap();
+    // Topic methods use the contract leaf, not the shared message name.
+    upper_camel(if kind == "srv" {
+        name
+    } else {
+        contract.contract.id.rsplit('/').next().unwrap()
+    })
 }
 
 /// Convert an arbitrary identifier to UpperCamelCase. Splits on `_`/`-`/

@@ -1,64 +1,41 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-//! Bind gRPC routes and messages from deployment-generated descriptors.
+//! Typed protobuf communication used by generated contract bindings.
 
+use super::{Channel, ChannelContract};
 use crate::pb;
 use anyhow::{Context, Result, ensure};
+use futures_util::{Stream, StreamExt};
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, MethodDescriptor};
-use serde_json::Value;
-use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
+use std::pin::Pin;
+use tonic::codegen::http::uri::PathAndQuery;
 
-/// A connected gRPC method and the generated types of its wire messages.
+/// An initialized HTTP/2 connection and the authoritative Atlas method route.
 #[derive(Clone)]
 pub(super) struct Binding {
-    /// Reusable HTTP/2 connection; allocations still belong to individual executions.
-    pub connection: tonic::transport::Channel,
-    /// Input/output types and streaming flags from the generated descriptor.
-    pub method: MethodDescriptor,
-    /// Authoritative RPC route returned by Atlas.
-    pub path: tonic::codegen::http::uri::PathAndQuery,
+    /// Shared transport; execution ownership remains with each Channel.
+    connection: tonic::transport::Channel,
+    /// Method selected by the provider's Atlas declaration.
+    path: PathAndQuery,
 }
 
 impl Binding {
-    pub async fn connect(
+    pub async fn connect<C: ChannelContract>(
         endpoint: &str,
         params: &pb::TransportParams,
-        pool: &DescriptorPool,
         contract: &pb::ContractDescriptor,
     ) -> Result<Self> {
         let Some(pb::transport_params::Kind::Grpc(params)) = &params.kind else {
             anyhow::bail!("missing gRPC transport parameters");
         };
-        let service = pool.get_service_by_name(&params.service_name).or_else(|| {
-            // Legacy namespace Drivers use the shared lifecycle IDL and their own route.
-            if contract.mode == "rpc" && contract.io_srv_type == "lifecycle/srv/Driver"
-                && contract.id.ends_with("/driver")
-                && params.method.rsplit('/').next() == Some("Driver")
-            {
-                pool.get_service_by_name("robonix.contracts.RobonixLifecycleDriver")
-            } else { None }
-        }).with_context(|| format!("missing generated gRPC service {}; load its descriptor with add_descriptor_set()", params.service_name))?;
-        let name = params.method.rsplit('/').next().unwrap_or_default();
-        let method = service
-            .methods()
-            .find(|m| m.name() == name)
-            .with_context(|| format!("unknown gRPC method: {}", params.method))?;
-        let route = format!("/{}/{}", params.service_name, method.name());
         ensure!(
-            params.method == route || params.method == name,
-            "gRPC method does not match service"
+            params.service_name == C::SERVICE
+                || (!C::ID.is_empty() && contract.id != C::ID && C::matches_contract(contract)),
+            "gRPC service does not match channel binding"
         );
-        let mode = contract.mode.as_str();
-        let flags = match mode {
-            "rpc" => (false, false),
-            "rpc_server_stream" | "topic_out" => (false, true),
-            "rpc_client_stream" | "topic_in" => (true, false),
-            "rpc_bidirectional_stream" => (true, true),
-            _ => anyhow::bail!("unsupported gRPC contract mode: {mode}"),
-        };
+        let route = format!("/{}/{}", params.service_name, C::METHOD);
         ensure!(
-            flags == (method.is_client_streaming(), method.is_server_streaming()),
-            "gRPC method does not match contract mode: {mode}"
+            params.method == C::METHOD || params.method == route,
+            "gRPC method does not match channel binding"
         );
         let connection =
             tonic::transport::Endpoint::new(super::super::normalize_grpc_endpoint(endpoint))?
@@ -67,79 +44,166 @@ impl Binding {
                 .context("gRPC connection failed")?;
         Ok(Self {
             connection,
-            method,
             path: route.parse()?,
         })
     }
-
-    pub async fn client(&self) -> Result<tonic::client::Grpc<tonic::transport::Channel>> {
-        let mut client = tonic::client::Grpc::new(self.connection.clone());
-        client
-            .ready()
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC not ready: {e}"))?;
-        Ok(client)
-    }
-
-    pub fn request(&self, value: &Value) -> Result<DynamicMessage> {
-        DynamicMessage::deserialize(self.method.input(), value).context("invalid gRPC request")
-    }
-
-    pub fn codec(&self) -> MessageCodec {
-        MessageCodec(self.method.output())
-    }
 }
 
-pub(super) fn response(message: &DynamicMessage) -> Result<Value> {
-    let options = prost_reflect::SerializeOptions::new()
-        .use_proto_field_name(true)
-        .skip_default_fields(false);
-    let mut data = Vec::new();
-    message.serialize_with_options(&mut serde_json::Serializer::new(&mut data), &options)?;
-    Ok(serde_json::from_slice(&data)?)
+type Messages<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+
+async fn client<C: ChannelContract>(
+    channel: &Channel<C>,
+) -> Result<(tonic::client::Grpc<tonic::transport::Channel>, PathAndQuery)> {
+    let binding = channel
+        .execution
+        .grpc
+        .lock()
+        .await
+        .clone()
+        .context("gRPC channel unavailable")?;
+    let mut client = tonic::client::Grpc::new(binding.connection);
+    client
+        .ready()
+        .await
+        .map_err(|error| anyhow::anyhow!("gRPC not ready: {error}"))?;
+    Ok((client, binding.path))
 }
 
-/// Dynamic decoder bound to the response type of one generated method.
-pub(super) struct MessageCodec(
-    /// Wire message descriptor required to construct a dynamic response.
-    MessageDescriptor,
-);
-
-impl Codec for MessageCodec {
-    type Encode = DynamicMessage;
-    type Decode = DynamicMessage;
-    type Encoder = MessageEncoder;
-    type Decoder = MessageDecoder;
-    fn encoder(&mut self) -> Self::Encoder {
-        MessageEncoder
+pub async fn unary<C, Req, Res>(channel: Channel<C>, request: Req) -> Result<Res>
+where
+    C: ChannelContract<Output = Res>,
+    Req: Message + Default + 'static,
+    Res: Message + Default + 'static,
+{
+    let (mut client, path) = client(&channel).await?;
+    let response = client
+        .unary(
+            tonic::Request::new(request),
+            path,
+            tonic_prost::ProstCodec::<Req, Res>::default(),
+        )
+        .await?
+        .into_inner();
+    // A decoded synchronous response confirms completion before business interpretation.
+    if !channel.is_async() {
+        channel.execution.progress.lock().unwrap().terminal = true;
     }
-    fn decoder(&mut self) -> Self::Decoder {
-        MessageDecoder(self.0.clone())
-    }
+    let (accepted, run_id) = C::execution(&response)?;
+    channel.complete(accepted, run_id);
+    Ok(response)
 }
 
-/// Encode descriptor-validated request messages into protobuf frames.
-pub(super) struct MessageEncoder;
-impl Encoder for MessageEncoder {
-    type Item = DynamicMessage;
-    type Error = tonic::Status;
-    fn encode(&mut self, item: Self::Item, dst: &mut EncodeBuf<'_>) -> Result<(), Self::Error> {
-        item.encode(dst)
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
+pub async fn server_stream<C, Req, Res>(
+    channel: Channel<C>,
+    request: Req,
+) -> Result<Messages<Result<Res>>>
+where
+    C: ChannelContract,
+    Req: Message + Default + 'static,
+    Res: Message + Default + 'static,
+{
+    let (mut client, path) = client(&channel).await?;
+    let response = client
+        .server_streaming(
+            tonic::Request::new(request),
+            path,
+            tonic_prost::ProstCodec::<Req, Res>::default(),
+        )
+        .await?;
+    Ok(responses(channel, response.into_inner()))
 }
 
-/// Decode protobuf frames with the generated response descriptor.
-pub(super) struct MessageDecoder(
-    /// Response shape selected by the RPC binding.
-    MessageDescriptor,
-);
-impl Decoder for MessageDecoder {
-    type Item = DynamicMessage;
-    type Error = tonic::Status;
-    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
-        DynamicMessage::decode(self.0.clone(), src)
-            .map(Some)
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
+pub async fn client_stream<C, Req, Res>(channel: Channel<C>, request: Messages<Req>) -> Result<Res>
+where
+    C: ChannelContract<Output = Res>,
+    Req: Message + Default + 'static,
+    Res: Message + Default + 'static,
+{
+    let (mut client, path) = client(&channel).await?;
+    let request = requests(&channel, request);
+    let response = client
+        .client_streaming(
+            tonic::Request::new(request),
+            path,
+            tonic_prost::ProstCodec::<Req, Res>::default(),
+        )
+        .await?
+        .into_inner();
+    channel.complete(true, String::new());
+    Ok(response)
+}
+
+pub async fn bidirectional_stream<C, Req, Res>(
+    channel: Channel<C>,
+    request: Messages<Req>,
+) -> Result<Messages<Result<Res>>>
+where
+    C: ChannelContract,
+    Req: Message + Default + 'static,
+    Res: Message + Default + 'static,
+{
+    let (mut client, path) = client(&channel).await?;
+    let request = requests(&channel, request);
+    let response = client
+        .streaming(
+            tonic::Request::new(request),
+            path,
+            tonic_prost::ProstCodec::<Req, Res>::default(),
+        )
+        .await?;
+    Ok(responses(channel, response.into_inner()))
+}
+
+fn requests<C: ChannelContract, T: Send + 'static>(
+    channel: &Channel<C>,
+    input: Messages<T>,
+) -> Messages<T> {
+    let stop = channel.execution.stop_stream.subscribe();
+    Box::pin(futures_util::stream::unfold(
+        (input, stop),
+        |(mut input, mut stop)| async move {
+            if *stop.borrow() {
+                return None;
+            }
+            let message = tokio::select! {
+                _ = stop.changed() => return None,
+                message = input.next() => message?,
+            };
+            Some((message, (input, stop)))
+        },
+    ))
+}
+
+fn responses<C: ChannelContract, T: Message + Default + 'static>(
+    channel: Channel<C>,
+    mut input: tonic::Streaming<T>,
+) -> Messages<Result<T>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        let mut stop = channel.execution.stop_stream.subscribe();
+        loop {
+            let message = match input.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    channel.execution.progress.lock().unwrap().terminal = true;
+                    return;
+                }
+                Err(error) => {
+                    let error = channel.retained(&format!("gRPC stream failed: {error}"));
+                    tokio::select! {
+                        _ = stop.changed() => {},
+                        _ = sender.send(Err(error)) => {},
+                    }
+                    return;
+                }
+            };
+            if !*stop.borrow() && !sender.is_closed() {
+                tokio::select! {
+                    _ = stop.changed() => {},
+                    _ = sender.send(Ok(message)) => {},
+                }
+            }
+        }
+    });
+    Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
 }

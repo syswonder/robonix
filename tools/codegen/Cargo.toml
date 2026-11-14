@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
+heck = "0.5"
 thiserror.workspace = true
 robonix-scribe.workspace = true
 serde = { workspace = true, features = ["derive"] }

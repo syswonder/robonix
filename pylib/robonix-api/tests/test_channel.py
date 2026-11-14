@@ -124,8 +124,7 @@ class ChannelTest(unittest.TestCase):
                         "-o", str(proto)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([sys.executable, "-m", "grpc_tools.protoc", f"-I{proto}",
                         f"--python_out={cls.work / 'types'}", f"--grpc_python_out={cls.work / 'types'}",
-                        f"--descriptor_set_out={cls.work / 'types' / 'robonix_contracts_descriptor.bin'}",
-                        "--include_imports", *map(str, proto.glob("*.proto"))], check=True)
+                        *map(str, proto.glob("*.proto"))], check=True)
         port = free_port()
         cls.grpc_process = subprocess.Popen([
             sys.executable, str(FIXTURE.with_name("grpc_server.py")), "--port", str(port),
@@ -288,11 +287,59 @@ class ChannelTest(unittest.TestCase):
             "ROBONIX_TEST_ATLAS": self.atlas._endpoint, "ROBONIX_TEST_GRPC": endpoint,
             "ROBONIX_TEST_CONTROL": str(self.control)})
 
+    def test_rust_binding_generation(self):
+        project = self.work / "rust-bindings"
+        contracts = project / "contracts"
+        contracts.mkdir(parents=True)
+        for name, idl in (
+            ("uuid", "unique_identifier_msgs/msg/UUID.msg"),
+            ("rgbd", "camera/msg/RGBD.msg"),
+            ("uint32", "common_interfaces/std_msgs/msg/UInt32.msg"),
+        ):
+            (contracts / f"{name}.toml").write_text(
+                f'[contract]\nid="robonix/primitive/{name}"\nversion="1"\nkind="primitive"\n'
+                f'idl=" {idl} "\n[mode]\ntype=" topic_out "\n'
+            )
+        proto = project / "proto"
+        subprocess.run([
+            str(ROOT / "target/debug/robonix-codegen"), "--lang", "proto",
+            "-I", str(ROOT / "capabilities/lib"), "--contracts", str(contracts), "-o", str(proto),
+        ], check=True, stdout=subprocess.DEVNULL)
+        (project / "Cargo.toml").write_text(
+            '[package]\nname="robonix-channel-codegen-test"\nversion="0.0.0"\nedition="2024"\n'
+            '[workspace]\n[dependencies]\n'
+            f'robonix-atlas={{path={json.dumps(str(ROOT / "system/atlas"))}}}\n'
+            'anyhow="1"\nprost="0.14"\ntonic="0.14"\ntonic-prost="0.14"\ntokio-stream="0.1"\n'
+            '[build-dependencies]\ntonic-prost-build="0.14"\nprotoc-bin-vendored="3.2"\n'
+        )
+        (project / "build.rs").write_text('''use std::path::PathBuf;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let proto = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("proto");
+    let files: Vec<_> = std::fs::read_dir(&proto)?.map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?.into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "proto")).collect();
+    unsafe { std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?); }
+    tonic_prost_build::configure().compile_protos(&files, &[proto.clone()])?;
+    std::fs::copy(proto.join("contract_proto_modules.rs"),
+        PathBuf::from(std::env::var("OUT_DIR")?).join("contract_proto_modules.rs"))?;
+    Ok(())
+}
+''')
+        (project / "src").mkdir()
+        (project / "src/main.rs").write_text(
+            '#![allow(dead_code)]\n'
+            'include!(concat!(env!("OUT_DIR"), "/contract_proto_modules.rs"));\nfn main() {}\n'
+        )
+        # Keep the compiler fixture on the workspace's resolved dependency versions.
+        (project / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
+        subprocess.run(["cargo", "check", "--offline", "--manifest-path", str(project / "Cargo.toml")],
+                       cwd=ROOT, check=True, env={**os.environ,
+                           "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))})
+
     def test_rust_grpc_channels(self):
         self.start_grpc()
         subprocess.run(["cargo", "test", "-p", "robonix-atlas", "--test", "channel_grpc", "--", "--ignored"],
             cwd=ROOT, check=True, env={**os.environ, "ROBONIX_TEST_ATLAS": self.atlas._endpoint,
-                "ROBONIX_TEST_DESCRIPTORS": str(self.work / "types" / "robonix_contracts_descriptor.bin"),
                 "ROBONIX_TEST_CONTROL": str(self.control)})
 
     def test_scene_verifier_consumer(self):

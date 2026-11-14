@@ -45,13 +45,14 @@ def handler(method):
         if name == "GetMode":
             return output(ok=True, mode="mapping")
         if name == "Navigate":
-            runs["grpc-run"] = False
-            return output(accepted=not settings.get("reject", False), run_id="grpc-run")
+            run_id = settings.get("run_id", "grpc-run")
+            runs[run_id] = False
+            return output(accepted=not settings.get("reject", False), run_id=run_id)
         if name == "GetNavigationStatus":
             if settings.get("status_error"):
                 context.abort(grpc.StatusCode.FAILED_PRECONDITION, "status unavailable: downstream chassis busy")
-            return output(known=True, state="SUCCEEDED" if settings.get("finish") else
-                          "CANCELED" if runs.get(request.run_id) else "RUNNING")
+            return output(known=True, state=settings.get("status_state") or ("SUCCEEDED" if settings.get("finish") else
+                          "CANCELED" if runs.get(request.run_id) else "RUNNING"))
         if name == "CancelNavigation":
             if not settings.get("ignore_cancel"):
                 runs[request.run_id] = True
