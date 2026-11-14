@@ -15,6 +15,7 @@ This directory holds the bench only. A result file records each case's calls, an
 | `proxy.py` | Pilot's VLM endpoint. Forwards each request, streamed, to the model under test; records the `response_format` Pilot sent, the status, the latency, whether the reply was empty, the token usage and whether it was Pilot's corrective retry |
 | `bench.py` | Gives each case to Pilot with `rbnx ask`, then checks executed calls from its events, the world's call log and the proxy's record |
 | `judge.py` | Judges Pilot's final answers against each case's assertions |
+| `bundle.py`, `provenance.py`, `runlog.py` | Scrub submission archives, record source/serving facts, and retain run logs |
 | `cases.yaml` | The cases and the judge's instructions |
 
 The camera returns the case's image: COCO val2017, fetched at run time into `.images/` and not redistributed. The world can inject a failure into any contract, make navigation take a while, and send a second instruction into the same session while the first task runs (`rbnx ask --session`).
@@ -40,10 +41,25 @@ A case is run again, up to twice, when the route to the model failed (a timeout,
 
 Results record `meta.scoring_version: 2`, executed `calls`, diagnostic `planned_calls`, and whether every submitted turn emitted a final-text event. That event does not establish physical task completion. The runner refuses to append to older result files; keep those files and use a new output directory. Scores produced by the earlier planned-call checks must be revalidated before comparison or publication.
 
+Each `calls` entry has `contract`, `args`, `start`, `end`, `ok`, `executed`, `output` and `error`. `output` is the decoded Executor leaf result (plain text stays text); `error` is its failure text or `null`. Image and binary payloads become short placeholders. Outputs over 16 KiB of UTF-8 JSON become `{ "truncated": true, "json_bytes": N, "preview": "..." }`. Builtin timings may be `null`. Files without `output` and `error` still load and can be judged or resumed with scoring version 2.
+
+Optional `rounds` records each model request in start order, including route retries: Unix timestamps, assistant content before Pilot parsing (streamed text concatenated), token usage and HTTP/stream errors (`null` when unknown or absent). Only image counts are saved; headers are omitted and echoed credentials or images are redacted. Reply text above 200 KiB per case loses its oldest prefixes, marked `[reply truncated]\n` with `truncated: true`; bundle logs retain full replies and request text, including Pilot's feedback. Scoring and judging ignore `rounds`; files without it remain supported under the same scoring version.
+
+```json
+{"rounds": [{
+  "start": 1793000000.25,
+  "end": 1793000001.5,
+  "reply": "{\"content\":\"Done\",\"rtdl\":[]}",
+  "usage": {"prompt_tokens": 120, "completion_tokens": 20, "cached_tokens": 0},
+  "error": null,
+  "images": 0
+}]}
+```
+
 The scoring regression tests need no service stack or model API:
 
 ```sh
-python3 -m unittest discover -s testing -p 'test_model_bench.py' -v
+python3 -m unittest discover -s testing -p 'test_model_bench*.py' -v
 ```
 
 ## Running
@@ -65,6 +81,49 @@ python3 testing/model_bench/judge.py --env-file judge.env --model openai/gpt-5.4
 ```
 
 `--model id=vendor/name` names a model the way the board does, so runs over different endpoints line up. A result file is named after the model and the endpoint's host, and records the Robonix commit, the cases' hash and which `response_format` modes the endpoint honours; `judge.py` packs the files it judged into `results/model-bench-<time>.zip`, which is what is submitted on Robonix Hub.
+
+## Submission bundle
+
+Use `--bundle submission.zip --board-id <board> --endpoint-kind cloud --judge-model <model>` to record publication metadata and archive the run. `--endpoint-kind` accepts `cloud`, `local`, or `robot`; local/robot runs also require `--serving-facts serving.json`. The board id must be supplied explicitly. Component logs default to the deployment's `rbnx-boot/logs/` and `logs/`; repeat `--component-logs <directory>` for custom locations. Every text log in those directories is captured from its run-start offset, including rotations and new files. Keep the deployment's logs dedicated to this run.
+
+```text
+submission.zip
+  result-001.json                 # one neutral root filename per model
+  logs/<run-id>/bench.stdout.log
+  logs/<run-id>/bench.stderr.log
+  logs/<run-id>/requests.jsonl     # roles/text, image byte counts, sampling, full replies
+  logs/<run-id>/events/<case>/     # case/session mapping, CLI stdout JSONL and stderr
+  logs/<run-id>/components/<n>/   # Pilot, Executor and all other component logs
+```
+
+Each result's `meta.provenance` contains:
+
+| Field | Meaning |
+|---|---|
+| `robonix.commit`, `robonix.dirty` | Full source SHA and whether the checkout has changes |
+| `bench.commit`, `bench.dirty`, `bench.cases_commit`, `bench.cases_dirty` | Last commits affecting the bench/cases and their working-tree status |
+| `board.id`, `board.cases_sha256` | Board identity and the exact cases file hash |
+| `judge_model`, `planner.model`, `planner.endpoint_kind`, `planner.serving` | Declared judge (updated by `judge.py`), planner id, endpoint kind and supplied serving facts; no endpoint URL or host |
+| `system`, `versions` | OS, kernel, Python, rbnx/runtime versions and binary SHA256 identities; unsupported version probes are `null` |
+| `start`, `end`, `command`, `run_id`, `previous_runs` | Unix timestamps, scrubbed argv, log identity and provenance retained across resumed runs |
+
+Serving facts describe the model server, independently of the bench machine:
+
+```json
+{"framework":"vLLM","version":"<installed version>","hardware":"<GPU/CPU model and count>","precision":"bfloat16","max_context":32768,"sampling":{"temperature":0,"top_p":1}}
+```
+
+Provenance records only allowlisted source, serving and runtime facts; environment dumps and arbitrary serving metadata are excluded. Every archive member is scrubbed before writing: all-caps environment-style assignments, credentials, Authorization values, private addresses/hostnames and home paths have their values replaced. Ordinary log lines, model replies and component filenames are retained. JSON/JSONL stays structured; images and other binary artifacts are excluded, ANSI decoration is removed, and gzip log rotations are included as text. URL hosts and userinfo are conservatively redacted without DNS lookups. Members are sorted and have fixed ZIP timestamps and permissions, so identical inputs produce identical archives.
+
+Local JSON and `.runs/<run-id>/logs/` are private staging files; scoring and judging use their original answers. Publish the scrubbed ZIP. `judge.py` uses the same writer and includes retained run logs when present; old single-JSON uploads and judging remain valid. Without publication flags, unavailable provenance facts are `null`. A legacy result without captured logs cannot be resumed into a complete bundle; preserve it and select a new output directory. Keep `.runs/` beside result files when moving or resuming them.
+
+To archive existing files and explicitly selected logs:
+
+```sh
+python3 testing/model_bench/bundle.py results/model.json --logs results/.runs/<run-id>/logs --env-file api.env --out submission.zip
+```
+
+The standalone writer preserves legacy JSON shape and cannot reconstruct missing provenance or logs.
 
 ## Several models at once
 
