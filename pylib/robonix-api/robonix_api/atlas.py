@@ -503,7 +503,7 @@ class _Atlas:
         self, *, consumer_id: str, provider_id: str, contract_id: str,
         transport: Transport | str | int,
     ) -> Channel:
-        """Prepare MCP communication for one execution; retain uncertain work."""
+        """Prepare communication for one execution; retain uncertain work."""
         return self._channel_client.connect(
             consumer_id=consumer_id, provider_id=provider_id,
             contract_id=contract_id, transport=transport,

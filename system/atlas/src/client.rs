@@ -13,7 +13,6 @@ use robonix_scribe::{debug, warn};
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
-#[cfg(feature = "mcp")]
 pub mod channel;
 
 /// Wrapped `pb::atlas_client::AtlasClient` with helpers.
@@ -26,7 +25,6 @@ pub struct AtlasClient {
     /// Generated control-plane client shared with execution handles.
     inner: pb::atlas_client::AtlasClient<Channel>,
     /// Live executions shared across clones, including work whose caller timed out.
-    #[cfg(feature = "mcp")]
     channels: std::sync::Arc<channel::Channels>,
 }
 
@@ -41,7 +39,6 @@ impl AtlasClient {
             .with_context(|| format!("connect to Atlas at '{}'", normalized))?;
         Ok(Self {
             inner: pb::atlas_client::AtlasClient::new(channel),
-            #[cfg(feature = "mcp")]
             channels: Default::default(),
         })
     }

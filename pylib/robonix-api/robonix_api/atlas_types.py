@@ -157,7 +157,7 @@ class Channel:
 
     @property
     def raw_response(self) -> dict | None:
-        """Decoded business response before generated defaults and type conversion."""
+        """Decoded business response; protobuf responses include scalar defaults."""
         if self._execution is None:
             return None
         with self._execution.lock:
@@ -165,6 +165,12 @@ class Channel:
 
     def call(self, request, *, timeout: float | None = None):
         return self._managed().call(request, timeout=timeout)
+
+    def publish(self, message) -> None:
+        self._managed().publish(message)
+
+    def subscribe(self, callback) -> None:
+        self._managed().subscribe(callback)
 
     def status(self, *, timeout: float = 30.0):
         return self._managed().companion("status", timeout=timeout)

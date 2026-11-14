@@ -50,6 +50,11 @@ class ChannelTest(unittest.TestCase):
         cls.work = Path(cls.temp.name)
         cls.control = cls.work / "control.json"
         cls.control.write_text("{}")
+        legacy = cls.work / "contracts"
+        legacy.mkdir()
+        (legacy / "driver.toml").write_text(
+            '[contract]\nid="robonix/skill/channel_test/driver"\nversion="1"\nkind="skill"\n'
+            'idl="lifecycle/srv/Driver.srv"\n[mode]\ntype="rpc"\n')
         subprocess.run([str(ROOT / "target/debug/robonix-codegen"), "--lang", "mcp",
                         "-I", str(ROOT / "capabilities/lib"), "-o", str(cls.work / "types")],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -61,7 +66,7 @@ class ChannelTest(unittest.TestCase):
         cls.log = (cls.work / "servers.log").open("w")
         cls.atlas_process = subprocess.Popen([
             str(ROOT / "target/debug/robonix-atlas"), "--listen", f"127.0.0.1:{atlas_port}",
-            "--capabilities", str(ROOT / "capabilities"),
+            "--capabilities", f"{ROOT / 'capabilities'},{legacy}",
         ], stdout=cls.log, stderr=cls.log)
         cls.mcp_process = subprocess.Popen([
             sys.executable, str(FIXTURE), "--port", str(mcp_port), "--control", str(cls.control),
@@ -108,6 +113,187 @@ class ChannelTest(unittest.TestCase):
 
     def channel_exists(self, channel):
         return channel.channel_id in self.atlas.inspect()["channels"]
+
+    @classmethod
+    def start_grpc(cls):
+        if hasattr(cls, "grpc_process"):
+            return
+        proto = cls.work / "proto"
+        subprocess.run([str(ROOT / "target/debug/robonix-codegen"), "--lang", "proto",
+                        "-I", str(ROOT / "capabilities/lib"), "--contracts", str(ROOT / "capabilities"),
+                        "-o", str(proto)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([sys.executable, "-m", "grpc_tools.protoc", f"-I{proto}",
+                        f"--python_out={cls.work / 'types'}", f"--grpc_python_out={cls.work / 'types'}",
+                        f"--descriptor_set_out={cls.work / 'types' / 'robonix_contracts_descriptor.bin'}",
+                        "--include_imports", *map(str, proto.glob("*.proto"))], check=True)
+        port = free_port()
+        cls.grpc_process = subprocess.Popen([
+            sys.executable, str(FIXTURE.with_name("grpc_server.py")), "--port", str(port),
+            "--control", str(cls.control), "--types", str(cls.work / "types"), "--atlas", cls.atlas._endpoint,
+        ], stdout=cls.log, stderr=cls.log)
+        wait_port(cls.grpc_process, port)
+        cls.addClassCleanup(cls.grpc_process.wait, timeout=10)
+        cls.addClassCleanup(cls.grpc_process.terminate)
+        cls.atlas.register_service("grpc-test", "robonix/service")
+        from robonix_api.atlas_types import GrpcParams
+        import robonix_contracts_pb2 as contracts
+        from robonix_api.lifecycle import contract_id_to_pascal
+        for cid in (ECHO, NAV, NAV + "/status", NAV + "/cancel",
+                    "robonix/service/speech/tts_stream", "robonix/service/speech/wake_word",
+                    "robonix/service/speech/asr_stream", "robonix/primitive/audio/mic", "robonix/primitive/audio/speaker"):
+            service = contracts.DESCRIPTOR.services_by_name[contract_id_to_pascal(cid)]
+            method = service.methods[0]
+            cls.atlas.declare_capability("grpc-test", cid, Transport.GRPC, f"127.0.0.1:{port}",
+                params=GrpcParams(service_name=service.full_name, method=f"/{service.full_name}/{method.name}"))
+
+    def grpc_channel(self, cid=ECHO):
+        self.start_grpc()
+        return self.connect(cid, provider="grpc-test", transport=Transport.GRPC)
+
+    def test_grpc_calls_and_execution_lifetime(self):
+        from google.protobuf.message import Message
+        with self.grpc_channel() as channel:
+            from map_pb2 import GetMode_Request
+            with self.assertRaises(TypeError):
+                channel.call(42)
+            self.assertIsInstance(channel.call(GetMode_Request()), Message)
+            self.assertEqual(channel.raw_response["mode"], "mapping")
+            with self.assertRaisesRegex(RuntimeError, "only one"):
+                channel.call({})
+        with self.grpc_channel(NAV) as channel:
+            self.assertTrue(channel.call({}).accepted)
+            self.assertEqual(channel.run_id, "grpc-run")
+            self.assertEqual(channel.status().state, "RUNNING")
+            self.assertTrue(channel.cancel().accepted)
+            self.assertEqual(channel.status().state, "CANCELED")
+        channel = self.grpc_channel(NAV)
+        channel.call({})
+        self.configure(status_error=True)
+        with self.assertRaisesRegex(RuntimeError, "downstream chassis busy"):
+            channel.status(timeout=0.2)
+        self.assertTrue(self.channel_exists(channel))
+        self.configure(finish=True)
+        channel.status()
+        channel.close()
+        channel = self.grpc_channel()
+        self.configure(delay=0.2)
+        with self.assertRaisesRegex(RuntimeError, "retained"):
+            channel.call({}, timeout=0.01)
+        self.assertIs(self.atlas.get_channel(channel.channel_id), channel)
+        channel.close(timeout=2)
+        self.assertFalse(self.channel_exists(channel))
+        self.configure(grpc_error=True)
+        channel = self.grpc_channel()
+        with self.assertRaisesRegex(RuntimeError, "downstream chassis busy"):
+            channel.call({})
+        with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
+            channel.close(timeout=0)
+        self.assertTrue(self.channel_exists(channel))
+
+    def test_grpc_setup_binding_failure_releases_allocation(self):
+        from robonix_api.atlas_types import GrpcParams
+        with self.grpc_channel() as channel:
+            endpoint = channel.endpoint.replace("127.0.0.1", "localhost")
+        self.atlas.register_service("grpc-bad-binding", "robonix/service")
+        self.atlas.declare_capability("grpc-bad-binding", ECHO, Transport.GRPC, endpoint,
+            params=GrpcParams(service_name="robonix.contracts.Missing", method="Missing"))
+        before = set(self.atlas.inspect()["channels"])
+        with self.assertRaises(KeyError):
+            self.connect(provider="grpc-bad-binding", transport=Transport.GRPC)
+        self.assertEqual(set(self.atlas.inspect()["channels"]), before)
+
+    def test_grpc_stream_shapes_and_close(self):
+        with self.grpc_channel("robonix/service/speech/tts_stream") as channel:
+            rows = list(channel.call({"text": "hello"}))
+            self.assertEqual([x.chunk.sequence for x in rows], [0, 1, 2])
+            self.assertEqual(rows[0].chunk.data, b"\x01\x02")
+        with self.grpc_channel("robonix/service/speech/wake_word") as channel:
+            from audio_pb2 import AudioChunk
+            self.assertEqual(channel.call(iter([AudioChunk(sequence=4), {"sequence": 7}])).keyword, "[4, 7]")
+        with self.grpc_channel("robonix/service/speech/asr_stream") as channel:
+            rows = list(channel.call(iter([{"chunk": {"sequence": 4}}, {"chunk": {"sequence": 7}}])))
+            self.assertEqual([x.text for x in rows], ["4", "7"])
+        with self.grpc_channel("robonix/primitive/audio/mic") as channel:
+            self.assertEqual(len(list(channel.call({}))), 3)
+        with self.grpc_channel("robonix/primitive/audio/speaker") as channel:
+            channel.call(iter([{"sequence": 1}]))
+        self.configure(stream_count=8, stream_delay=0.05)
+        channel = self.grpc_channel("robonix/service/speech/tts_stream")
+        rows = channel.call({})
+        next(rows)
+        with self.assertRaisesRegex(RuntimeError, "unconfirmed"):
+            channel.close(timeout=0.01)
+        channel.close(timeout=2)
+        self.assertFalse(self.channel_exists(channel))
+
+    def test_grpc_close_retains_blocked_request_iterator(self):
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        def source():
+            yield {"sequence": 1}
+            entered.set()
+            release.wait(3)
+            yield {"sequence": 2}
+        channel = self.grpc_channel("robonix/service/speech/wake_word")
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(channel.call, source())
+            try:
+                self.assertTrue(entered.wait(2))
+                with self.assertRaisesRegex(RuntimeError, "iterator is still blocked"):
+                    channel.close(timeout=0.01)
+                self.assertIs(self.atlas.get_channel(channel.channel_id), channel)
+            finally:
+                release.set()
+            future.result(timeout=2)
+            channel.close()
+
+    def test_grpc_early_response_retains_blocked_source(self):
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        def source():
+            yield {"sequence": 1}
+            entered.set()
+            release.wait(3)
+            yield {"sequence": 2}
+        self.configure(early_return=True)
+        channel = self.grpc_channel("robonix/service/speech/wake_word")
+        try:
+            self.assertEqual(channel.call(source()).keyword, "early")
+            self.assertTrue(entered.is_set())
+            with self.assertRaisesRegex(RuntimeError, "iterator is still blocked"):
+                channel.close(timeout=0.01)
+            self.assertIs(self.atlas.get_channel(channel.channel_id), channel)
+        finally:
+            release.set()
+        for _ in range(100):
+            if not channel._execution.protocol.source_active.is_set():
+                break
+            time.sleep(0.01)
+        channel.close()
+        self.assertFalse(self.channel_exists(channel))
+
+    def test_executor_skill_activation(self):
+        self.start_grpc()
+        port = free_port()
+        process = subprocess.Popen([
+            sys.executable, str(FIXTURE.with_name("grpc_server.py")), "--port", str(port),
+            "--control", str(self.control), "--types", str(self.work / "types"), "--atlas", self.atlas._endpoint,
+        ], stdout=self.log, stderr=self.log)
+        self.addCleanup(process.wait, timeout=10)
+        self.addCleanup(process.terminate)
+        wait_port(process, port)
+        endpoint = f"127.0.0.1:{port}"
+        subprocess.run(["cargo", "test", "-p", "robonix-executor", "dispatch::tests::skill_activation",
+                        "--", "--ignored"], cwd=ROOT, check=True, env={**os.environ,
+            "ROBONIX_TEST_ATLAS": self.atlas._endpoint, "ROBONIX_TEST_GRPC": endpoint,
+            "ROBONIX_TEST_CONTROL": str(self.control)})
+
+    def test_rust_grpc_channels(self):
+        self.start_grpc()
+        subprocess.run(["cargo", "test", "-p", "robonix-atlas", "--test", "channel_grpc", "--", "--ignored"],
+            cwd=ROOT, check=True, env={**os.environ, "ROBONIX_TEST_ATLAS": self.atlas._endpoint,
+                "ROBONIX_TEST_DESCRIPTORS": str(self.work / "types" / "robonix_contracts_descriptor.bin"),
+                "ROBONIX_TEST_CONTROL": str(self.control)})
 
     def test_scene_verifier_consumer(self):
         sys.path.insert(0, str(ROOT / "services/verifiers/scene_verifier"))
@@ -260,8 +446,8 @@ class ChannelTest(unittest.TestCase):
 
     def test_setup_failure_and_rejected_transport_do_not_allocate(self):
         before = len(self.atlas.inspect()["channels"])
-        with self.assertRaisesRegex(ValueError, "MCP only"):
-            self.connect(transport=Transport.GRPC)
+        with self.assertRaisesRegex(ValueError, "Specify"):
+            self.connect(transport=Transport.UNSPECIFIED)
         self.atlas.register_service("offline", "robonix/service")
         self.atlas.declare_capability("offline", ECHO, Transport.MCP,
                                       f"http://127.0.0.1:{free_port()}/mcp")

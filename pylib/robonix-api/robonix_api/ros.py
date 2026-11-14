@@ -106,6 +106,15 @@ class RosBackend:
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
+    def create_client(self, srv_type: type, service: str, qos=""):
+        from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+        from rclpy.qos import qos_profile_services_default
+        return self.node.create_client(
+            srv_type, service,
+            qos_profile=self.qos(qos) if qos else qos_profile_services_default,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
     def wait_for_topic(
         self, topic: str, msg_type: type, timeout_s: float,
     ) -> bool:

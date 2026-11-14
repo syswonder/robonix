@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-//! MCP communication and execution ownership in the consumer process.
+//! Consumer communication and execution ownership in the consumer process.
+
+mod grpc;
 
 use super::AtlasClient;
 use crate::pb;
 use anyhow::{Context, Result, bail, ensure};
+use futures_util::{Stream, StreamExt};
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use rmcp::ServiceExt;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
+
+type RequestStream = std::pin::Pin<Box<dyn Stream<Item = DynamicMessage> + Send>>;
+type RequestError = Arc<Mutex<Option<anyhow::Error>>>;
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
@@ -17,6 +26,8 @@ type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 pub(super) struct Channels {
     /// Executions remain available after the original caller has returned.
     live: Mutex<HashMap<String, Channel>>,
+    /// Deployment descriptors shared by every clone of the client.
+    descriptors: Mutex<DescriptorPool>,
     /// Includes connections still being prepared, preventing concurrent overflow.
     capacity: Arc<Semaphore>,
     /// Companion calls remain possible when all business execution slots are occupied.
@@ -27,6 +38,7 @@ impl Default for Channels {
     fn default() -> Self {
         Self {
             live: Mutex::new(HashMap::new()),
+            descriptors: Mutex::new(DescriptorPool::new()),
             capacity: Arc::new(Semaphore::new(1022)),
             companion_capacity: Arc::new(Semaphore::new(2)),
         }
@@ -64,6 +76,10 @@ struct Execution {
     companions: Option<(String, String)>,
     /// Initialized session; locked while invoking or shutting down communication.
     session: AsyncMutex<Option<McpClient>>,
+    /// Generated gRPC binding, prepared before exposing the channel.
+    grpc: AsyncMutex<Option<grpc::Binding>>,
+    /// Close requests stop stream input and let output drain to confirmed completion.
+    stop_stream: watch::Sender<bool>,
     /// Concurrent cleanup callers observe the same completed release before retrying.
     close_lock: AsyncMutex<()>,
     /// Short-lived lock for transitions that must precede any network await.
@@ -87,7 +103,16 @@ struct Progress {
 }
 
 impl AtlasClient {
-    /// Prepare one MCP execution. Other transports are rejected before allocation.
+    /// Register deployment-generated protobuf types without service-side reflection.
+    pub fn add_descriptor_set(&self, bytes: &[u8]) -> Result<()> {
+        let mut pool = self.channels.descriptors.lock().unwrap();
+        let mut updated = pool.clone();
+        updated.decode_file_descriptor_set(bytes)?;
+        *pool = updated;
+        Ok(())
+    }
+
+    /// Prepare one capability execution and its transport resources.
     pub fn connect_channel<'a>(
         &'a self,
         consumer_id: &'a str,
@@ -97,8 +122,8 @@ impl AtlasClient {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Channel>> + Send + 'a>> {
         Box::pin(async move {
             ensure!(
-                transport == pb::Transport::Mcp,
-                "connect_channel currently supports MCP only"
+                matches!(transport, pb::Transport::Mcp | pb::Transport::Grpc),
+                "Rust execution channels support MCP and gRPC; use the Python client for ROS 2"
             );
             let atlas = self.clone();
             let (consumer, provider, contract) = (
@@ -110,7 +135,9 @@ impl AtlasClient {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let (acknowledge, received) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
-                let result = atlas.prepare_channel(consumer, provider, contract).await;
+                let result = atlas
+                    .prepare_channel(consumer, provider, contract, transport)
+                    .await;
                 let cleanup = result.as_ref().ok().cloned();
                 if sender.send(result).is_ok() && received.await.is_ok() {
                     return;
@@ -139,6 +166,7 @@ impl AtlasClient {
         consumer: String,
         provider: String,
         contract: String,
+        transport: pb::Transport,
     ) -> Result<Channel> {
         let companion = matches!(contract.rsplit('/').next(), Some("status" | "cancel"));
         let permit = self.channels.capacity.clone()
@@ -153,15 +181,17 @@ impl AtlasClient {
                 .context("Atlas contract query timed out")??
                 .with_context(|| format!("unknown contract: {contract}"))?;
         ensure!(
-            descriptor.mode == "rpc",
+            transport == pb::Transport::Grpc || descriptor.mode == "rpc",
             "MCP channel requires rpc mode: {contract}"
         );
-        let companions = if matches!(contract.rsplit('/').next(), Some("status" | "cancel")) {
+        let companions = if descriptor.mode != "rpc"
+            || matches!(contract.rsplit('/').next(), Some("status" | "cancel"))
+        {
             None
         } else {
             let providers = tokio::time::timeout(
                 Duration::from_secs(30),
-                self.query_capabilities(&provider, "", pb::Transport::Mcp),
+                self.query_capabilities(&provider, "", pb::Transport::Unspecified),
             )
             .await
             .context("Atlas capability query timed out")??;
@@ -175,12 +205,18 @@ impl AtlasClient {
                 (false, false) => None,
                 (true, true) => {
                     for cid in [&status, &cancel] {
+                        ensure!(
+                            available
+                                .iter()
+                                .any(|c| c.contract_id == *cid && c.transport == transport as i32),
+                            "async companion {cid} must support {transport:?}"
+                        );
                         let desc =
                             tokio::time::timeout(Duration::from_secs(30), self.query_contract(cid))
                                 .await
                                 .context("Atlas companion contract query timed out")??
                                 .with_context(|| format!("unknown contract: {cid}"))?;
-                        ensure!(desc.mode == "rpc", "MCP channel requires rpc mode: {cid}");
+                        ensure!(desc.mode == "rpc", "companion requires rpc mode: {cid}");
                     }
                     Some((status, cancel))
                 }
@@ -189,7 +225,7 @@ impl AtlasClient {
         };
         let (channel_id, endpoint, params) = tokio::time::timeout(
             Duration::from_secs(30),
-            self.allocate_channel(&consumer, &provider, &contract, pb::Transport::Mcp),
+            self.allocate_channel(&consumer, &provider, &contract, transport),
         )
         .await
         .context("ConnectCapability allocation outcome unconfirmed after timeout")?
@@ -197,7 +233,7 @@ impl AtlasClient {
         let ch = Channel {
             provider_id: provider,
             contract_id: contract,
-            transport: pb::Transport::Mcp,
+            transport,
             endpoint,
             channel_id,
             params,
@@ -207,6 +243,8 @@ impl AtlasClient {
                 consumer_id: consumer,
                 companions,
                 session: AsyncMutex::new(None),
+                grpc: AsyncMutex::new(None),
+                stop_stream: watch::channel(false).0,
                 close_lock: AsyncMutex::new(()),
                 progress: Mutex::new(Progress {
                     started: false,
@@ -218,23 +256,31 @@ impl AtlasClient {
                 }),
             }),
         };
-        match tokio::time::timeout(Duration::from_secs(30), connect_mcp(&ch.endpoint)).await {
-            Ok(Ok(session)) => *ch.execution.session.lock().await = Some(session),
-            result => {
-                let error = match result {
-                    Ok(Err(error)) => error,
-                    _ => anyhow::anyhow!("MCP initialization timed out"),
-                };
-                if let Err(cleanup) = ch.close().await {
-                    self.channels
-                        .live
-                        .lock()
-                        .unwrap()
-                        .insert(ch.channel_id.clone(), ch.clone());
-                    bail!("MCP setup failed: {error:#}; cleanup failed: {cleanup:#}");
-                }
-                return Err(error);
+        let setup = async {
+            if transport == pb::Transport::Mcp {
+                *ch.execution.session.lock().await = Some(connect_mcp(&ch.endpoint).await?);
+            } else {
+                let pool = self.channels.descriptors.lock().unwrap().clone();
+                let binding =
+                    grpc::Binding::connect(&ch.endpoint, &ch.params, &pool, &descriptor).await?;
+                *ch.execution.grpc.lock().await = Some(binding);
             }
+            Ok::<_, anyhow::Error>(())
+        };
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(30), setup)
+            .await
+            .context("channel initialization timed out")
+            .and_then(|r| r)
+        {
+            if let Err(cleanup) = ch.close().await {
+                self.channels
+                    .live
+                    .lock()
+                    .unwrap()
+                    .insert(ch.channel_id.clone(), ch.clone());
+                bail!("channel setup failed: {error:#}; cleanup failed: {cleanup:#}");
+            }
+            return Err(error);
         }
         self.channels
             .live
@@ -265,41 +311,240 @@ impl Channel {
 
     /// Submit the single business request; dropping the waiter does not abandon tracking.
     pub async fn call(&self, request: Value) -> Result<Value> {
-        ensure!(request.is_object(), "MCP request must be a JSON object");
-        {
-            let mut p = self.execution.progress.lock().unwrap();
+        ensure!(request.is_object(), "request must be a JSON object");
+        let prepared = if self.transport == pb::Transport::Grpc {
+            let binding = self.grpc_binding().await?;
             ensure!(
-                !p.started && !p.closing && !p.closed,
-                "a channel can execute only one capability call"
+                !binding.method.is_client_streaming() && !binding.method.is_server_streaming(),
+                "use the streaming method for this contract"
             );
-            p.started = true;
-        }
+            Some(binding.request(&request)?)
+        } else {
+            None
+        };
+        self.start()?;
         let ch = self.clone();
         tokio::spawn(async move {
-            let result = ch.invoke(request).await;
-            match result {
-                Ok(value) => {
-                    let mut p = ch.execution.progress.lock().unwrap();
-                    if ch.is_async() && value.get("accepted") == Some(&Value::Bool(false)) {
-                        p.terminal = true;
-                        return Ok(value);
-                    }
-                    let run_id = match value.get("run_id") {
-                        None | Some(Value::Null) => String::new(),
-                        Some(Value::String(s)) => s.clone(),
-                        _ => return Err(ch.retained("MCP run_id must be a string")),
-                    };
-                    p.run_id = Some(run_id);
-                    p.terminal = !ch.is_async();
-                    Ok(value)
-                }
-                Err(error) => Err(ch.retained(&format!("MCP request failed: {error:#}"))),
-            }
+            let result = ch.invoke(request, prepared).await;
+            ch.complete(result)
         })
         .await?
     }
 
-    async fn invoke(&self, request: Value) -> Result<Value> {
+    fn start(&self) -> Result<()> {
+        let mut p = self.execution.progress.lock().unwrap();
+        ensure!(
+            !p.started && !p.closing && !p.closed,
+            "a channel can execute only one capability call"
+        );
+        p.started = true;
+        Ok(())
+    }
+
+    fn complete(&self, result: Result<Value>) -> Result<Value> {
+        let value = result.map_err(|e| self.retained(&format!("request failed: {e:#}")))?;
+        let mut p = self.execution.progress.lock().unwrap();
+        if self.is_async() && value.get("accepted") == Some(&Value::Bool(false)) {
+            p.terminal = true;
+            return Ok(value);
+        }
+        let run_id = match value.get("run_id") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            _ => return Err(self.retained("run_id must be a string")),
+        };
+        p.run_id = Some(run_id);
+        p.terminal = !self.is_async();
+        Ok(value)
+    }
+
+    async fn grpc_binding(&self) -> Result<grpc::Binding> {
+        self.execution
+            .grpc
+            .lock()
+            .await
+            .clone()
+            .context("gRPC channel unavailable")
+    }
+
+    /// Start one request and yield its server response messages with bounded buffering.
+    pub async fn server_stream(&self, request: Value) -> Result<ReceiverStream<Result<Value>>> {
+        let binding = self.grpc_binding().await?;
+        ensure!(
+            !binding.method.is_client_streaming() && binding.method.is_server_streaming(),
+            "contract is not a server stream"
+        );
+        let request = binding.request(&request)?;
+        self.start()?;
+        let (sender, receiver) = mpsc::channel(16);
+        let ch = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let mut client = binding.client().await?;
+                let response = client
+                    .server_streaming(
+                        tonic::Request::new(request),
+                        binding.path.clone(),
+                        binding.codec(),
+                    )
+                    .await?;
+                ch.receive_stream(response.into_inner(), &sender).await
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = sender
+                    .send(Err(ch.retained(&format!("gRPC stream failed: {error:#}"))))
+                    .await;
+            }
+        });
+        Ok(ReceiverStream::new(receiver))
+    }
+
+    /// Stream request messages and receive the single final response.
+    pub async fn client_stream<S>(&self, requests: S) -> Result<Value>
+    where
+        S: Stream<Item = Value> + Send + 'static,
+    {
+        let binding = self.grpc_binding().await?;
+        ensure!(
+            binding.method.is_client_streaming() && !binding.method.is_server_streaming(),
+            "contract is not a client stream"
+        );
+        self.start()?;
+        let ch = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let (requests, errors) = ch.grpc_requests(requests, binding.clone());
+                let mut client = binding.client().await?;
+                let response = client
+                    .client_streaming(
+                        tonic::Request::new(requests),
+                        binding.path.clone(),
+                        binding.codec(),
+                    )
+                    .await?;
+                ch.execution.progress.lock().unwrap().terminal = true;
+                if let Some(error) = errors.lock().unwrap().take() {
+                    return Err(error);
+                }
+                grpc::response(&response.into_inner())
+            }
+            .await;
+            ch.complete(result)
+        })
+        .await?
+    }
+
+    /// Exchange request and response streams without collecting either in memory.
+    pub async fn bidirectional_stream<S>(
+        &self,
+        requests: S,
+    ) -> Result<ReceiverStream<Result<Value>>>
+    where
+        S: Stream<Item = Value> + Send + 'static,
+    {
+        let binding = self.grpc_binding().await?;
+        ensure!(
+            binding.method.is_client_streaming() && binding.method.is_server_streaming(),
+            "contract is not a bidirectional stream"
+        );
+        self.start()?;
+        let (sender, receiver) = mpsc::channel(16);
+        let ch = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let (requests, errors) = ch.grpc_requests(requests, binding.clone());
+                let mut client = binding.client().await?;
+                let response = client
+                    .streaming(
+                        tonic::Request::new(requests),
+                        binding.path.clone(),
+                        binding.codec(),
+                    )
+                    .await?;
+                ch.receive_stream(response.into_inner(), &sender).await?;
+                if let Some(error) = errors.lock().unwrap().take() {
+                    return Err(error);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = sender
+                    .send(Err(ch.retained(&format!("gRPC stream failed: {error:#}"))))
+                    .await;
+            }
+        });
+        Ok(ReceiverStream::new(receiver))
+    }
+
+    fn grpc_requests<S>(&self, requests: S, binding: grpc::Binding) -> (RequestStream, RequestError)
+    where
+        S: Stream<Item = Value> + Send + 'static,
+    {
+        let errors = Arc::new(Mutex::new(None));
+        let stop = self.execution.stop_stream.subscribe();
+        let errors_for_stream = errors.clone();
+        let input = futures_util::stream::unfold(Box::pin(requests), move |mut input| {
+            let binding = binding.clone();
+            let errors = errors_for_stream.clone();
+            let mut stop = stop.clone();
+            async move {
+                if *stop.borrow() {
+                    return None;
+                }
+                let value = tokio::select! {
+                    _ = stop.changed() => return None,
+                    value = input.next() => value?,
+                };
+                match binding.request(&value) {
+                    Ok(message) => Some((message, input)),
+                    Err(error) => {
+                        *errors.lock().unwrap() = Some(error);
+                        None
+                    }
+                }
+            }
+        });
+        (Box::pin(input), errors)
+    }
+
+    async fn receive_stream(
+        &self,
+        mut stream: tonic::Streaming<DynamicMessage>,
+        sender: &mpsc::Sender<Result<Value>>,
+    ) -> Result<()> {
+        let mut stop = self.execution.stop_stream.subscribe();
+        while let Some(message) = stream.message().await? {
+            let value = grpc::response(&message)?;
+            if !*stop.borrow() && !sender.is_closed() {
+                tokio::select! {
+                    _ = stop.changed() => {},
+                    _ = sender.send(Ok(value)) => {},
+                }
+            }
+        }
+        self.execution.progress.lock().unwrap().terminal = true;
+        Ok(())
+    }
+
+    async fn invoke(&self, request: Value, prepared: Option<DynamicMessage>) -> Result<Value> {
+        if self.transport == pb::Transport::Grpc {
+            let binding = self.grpc_binding().await?;
+            let mut client = binding.client().await?;
+            let response = client
+                .unary(
+                    tonic::Request::new(prepared.expect("gRPC request prepared before start")),
+                    binding.path.clone(),
+                    binding.codec(),
+                )
+                .await?;
+            if !self.is_async() {
+                self.execution.progress.lock().unwrap().terminal = true;
+            }
+            return grpc::response(&response.into_inner());
+        }
+
         let session = self.execution.session.lock().await;
         let client = session.as_ref().context("MCP session unavailable")?;
         let name = self
@@ -376,7 +621,7 @@ impl Channel {
                 &self.execution.consumer_id,
                 &self.provider_id,
                 cid,
-                pb::Transport::Mcp,
+                self.transport,
             )
             .await?;
         let args = if run_id.is_empty() {
@@ -443,19 +688,30 @@ impl Channel {
             p.started && !p.terminal
         };
         if active {
+            self.execution.stop_stream.send_replace(true);
             tokio::time::timeout(timeout, async {
-                self.cancel().await?;
+                if self.is_async() {
+                    self.cancel().await?;
+                }
                 loop {
-                    self.status().await?;
+                    if self.is_async() {
+                        self.status().await?;
+                    }
                     if self.is_terminal() {
                         return Ok::<_, anyhow::Error>(());
                     }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(if self.is_async() {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::from_millis(50)
+                    })
+                    .await;
                 }
             })
             .await
             .context("timed out waiting for execution termination")??;
         }
+        *self.execution.grpc.lock().await = None;
         {
             let mut session =
                 tokio::time::timeout(Duration::from_secs(5), self.execution.session.lock())
