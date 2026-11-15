@@ -11,6 +11,7 @@ that packages call from their own `scripts/build.sh`.
 | Output | When | Where |
 | --- | --- | --- |
 | `*.proto` + tonic Rust stubs | Inside each Rust crate's `build.rs` | `OUT_DIR` |
+| `contract_proto_modules.rs` (PB modules and Channel bindings) | Contract proto generation | Proto output directory |
 | `proto_gen/*_pb2.py` + `*_pb2_grpc.py` | Python `rbnx codegen` | `<pkg>/rbnx-build/codegen/proto_gen/` |
 | `robonix_mcp_types/<pkg>_mcp.py` | `rbnx codegen --mcp` | `<pkg>/rbnx-build/codegen/robonix_mcp_types/` |
 

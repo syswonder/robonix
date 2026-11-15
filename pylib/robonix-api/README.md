@@ -93,7 +93,7 @@ shared only; direct exact-legacy launches use legacy when that service exists.
 
 ## What's in the box
 
-- **`ATLAS`** — module-level singleton client (`ATLAS.register_primitive` / `register_service` / `register_skill`, `ATLAS.declare_capability`, `ATLAS.query_primitives` / `query_services` / `query_skills`, `ATLAS.find_capability`, `ATLAS.connect_capability`, ...)
+- **`ATLAS`** — module-level singleton client (`ATLAS.register_primitive` / `register_service` / `register_skill`, `ATLAS.declare_capability`, `ATLAS.query_primitives` / `query_services` / `query_skills`, `ATLAS.find_capability`, `ATLAS.connect_channel`, ...)
 - **`Primitive` / `Service` / `Skill`** — provider base classes with `on_init` / `on_activate` / `on_deactivate` / `on_shutdown` decorators
 - **`@provider.provides_grpc(contract)` / `@provider.provides_mcp(contract)`** — Layer-2 sugar for typed handlers
 - **`Ok` / `Err` / `Deferred`** — lifecycle return values
@@ -112,7 +112,13 @@ It does not proxy traffic, hold keys or track health. See
 [`robonix_api/llm/README.md`](robonix_api/llm/README.md) for the catalog format,
 the Python API and the deployment variables.
 
-## MCP consumer channels
+## Consumer channels
+
+`ATLAS.connect_capability(...)` and the `Primitive` / `Service` / `Skill`
+`connect_capability(...)` methods are deprecated and will be removed in a future
+release. Migrate to `connect_channel(...)` and use the Channel methods below
+instead of creating protocol clients from `channel.endpoint`. The old methods
+currently retain their endpoint-only behavior for all transports.
 
 Run `rbnx codegen -p <package> --mcp` before using `connect_channel`. It uses
 the generated service type mappings to encode requests and decode responses:
@@ -129,9 +135,23 @@ with ATLAS.connect_channel(
     print(response.mode)
 ```
 
-Providers also expose `provider.connect_channel(capability, contract_id, transport)`.
-Each channel starts one execution. `call` accepts a generated request or a
-dictionary and returns the generated response. These methods are synchronous;
+`Primitive`, `Service`, and `Skill` share the provider methods below.
+
+| API | Purpose |
+|---|---|
+| `ATLAS.connect_channel(*, consumer_id, provider_id, contract_id, transport)` | Prepare a Channel and its communication resources. |
+| `provider.connect_channel(provider, contract_id, transport)` | Accept a discovered capability or provider record; use this instance's ID as the consumer. |
+| `channel.call(request, *, timeout=None)` | Submit one RPC execution; gRPC streaming calls take or return iterators. |
+| `channel.publish(message)` | Publish repeatedly to a ROS 2 `topic_in`. |
+| `channel.subscribe(callback)` | Subscribe once to a ROS 2 `topic_out`. |
+| `channel.status(*, timeout=30.0)` / `channel.cancel(*, timeout=30.0)` | Query or cancel an async execution using its `run_id`. |
+| `channel.close(*, timeout=5.0)` / `with channel:` | Close communication and release the allocation after confirming termination; failed close raises and retains the handle. |
+| `ATLAS.get_channel(channel_id)` | Recover a retained Channel, or return `None` if absent. |
+| `channel.run_id` / `channel.raw_response` | Inspect the execution ID or decoded business response. |
+
+Each RPC channel allows one `call`; create a new channel for another execution.
+`call` accepts a generated request or a dictionary and returns the generated
+response, subject to the streaming forms below. These methods are synchronous;
 asyncio callers should use a worker thread. MCP sessions share a client-owned
 event loop and connect directly to providers without shell proxy settings.
 
@@ -145,13 +165,10 @@ status or close attempt. A lost start response cannot be addressed without a
 confirmed run ID. There is no automatic business-request retry or persistence
 across consumer process restarts.
 
-The client holds at most 256 allocations, reserving two for companion calls.
+The client holds at most 1024 allocations, reserving two for companion calls.
 Companions can also use unused business slots. Protocol failures without a
 response retain their own allocations; capacity exhaustion is reported.
-Successful close returns the slot. `connect_capability` retains
-its endpoint-only behavior for all transports; `connect_channel` supports MCP
-`rpc` contracts over HTTP in this release.
-
+Successful close returns the slot.
 ## Provider network binding
 
 Provider lifecycle gRPC, user gRPC, and MCP servers keep the compatible

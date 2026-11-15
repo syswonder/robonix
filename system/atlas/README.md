@@ -57,30 +57,71 @@ reads with old response types.
 
 ## Client execution channels
 
-Enable the Rust library's `mcp` feature to use
-`AtlasClient::connect_channel(consumer_id, provider_id, contract_id, Transport::Mcp)`.
-It returns an initialized `client::channel::Channel` with `call(JSON)`,
-`status()`, `cancel()`, and `close()` async methods. Calls return decoded JSON
-objects. Use `connect_channel` for MCP executions. The original
-`connect_capability` tuple interface remains available for compatibility.
-Business traffic flows directly between client and provider; Atlas RPCs are unchanged.
+`AtlasClient::connect_channel::<C>(consumer_id, provider_id, contract_id, transport)`
+prepares one execution using a compile-time contract binding. `Mcp` uses JSON
+requests and responses. gRPC bindings use generated protobuf messages; no
+reflection, descriptor files, or Cargo feature is needed. Business traffic goes
+directly to the provider. `AtlasClient::connect_capability(...)` is deprecated
+and will be removed in a future release. It currently retains its tuple return
+value. Migrate to `connect_channel::<C>(...)` and replace manual MCP or gRPC
+client setup with `channel.call(...)`.
 
-A channel starts one execution. For async capabilities, the client resolves
-both `/status` and `/cancel`, retains the main allocation, and allocates each
-companion independently. `close()` requests cancellation and waits up to five
-seconds for a valid terminal status, polling every two seconds.
-`close_with_timeout(Duration)` changes that wait. Neither cancellation acceptance
-nor losing a caller confirms termination. Errors include the retained allocation
-ID; `get_channel(id)` retrieves its handle from any clone of the same client.
-`is_terminal()` reports confirmed completion and `is_closed()` reports release.
-Uncertain work is retained in memory without automatic business-request retries.
+| API | Purpose |
+|---|---|
+| `atlas.connect_channel::<C>(consumer_id, provider_id, contract_id, transport).await` | Prepare a `Channel<C>` using a contract binding. |
+| `channel.call(request).await` | Submit one execution with the binding's input and output types. |
+| `channel.status().await` / `channel.cancel().await` | Query or cancel async work; resolve companions and pass `run_id` automatically. |
+| `channel.close().await` | Confirm termination and release resources, waiting up to five seconds for active work to end. |
+| `channel.close_with_timeout(duration).await` | Set the termination wait using `std::time::Duration`. |
+| `atlas.get_channel::<C>(channel_id)` | Return `Result<Option<Channel<C>>>` for a retained allocation; the binding must match. |
+| `channel.run_id()` / `channel.is_async()` | Inspect the execution ID or whether status/cancel companions are present. |
+| `channel.is_terminal()` / `channel.is_closed()` | Check confirmed execution completion or allocation release. |
 
-Each client holds at most 256 allocations, reserving two for companion calls.
-Companions can also use unused business slots. A protocol failure without a
-response retains its own allocation; capacity exhaustion is reported. Setup failure
-releases allocated resources; a cleanup failure remains recoverable by ID.
-HTTP MCP `rpc` contracts are supported. gRPC/ROS 2 execution channels
-and provider concurrency arbitration are separate changes.
+Include codegen's `contract_proto_modules.rs` for protobuf messages and their
+Channel bindings in the existing IDL modules. For example:
+
+```rust,ignore
+let channel = atlas.connect_channel::<pb::map::ServiceMapGetMode>(
+    consumer_id, provider_id, "robonix/service/map/get_mode", Transport::Grpc,
+).await?;
+let response = channel.call(pb::map::GetModeRequest {}).await?;
+channel.close().await?;
+```
+
+All four gRPC forms use `call`: unary takes and returns a message; server
+streaming returns a stream; client streaming takes a boxed request stream;
+bidirectional streaming takes and returns streams. Output streams yield
+`Result<Message>` with a bounded 16-message buffer. gRPC `topic_out` and
+`topic_in` use server and client streaming respectively. Empty protobuf
+messages use `()`. ROS 2 execution channels remain available through Python.
+
+The shared `channel::validate_contract::<C>` function validates contract metadata
+before communication; bindings supply types, metadata, and message adapters.
+Bindings with a fixed contract ID require an exact match by default. The generated
+`LifecycleDriver` binding also accepts legacy `*/driver` contracts with the same
+Driver IDL, using their Atlas service routes.
+`Mcp` leaves its ID empty and uses the contract selected at connection time.
+Async `status()` and `cancel()` return generated protobuf responses for gRPC and
+JSON for MCP.
+
+A channel starts one execution. For async `rpc` capabilities, both `/status` and
+`/cancel` companions must support the selected transport. Each companion gets its
+own allocation. `close()` waits up to five seconds for confirmed completion;
+`close_with_timeout(Duration)` changes the wait. Async close cancels and polls
+status every two seconds. Stream close stops sending and drains responses until
+the server ends the stream. A local timeout, lost connection, or cancellation
+acceptance does not confirm termination. If the server never ends a stream,
+close fails and retains its allocation rather than canceling it locally and
+claiming completion.
+
+Errors report retained channel IDs. `get_channel::<C>(id)?` recovers the typed handle from
+any clone of the same client. `is_terminal()` reports confirmed completion and
+`is_closed()` reports release. Dropping a waiter does not abandon the execution,
+and business requests are never automatically retried.
+
+Each client holds at most 1024 allocations, reserving two for companions.
+Setup failures clean up allocations; failed cleanup remains recoverable by ID.
+Execution records are local to the consumer process and do not survive restart.
 
 ## Namespace diagnostics
 
