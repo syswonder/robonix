@@ -1,9 +1,12 @@
 [workspace]
-# The 12 Robonix system components live one-per-directory under `system/`.
-# Seven currently have a Rust implementation:
+# Robonix system components live one-per-directory under `system/`.
+# These currently have a Rust implementation:
 #   - atlas    (capability discovery)
+#   - chronos  (device clock library)
 #   - executor (runs RTDL programs, dispatching each call to its provider)
 #   - liaison  (human-machine interaction)
+#   - llm-catalog (model catalog and resolver)
+#   - llm-metrics (per-request model usage records)
 #   - pilot    (turns a task into an RTDL program and validates it)
 #   - scribe   (structured logging library)
 #   - soma     (body description; launches primitive and skill packages)

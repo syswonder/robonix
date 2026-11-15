@@ -251,7 +251,7 @@ mod tests {
             ),
             (2, Some(100), Some(300), Some(300))
         );
-        // A record without `attempts` (older writer or damaged line) is one request.
+        // A record without `attempts` (an older writer) is one request.
         assert_eq!(totals[1].attempts, 1);
         assert_eq!(totals[1].latency_p50_ms, Some(200));
 

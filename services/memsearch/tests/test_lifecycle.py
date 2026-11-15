@@ -349,6 +349,62 @@ class MemoryLifecycleTest(unittest.TestCase):
         self.assertEqual((record["status"], record["input_tokens"], record["output_tokens"]),
                          ("ok", 7, 2))
 
+    def test_keyless_compact_omits_the_authorization_header(self) -> None:
+        import asyncio
+
+        from robonix_api.llm import metrics  # noqa: PLC0415
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {"choices": [{"message": {"content": "summary"}}]}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class Client:
+            headers: dict | None = None
+
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc) -> None:
+                return None
+
+            async def post(self, url, *, headers, json):
+                Client.headers = headers
+                return Response()
+
+        class Store:
+            @staticmethod
+            def query(filter_expr: str):
+                return [{"content": "the beacon is alpha-7"}]
+
+        class Backend:
+            store = Store()
+
+            async def index_file(self, path) -> None:
+                return None
+
+        httpx = types.ModuleType("httpx")
+        httpx.AsyncClient = Client
+        compact_module = types.ModuleType("memsearch.compact")
+        compact_module.COMPACT_PROMPT = "{chunks}"
+        with tempfile.TemporaryDirectory() as tmp:
+            module, _ = _load_service()
+            module.mem = Backend()
+            module.MEMORY_DIR = tmp
+            with patch.dict(os.environ, {metrics.DIRECTORY_ENV: tmp}), patch.dict(
+                sys.modules, {"httpx": httpx, "memsearch.compact": compact_module}
+            ):
+                asyncio.run(module._compact("https://local.example/v1", "", "m"))
+        self.assertEqual(Client.headers, {"Content-Type": "application/json"})
+
     def test_start_hook_does_not_kill_database_holders(self) -> None:
         manifest = (PACKAGE_ROOT / "package_manifest.yaml").read_text(encoding="utf-8")
         self.assertNotIn("fuser", manifest)

@@ -115,7 +115,6 @@ Containerized Scene mounts the catalog at the same absolute path and forwards on
 supplies that list; standalone launches derive it with the host's Python and
 `robonix_api.llm` (PyYAML is needed for YAML catalogs). Without a catalog,
 Scene forwards only the legacy `VLM_API_KEY` and `OPENAI_API_KEY` variables.
-The catalog is read once per process; restart a consumer after editing it.
 
 The requirements used by the in-tree consumers:
 
@@ -191,9 +190,11 @@ when it reaches a size you are willing to parse in one run.
 
 Prompts, replies and keys are never recorded. Prices are not recorded either:
 cost is token counts times the operator's price list, joined on `host` +
-`model` against the totals `rbnx llm-usage --json` prints. A launcher that
-filters the environment must pass `ROBONIX_LLM_METRICS_DIR` and `RBNX_BOOT_ID`
-through; otherwise its consumers write nothing, which their startup log says.
+`model` against the totals `rbnx llm-usage --json` prints. Whether a consumer
+writes records depends on `ROBONIX_LLM_METRICS_DIR`: a launcher that filters the
+environment must pass it through, and the startup log says when it is off.
+`RBNX_BOOT_ID` only attributes a record to a boot; without it records still
+appear with `boot_id: null`.
 
 The Rust crate `system/llm-metrics` writes the same record. Both parse usage
 with the cases in [contract/usage_cases.json](contract/usage_cases.json).
