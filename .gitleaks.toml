@@ -1,0 +1,8 @@
+# Default gitleaks rules, plus allowlists for known false positives.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Model catalog fixtures: a latency value after a key name is not a secret"
+regexTarget = "line"
+regexes = ['''"latency_p95_ms": \d+''']
