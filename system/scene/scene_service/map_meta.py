@@ -49,6 +49,9 @@ class MapMetaStore:
         self._lock = threading.Lock()
         self._base = Path(base_dir).expanduser()
         self._base.mkdir(parents=True, exist_ok=True)
+        # Public so sibling caches (e.g. outdoor satellite imagery) live in
+        # the same persisted directory without duplicating the path logic.
+        self.base_dir = self._base
 
     def _path(self, map_id: str) -> Path:
         return self._base / f"{sanitize_map_id(map_id)}.json"

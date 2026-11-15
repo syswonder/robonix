@@ -2,12 +2,15 @@
 """Scene's outdoor map facade; geometry stays in its map service."""
 import asyncio
 from collections import OrderedDict
+import json
 import logging
 import time
 import uuid
 
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
+
+from . import satellite as satellite_tiles
 
 
 class OutdoorScene:
@@ -132,6 +135,48 @@ class OutdoorScene:
             places=[dict(name=a["name"],x=a["points"][0][0],y=a["points"][0][1],enabled=not a.get("stale"))
                     for a in (self.annotations.list_json() if matches and self.annotations else []) if a["kind"]=="poi"],
             annotations=self.annotations.list_json() if matches and self.annotations else []))
+
+    def _satellite_payload(self, snapshot):
+        """Stitched satellite image for a snapshot, cached per map version.
+
+        The cache lives next to the map sidecars in the persisted meta
+        directory, so it survives restarts and browser changes; a re-recorded
+        map (new version) fetches fresh tiles on the next click.
+        """
+        roads = (snapshot.get("network") or {}).get("roads") or []
+        points = [p for r in roads for p in r.get("points", []) if "x" in p and "y" in p]
+        if not points:
+            raise ValueError("The outdoor map has no route points yet")
+        map_id = snapshot.get("map_id") or "map"
+        version = snapshot.get("version") or 0
+        if self.meta is not None:
+            cache_dir = self.meta.base_dir / "satellite"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            path = cache_dir / f"{map_id}__{version}.json"
+            if path.exists():
+                try:
+                    cached = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    cached = None
+                if cached and cached.get("map_id") == map_id and cached.get("version") == version:
+                    return {**cached, "cached": True}
+        payload = satellite_tiles.stitch(snapshot.get("origin_wgs84"), points)
+        if self.meta is not None:
+            with open(path, "w") as file:
+                json.dump({**payload, "map_id": map_id, "version": version}, file)
+        return {**payload, "cached": False}
+
+    async def satellite(self, request):
+        snapshot = await asyncio.to_thread(self.clients.outdoor, "get_map")
+        if not snapshot.get("ok"):
+            return JSONResponse({"ok": False, "detail": snapshot.get("detail", "Outdoor map unavailable")}, status_code=503)
+        try:
+            result = await asyncio.to_thread(self._satellite_payload, snapshot)
+            return JSONResponse({"ok": True, "cached": result["cached"], "image": result["image"],
+                                 "x": result["x"], "y_top": result["y_top"],
+                                 "width": result["width"], "height": result["height"]})
+        except (ValueError, OSError) as error:
+            return JSONResponse({"ok": False, "detail": str(error)}, status_code=502)
 
     async def operation(self, request):
         op = request.path_params["op"]
@@ -260,5 +305,6 @@ class OutdoorScene:
                 return JSONResponse({'ok': False, 'detail': str(error)}, status_code=503)
         return [Route("/outdoor", outdoor_page, methods=["GET"]),
                 Route("/api/outdoor/state", self.state, methods=["GET"]),
+                Route("/api/outdoor/satellite", self.satellite, methods=["GET"]),
                 Route("/api/outdoor/costmaps/{layer}", costmap, methods=["GET"]),
                 Route("/api/outdoor/{op}", self.operation, methods=["POST"])]

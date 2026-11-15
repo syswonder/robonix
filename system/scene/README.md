@@ -891,6 +891,8 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 Outdoor geometry, raw recordings and planning belong to `service-map-outdoor-rbnx`. Scene stores regions and POIs and waits for matching route map ID/version, without requiring an occupancy grid. The page supports capture/pause/resume/finish, explicit junction and overlap review, immutable revisions, gait/quality layers and bidirectional route preview. Occupancy-based semantic goal tools reject outdoor maps.
 
+The map toolbar's satellite button fetches Esri World Imagery tiles for the route's bounding box (aligned via the map snapshot's WGS84 origin) and stitches them into a north-up JPEG. The first click downloads and caches the image beside the map sidecars (`<meta_dir>/satellite/<map_id>__<version>.json`); later clicks reuse the cache, and a re-recorded map (new version) fetches fresh tiles. Requires outbound internet access; free tiles are for demo use, not redistribution.
+
 Choose **Mark place**, click the map, and enter a name beside the point. Saved places display their names and persist with that map. In **View**, click a place to inspect its coordinates, rename or reposition it, delete it, or choose **Plan**. Editing uses the same name field; click the map to change the position before saving. In **Plan**, select a place on the map or under **Existing destinations**, then preview the route before confirming execution. Place destinations must be within 2 m of a surveyed road.
 
 Temporary start and goal markers and route previews appear only in **Plan**. Switching tabs preserves the selection so planning can continue when returning.
