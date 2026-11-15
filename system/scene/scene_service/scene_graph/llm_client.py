@@ -99,7 +99,7 @@ class SceneGraphLLMClient:
         *,
         timeout: float | None = None,
         images: list[str] | None = None,
-        operation: str = "chat",
+        operation: str,
     ) -> dict[str, Any]:
         """One request expecting a JSON object reply; {} on any failure.
 

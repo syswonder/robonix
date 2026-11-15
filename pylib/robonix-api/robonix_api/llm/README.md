@@ -171,8 +171,10 @@ must match `[a-z0-9_-]+`, because it names the file, and `Call` raises
 `rbnx clean -f` keep unless `--llm-metrics` is given. Each record is appended
 with one write, so a reader sees whole lines except possibly the one being
 written; `rbnx llm-usage` skips such a line and sums the rest. The files grow by
-one line per call and are never rotated: archive or remove them with
-`rbnx clean -f --llm-metrics` once their totals are taken.
+one line per call and are never rotated. Each record is a few hundred bytes,
+so the directory grows with call volume; `rbnx llm-usage` reads every record it
+sums, so archive or remove the directory with `rbnx clean -f --llm-metrics`
+when it reaches a size you are willing to parse in one run.
 
 | Field | Meaning |
 |---|---|

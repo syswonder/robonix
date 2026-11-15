@@ -147,9 +147,11 @@ def write(record: dict[str, Any]) -> None:
     directory = os.environ.get(DIRECTORY_ENV, "").strip()
     if not _announced:
         # Without this line an unset variable loses every record silently.
-        _announced = True
-        log.info("llm metrics: %s", f"records -> {directory}" if directory
-                 else f"off ({DIRECTORY_ENV} unset)")
+        with _lock:
+            first, _announced = not _announced, True
+        if first:
+            log.info("llm metrics: %s", f"records -> {directory}" if directory
+                     else f"off ({DIRECTORY_ENV} unset)")
     if not directory:
         return
     line = dict(record, ts_ms=int(time.time() * 1000),

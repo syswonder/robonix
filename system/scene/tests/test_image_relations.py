@@ -143,7 +143,7 @@ def test_chat_json_image_body():
     try:
         c = SceneGraphLLMClient(api_key="k", base_url="http://x", reasoning_effort="")
         # With an image: content is a list [text, image_url].
-        run(c.chat_json("sys", "look", images=["QUJD"]))
+        run(c.chat_json("sys", "look", images=["QUJD"], operation="test"))
         content = captured["body"]["messages"][1]["content"]
         assert isinstance(content, list)
         assert content[0]["type"] == "text" and content[0]["text"] == "look"
@@ -151,7 +151,7 @@ def test_chat_json_image_body():
         assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,QUJD"
         # Without images: content is the bare string (backward compatible).
         captured.clear()
-        run(c.chat_json("sys", "plain"))
+        run(c.chat_json("sys", "plain", operation="test"))
         assert captured["body"]["messages"][1]["content"] == "plain"
     finally:
         httpx.AsyncClient = orig

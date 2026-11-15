@@ -270,7 +270,9 @@ fi
 # Model usage records: writable, at the same path, so the in-container writer
 # appends to the deployment's llm-metrics directory.
 declare -a METRICS_ARGS=()
-if [[ -n "${ROBONIX_LLM_METRICS_DIR:-}" && -d "${ROBONIX_LLM_METRICS_DIR}" ]]; then
+if [[ -n "${ROBONIX_LLM_METRICS_DIR:-}" ]]; then
+    # Standalone launches may name a directory that does not exist yet.
+    mkdir -p "${ROBONIX_LLM_METRICS_DIR}"
     METRICS_ARGS+=(-v "${ROBONIX_LLM_METRICS_DIR}:${ROBONIX_LLM_METRICS_DIR}"
         -e "ROBONIX_LLM_METRICS_DIR=${ROBONIX_LLM_METRICS_DIR}" -e "RBNX_BOOT_ID=${RBNX_BOOT_ID:-}")
 fi
