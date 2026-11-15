@@ -342,14 +342,15 @@ class CompactConfigTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.config()
 
-    def test_catalog_overrides_legacy_env(self):
+    def test_explicit_vlm_env_wins_over_catalog(self):
         with self._catalog(api_key_env="TEST_KEY"), patch.dict(os.environ, {
             "VLM_BASE_URL": "https://legacy.invalid/v1", "VLM_API_KEY": "legacy",
+            "VLM_MODEL": "legacy-model",
         }):
             config = self.config()
         self.assertEqual(config, {
-            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
-            "model": "test-summarizer", "requires_key": True,
+            "base_url": "https://legacy.invalid/v1", "api_key": "legacy",
+            "model": "legacy-model", "requires_key": True,
         })
 
 

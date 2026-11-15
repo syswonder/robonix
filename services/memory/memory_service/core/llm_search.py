@@ -26,7 +26,12 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 
 from .types import MemoryNode
 
@@ -34,18 +39,28 @@ log = logging.getLogger("scribe_mem")
 
 # ── LLM configuration ──────────────────────────────────────────────────────
 
+# The deployment's own settings, checked before defaults fill anything in.
+# OPENAI_* stay out: an ambient key meant for other tools must not disable the
+# catalog for this service.
+_EXPLICIT_ENV = (
+    "MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY", "MEMGRAPH_LLM_MODEL",
+    "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
+)
+
+
 def _llm_config() -> dict:
-    """Resolve LLM endpoint from env vars with standard fallbacks."""
-    target = resolve_from_env(
-        Requirements(features=("json_object",), max_output_tokens=512)
-    )
-    if target is not None:
-        return {
-            "base_url": target.base_url,
-            "api_key": api_key_for(target),
-            "model": target.model,
-            "requires_key": target.api_key_env is not None,
-        }
+    """Resolve the LLM endpoint; explicit settings win, the catalog fills gaps."""
+    if not explicit_env_set(*_EXPLICIT_ENV):
+        target = resolve_from_env(
+            Requirements(features=("json_object",), max_output_tokens=512)
+        )
+        if target is not None:
+            return {
+                "base_url": target.base_url,
+                "api_key": api_key_for(target),
+                "model": target.model,
+                "requires_key": target.api_key_env is not None,
+            }
 
     base_url = (
         os.environ.get("MEMGRAPH_LLM_BASE_URL")

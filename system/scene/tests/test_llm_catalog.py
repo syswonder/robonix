@@ -39,16 +39,16 @@ class SceneCatalogTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 SceneGraphLLMClient()
 
-    def test_catalog_overrides_the_vlm_env(self):
+    def test_explicit_vlm_env_wins_over_catalog(self):
         with patch.dict(os.environ, {
             "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
             "TEST_KEY": "secret", "VLM_BASE_URL": "http://legacy.invalid/v1",
             "VLM_MODEL": "legacy", "VLM_API_KEY": "legacy-key",
         }):
             client = SceneGraphLLMClient()
-        self.assertEqual(client.base_url, "http://127.0.0.1:9999/v1")
-        self.assertEqual(client.model, "test-vl")
-        self.assertEqual(client.api_key, "secret")
+        self.assertEqual(client.base_url, "http://legacy.invalid/v1")
+        self.assertEqual(client.model, "legacy")
+        self.assertEqual(client.api_key, "legacy-key")
 
 
 if __name__ == "__main__":

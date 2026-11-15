@@ -75,6 +75,11 @@ missing variables. When the catalog variable is unset it returns `None`, which
 keeps the legacy configuration. The catalog is read once per process; restart
 the consumer after editing it.
 
+Explicit configuration wins: a consumer whose own `VLM_*` (or memory's
+`MEMGRAPH_LLM_*`) settings are set keeps them and does not consult the catalog,
+which only fills in what they leave unset. This is the same precedence Pilot,
+the verifier and Scene apply.
+
 ### Deployment
 
 Under `rbnx boot`, the catalog normally comes from the deployment manifest's

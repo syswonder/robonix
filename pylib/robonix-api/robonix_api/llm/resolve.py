@@ -23,6 +23,15 @@ class Requirements:
         return cls()
 
 
+def explicit_env_set(*names: str) -> bool:
+    """Whether any of *names* is set non-empty, before defaults apply.
+
+    A deployment's own ``VLM_*``/``MEMGRAPH_LLM_*`` settings are explicit
+    configuration; the catalog only fills in what they leave unset.
+    """
+    return any(os.environ.get(name) for name in names)
+
+
 def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpec]:
     wanted_tokens = requirements.input_tokens + requirements.max_output_tokens
     matches = [

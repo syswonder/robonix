@@ -146,17 +146,17 @@ class TestLLMConfig(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 llm_search._llm_config()
 
-    def test_catalog_overrides_legacy_config(self):
+    def test_explicit_env_wins_over_catalog(self):
         self._clear_env()
         with patch.dict(os.environ, {
             "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
             "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
-            "VLM_API_KEY": "legacy",
+            "VLM_API_KEY": "legacy", "VLM_MODEL": "legacy-model",
         }):
             cfg = llm_search._llm_config()
         assert cfg == {
-            "base_url": "http://127.0.0.1:9999/v1", "api_key": "secret",
-            "model": "test-llm", "requires_key": True,
+            "base_url": "https://legacy.invalid/v1", "api_key": "legacy",
+            "model": "legacy-model", "requires_key": True,
         }
 
 

@@ -6,7 +6,13 @@ endpoint should this consumer connect to?  It does not proxy traffic, track
 health or manage keys; the caller resolves once and connects directly.
 """
 from .catalog import ModelCatalog, ModelSpec
-from .resolve import Requirements, api_key_for, catalog_from_env, resolve_from_env
+from .resolve import (
+    Requirements,
+    api_key_for,
+    catalog_from_env,
+    explicit_env_set,
+    resolve_from_env,
+)
 
 __all__ = [
     "ModelCatalog",
@@ -14,5 +20,6 @@ __all__ = [
     "Requirements",
     "api_key_for",
     "catalog_from_env",
+    "explicit_env_set",
     "resolve_from_env",
 ]

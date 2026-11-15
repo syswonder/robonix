@@ -17,7 +17,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 
 from ..storage.image_store import _DEFAULT_IMAGE_ROOT
 from .types import ObjectCoord
@@ -26,17 +31,22 @@ log = logging.getLogger("scribe_mem")
 
 # ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
 
+_EXPLICIT_ENV = ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL")
+
+
 def _vlm_config() -> dict:
-    target = resolve_from_env(
-        Requirements(features=("vision",), max_output_tokens=256)
-    )
-    if target is not None:
-        return {
-            "base_url": target.base_url,
-            "api_key": api_key_for(target),
-            "model": target.model,
-            "requires_key": target.api_key_env is not None,
-        }
+    """VLM endpoint; explicit settings win, the catalog fills gaps."""
+    if not explicit_env_set(*_EXPLICIT_ENV):
+        target = resolve_from_env(
+            Requirements(features=("vision",), max_output_tokens=256)
+        )
+        if target is not None:
+            return {
+                "base_url": target.base_url,
+                "api_key": api_key_for(target),
+                "model": target.model,
+                "requires_key": target.api_key_env is not None,
+            }
     return {
         "base_url": (os.environ.get("VLM_BASE_URL")
                      or os.environ.get("OPENAI_BASE_URL") or ""),

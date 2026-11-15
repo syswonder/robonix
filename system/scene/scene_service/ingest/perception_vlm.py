@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 import httpx
-from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 
 from ..state.data_assoc import Detection
 from ..state.object_registry import BBox3D, Pose3D
@@ -127,12 +132,15 @@ class VLMObjectDetector:
         except ValueError:
             self.max_tokens = 1024
 
-        target = resolve_from_env(
-            Requirements(
-                features=("vision",),
-                max_output_tokens=self.max_tokens,
+        # The deployment's own VLM_* settings win; the catalog fills gaps.
+        target = None
+        if not explicit_env_set("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"):
+            target = resolve_from_env(
+                Requirements(
+                    features=("vision",),
+                    max_output_tokens=self.max_tokens,
+                )
             )
-        )
         if target is not None:
             self.base_url = target.base_url
             self.api_key = api_key_for(target)

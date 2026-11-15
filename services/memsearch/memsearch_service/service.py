@@ -17,7 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from robonix_api import scribe_logger
-from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 import os
 import platform
 import sys
@@ -237,13 +242,20 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
-def _compact_config() -> dict[str, str | None]:
-    """Resolve the summarizer endpoint, preferring the deployment catalog.
+# The deployment's own settings; the catalog only fills in what they leave
+# unset. OPENAI_* stay out so an ambient key for other tools cannot disable it.
+_EXPLICIT_ENV = ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL")
 
-    Without ROBONIX_LLM_CATALOG this keeps the historical VLM_* / OPENAI_*
-    fallback so memory does not need a separate API key.
+
+def _compact_config() -> dict[str, str | None]:
+    """Resolve the summarizer endpoint; explicit settings win over the catalog.
+
+    Without either it keeps the historical VLM_* / OPENAI_* fallback so memory
+    does not need a separate API key.
     """
-    target = resolve_from_env(Requirements(max_output_tokens=1024))
+    target = None
+    if not explicit_env_set(*_EXPLICIT_ENV):
+        target = resolve_from_env(Requirements(max_output_tokens=1024))
     if target is not None:
         return {
             "base_url": target.base_url,

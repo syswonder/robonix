@@ -10,7 +10,12 @@ import re
 from typing import Any
 
 import httpx
-from robonix_api.llm import Requirements, api_key_for, resolve_from_env
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +33,12 @@ class SceneGraphLLMClient:
         reasoning_effort: str | None = None,
     ) -> None:
         target = None
-        if base_url is None and api_key is None and model is None:
+        # Constructor arguments and the deployment's VLM_* settings are
+        # explicit; the catalog only fills in when neither says anything.
+        explicit = base_url is not None or api_key is not None or model is not None
+        if not explicit and not explicit_env_set(
+            "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"
+        ):
             # The graph client also serves the image-relation and caption
             # paths, so vision is the hard requirement.
             target = resolve_from_env(Requirements(features=("vision",)))
