@@ -67,10 +67,10 @@ needed before lifecycle initialization or contain secrets:
 | `OPENAI_MODEL` | unset | Fallback model when `VLM_MODEL` is unset. If both are unset, `compact` uses `gpt-5.5`. |
 | `ROBONIX_ATLAS` | supplied by `rbnx` | Atlas endpoint used by `robonix-api`. |
 
-With `ROBONIX_LLM_CATALOG` set, initialization validates the compaction model
-before constructing the backend. A keyless catalog entry needs no credential.
-An explicit `VLM_BASE_URL` wins over the catalog; without one the catalog
-supplies endpoint, key and model.
+With `ROBONIX_LLM_CATALOG` set and no explicit `VLM_BASE_URL`,
+initialization validates the compaction model before constructing the backend.
+A keyless catalog entry needs no credential. An explicit `VLM_BASE_URL` wins
+over the catalog; without one the catalog supplies endpoint, key and model.
 The package hook uses the [catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
 to restrict inherited environment variables.
 Without a catalog, `search` and `save` do not require model API credentials. When neither

@@ -46,11 +46,11 @@ def _vlm_config() -> dict:
             }
     return {
         "base_url": (os.environ.get("VLM_BASE_URL")
-                     or os.environ.get("OPENAI_BASE_URL") or ""),
+                     or os.environ.get("OPENAI_BASE_URL") or "").strip(),
         "api_key": (os.environ.get("VLM_API_KEY")
-                    or os.environ.get("OPENAI_API_KEY") or ""),
+                    or os.environ.get("OPENAI_API_KEY") or "").strip(),
         "model": (os.environ.get("VLM_MODEL")
-                  or os.environ.get("OPENAI_MODEL") or "gpt-4.1"),
+                  or os.environ.get("OPENAI_MODEL") or "gpt-4.1").strip(),
         "requires_key": True,
     }
 

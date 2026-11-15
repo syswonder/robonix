@@ -72,8 +72,8 @@ class LauncherTests(unittest.TestCase):
             self.assertNotIn(name, env)
 
     def test_explicit_model_settings_survive_the_catalog_launcher(self):
-        # Without this the catalog config in a deployment manifest could never
-        # win over the catalog, since the launcher would strip it.
+        # Without this a deployment's explicit model settings could never win
+        # over the catalog, since the launcher would strip them.
         result = self._run(
             {"models": [{
                 "id": "local", "provider": "test", "model": "local",
@@ -88,6 +88,38 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(env["VLM_BASE_URL"], "https://explicit.invalid/v1")
         self.assertEqual(env["VLM_MODEL"], "explicit-model")
         self.assertEqual(env["MEMGRAPH_LLM_MODEL"], "memory-model")
+
+    def test_a_key_travels_only_with_its_endpoint(self):
+        model = {
+            "id": "local", "provider": "test", "model": "local",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }
+        result = self._run(
+            {"models": [model]},
+            VLM_BASE_URL="https://explicit.invalid/v1",
+            VLM_API_KEY="vlm-key",
+            MEMGRAPH_LLM_API_KEY="memory-key",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads(result.stdout)["env"]
+        self.assertEqual(env["VLM_API_KEY"], "vlm-key")
+        self.assertNotIn("MEMGRAPH_LLM_API_KEY", env)
+
+    def test_a_key_without_its_endpoint_is_dropped(self):
+        model = {
+            "id": "local", "provider": "test", "model": "local",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }
+        result = self._run(
+            {"models": [model]},
+            VLM_API_KEY="vlm-key",
+            MEMGRAPH_LLM_BASE_URL="https://memory.invalid/v1",
+            MEMGRAPH_LLM_API_KEY="memory-key",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads(result.stdout)["env"]
+        self.assertNotIn("VLM_API_KEY", env)
+        self.assertEqual(env["MEMGRAPH_LLM_API_KEY"], "memory-key")
 
     def test_legacy_launch_keeps_the_environment(self):
         result = self._run(None)

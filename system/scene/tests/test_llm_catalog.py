@@ -68,6 +68,15 @@ class SceneCatalogTests(unittest.TestCase):
         self.assertEqual(client.base_url, "http://127.0.0.1:9999/v1")
         self.assertEqual(client.api_key, "secret")
 
+    def test_constructor_key_or_model_alone_stays_explicit(self):
+        for kwargs in ({"api_key": "k"}, {"model": "m"}, {"api_key": "k", "model": "m"}):
+            with self.subTest(kwargs=kwargs), patch.dict(os.environ, {
+                "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+                "TEST_KEY": "secret", "VLM_BASE_URL": "", "VLM_MODEL": "",
+            }):
+                client = SceneGraphLLMClient(**kwargs)
+            self.assertEqual(client.base_url, "")
+
     def test_explicit_endpoint_argument_wins_over_the_catalog(self):
         with patch.dict(os.environ, {
             "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),

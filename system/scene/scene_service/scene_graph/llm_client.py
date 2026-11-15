@@ -33,9 +33,11 @@ class SceneGraphLLMClient:
         reasoning_effort: str | None = None,
     ) -> None:
         target = None
-        # An explicit endpoint (argument or deployment setting) wins; a lone
-        # key or model may be one the catalog launcher forwarded.
-        explicit = bool((base_url or "").strip()) or explicit_env_set("VLM_BASE_URL")
+        # Constructor arguments are explicit, as is a deployment VLM_BASE_URL.
+        # Environment keys alone may be ones the catalog launcher forwarded.
+        explicit = any(
+            (value or "").strip() for value in (base_url, api_key, model)
+        ) or explicit_env_set("VLM_BASE_URL")
         if not explicit:
             # The graph client also serves the image-relation and caption
             # paths, so vision is the hard requirement.
@@ -57,19 +59,19 @@ class SceneGraphLLMClient:
                 or os.environ.get("VLM_BASE_URL")
                 or os.environ.get("OPENAI_BASE_URL")
                 or ""
-            ).rstrip("/")
+            ).strip().rstrip("/")
             self.api_key = (
                 api_key
                 or os.environ.get("VLM_API_KEY")
                 or os.environ.get("OPENAI_API_KEY")
                 or ""
-            )
+            ).strip()
             self.model = (
                 model
                 or os.environ.get("VLM_MODEL")
                 or os.environ.get("OPENAI_MODEL")
                 or "gpt-4o-mini"
-            )
+            ).strip()
         self.timeout = timeout
         # Sent only when set: providers without reasoning reject the field.
         if reasoning_effort is not None:

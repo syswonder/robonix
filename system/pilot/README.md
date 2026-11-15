@@ -51,7 +51,8 @@ and file precedence, including explicit key overrides and protocol validation.
 
 With a model catalog configured, `rbnx boot` restricts Pilot's inherited
 environment to the shared [runtime settings](../../pylib/robonix-api/robonix_api/llm/runtime_env.txt)
-and catalog key names. An explicit `ROBONIX_VLM_API_KEY` is retained when
+and catalog key names; a `VLM_API_KEY`/`MEMGRAPH_LLM_API_KEY` travels only
+with its own endpoint. An explicit `ROBONIX_VLM_API_KEY` is retained when
 Pilot selects it. CLI and file configuration keep their precedence.
 
 ## Context capacity: automatic, visible, and overrideable

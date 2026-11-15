@@ -539,6 +539,10 @@ soma_endpoint: 127.0.0.1:50091
         "ROBONIX_VLM_API_KEY",
         "ROBONIX_VLM_FORMAT",
         "ROBONIX_VLM_CONTEXT_WINDOW_TOKENS",
+        "VLM_BASE_URL",
+        "VLM_API_KEY",
+        "MEMGRAPH_LLM_BASE_URL",
+        "MEMGRAPH_LLM_API_KEY",
         "ROBONIX_CONFIG_PATH",
         "RBNX_BOOT_ID",
         "UNUSED_PROVIDER_API_KEY",
@@ -629,6 +633,44 @@ soma_endpoint: 127.0.0.1:50091
             apply_pilot_catalog_env(&mut cmd, &catalog);
             let output = cmd.as_std_mut().output().expect("run environment probe");
             assert!(output.status.success(), "explicit key: {explicit_key:?}");
+        }
+    }
+
+    #[test]
+    fn a_consumer_key_is_forwarded_only_with_its_own_endpoint() {
+        let env = catalog_env("key-endpoint", PILOT_CATALOG);
+        let catalog = validate_model_catalog(&env.path, "manifest", &HashMap::new(), true)
+            .expect("valid catalog");
+        for (endpoint, key, expect_key) in [
+            (
+                Some(("VLM_BASE_URL", "https://vlm.example/v1")),
+                "VLM_API_KEY",
+                true,
+            ),
+            (None, "VLM_API_KEY", false),
+            (
+                Some(("MEMGRAPH_LLM_BASE_URL", "https://memory.example/v1")),
+                "MEMGRAPH_LLM_API_KEY",
+                true,
+            ),
+            (None, "MEMGRAPH_LLM_API_KEY", false),
+        ] {
+            unsafe {
+                std::env::remove_var("VLM_BASE_URL");
+                std::env::remove_var("MEMGRAPH_LLM_BASE_URL");
+                std::env::set_var("VLM_API_KEY", "vlm-key");
+                std::env::set_var("MEMGRAPH_LLM_API_KEY", "memory-key");
+                if let Some((name, value)) = endpoint {
+                    std::env::set_var(name, value);
+                }
+            }
+            let mut cmd = Command::new("env");
+            apply_pilot_catalog_env(&mut cmd, &catalog);
+            let output = cmd.as_std_mut().output().expect("run environment probe");
+            let text = String::from_utf8_lossy(&output.stdout);
+            let prefix = format!("{key}=");
+            let present = text.lines().any(|line| line.starts_with(&prefix));
+            assert_eq!(present, expect_key, "{key} endpoint={endpoint:?}");
         }
     }
 
@@ -1214,6 +1256,16 @@ fn apply_pilot_catalog_env(cmd: &mut Command, catalog: &CatalogInfo) {
             .split_whitespace()
             .chain(key_envs.split(',').filter(|name| !name.is_empty()))
             .collect();
+    // A key travels only with the endpoint it belongs to, so one component's
+    // credential does not reach another.
+    for (endpoint, key) in [
+        ("VLM_BASE_URL", "VLM_API_KEY"),
+        ("MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY"),
+    ] {
+        if std::env::var_os(endpoint).is_some_and(|value| !value.is_empty()) {
+            allowed.insert(key);
+        }
+    }
     // An explicit Pilot key can override a catalog entry's credential.
     if std::env::var("ROBONIX_VLM_API_KEY")
         .ok()

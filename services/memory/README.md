@@ -40,10 +40,12 @@ print(f'Nodes: {svc.graph.count()}')
 ## Configuration
 
 - `ROBONIX_LLM_CATALOG` — optional model catalog. Search requires
-  `json_object`; image observation requires `vision`. An explicit
-  `MEMGRAPH_LLM_BASE_URL` or `VLM_BASE_URL` wins; without one the catalog
-  supplies endpoint, key and model. Invalid configuration fails startup before
-  the HTTP hook opens and is checked during initialization.
+  `json_object`; image observation requires `vision`. Search takes
+  `MEMGRAPH_LLM_BASE_URL` or `VLM_BASE_URL` as its explicit endpoint and
+  observation takes `VLM_BASE_URL`; without one the catalog supplies endpoint,
+  key and model. A catalog that is used is validated at startup, before the HTTP
+  hook opens, and again during initialization; an explicit endpoint is not
+  validated against the catalog.
   The package hook uses the [catalog launcher](../../pylib/robonix-api/robonix_api/llm/README.md#deployment)
   to restrict inherited environment variables.
 - `EMBEDDING_MODEL_PATH` — path to all-MiniLM-L6-v2 model directory

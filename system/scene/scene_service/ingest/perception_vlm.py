@@ -123,16 +123,17 @@ class VLMObjectDetector:
         self._retry_at = 0.0
         self._stats = InferenceCounters()
 
-        self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-        self.api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+        self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
+        self.api_key = (os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+        self.model = (os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5").strip()
         self.requires_key = True
         try:
             self.max_tokens = max(1, int(os.environ.get("SCENE_VLM_MAX_TOKENS", "1024")))
         except ValueError:
             self.max_tokens = 1024
 
-        # An explicitly configured endpoint wins; the catalog fills the rest.
+        # An explicitly configured endpoint wins; otherwise the catalog
+        # supplies endpoint, key and model.
         target = None
         if not explicit_env_set("VLM_BASE_URL"):
             target = resolve_from_env(

@@ -64,19 +64,19 @@ def _llm_config() -> dict:
         or os.environ.get("VLM_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
         or ""
-    )
+    ).strip()
     api_key = (
         os.environ.get("MEMGRAPH_LLM_API_KEY")
         or os.environ.get("VLM_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or ""
-    )
+    ).strip()
     model = (
         os.environ.get("MEMGRAPH_LLM_MODEL")
         or os.environ.get("VLM_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or "gpt-4.1"
-    )
+    ).strip()
     return {
         "base_url": base_url,
         "api_key": api_key,

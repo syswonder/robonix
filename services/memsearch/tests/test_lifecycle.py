@@ -347,6 +347,14 @@ class CompactConfigTests(unittest.TestCase):
         self.assertEqual(config["base_url"], "http://127.0.0.1:9999/v1")
         self.assertEqual(config["model"], "test-summarizer")
 
+    def test_an_explicit_endpoint_does_not_require_a_valid_catalog(self):
+        with patch.dict(os.environ, {
+            "VLM_BASE_URL": "https://explicit.invalid/v1",
+            "ROBONIX_LLM_CATALOG": "/nonexistent/catalog.yaml",
+        }):
+            config = self.config()
+        self.assertEqual(config["base_url"], "https://explicit.invalid/v1")
+
     def test_keyless_catalog_is_usable(self):
         with self._catalog(id="local/keyless", model="local", features={}):
             config = self.config()

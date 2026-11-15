@@ -260,9 +260,9 @@ def _compact_config() -> dict[str, str | None]:
             "requires_key": target.api_key_env is not None,
         }
     return {
-        "base_url": os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL"),
-        "api_key": os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-        "model": os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5",
+        "base_url": (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip(),
+        "api_key": (os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip(),
+        "model": (os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5").strip(),
         "requires_key": True,
     }
 

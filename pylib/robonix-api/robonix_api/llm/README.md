@@ -79,8 +79,13 @@ Explicit configuration wins: a consumer with its own endpoint configured
 (`VLM_BASE_URL`, or memory's `MEMGRAPH_LLM_BASE_URL`) keeps that endpoint and
 does not consult the catalog; a key or model alone does not disable the catalog,
 since the launcher forwards catalog `api_key_env` names as keys. Without an
-explicit endpoint the catalog supplies endpoint, key and model. Pilot and the
-verifier apply the same rule with their `vlm` blocks.
+explicit endpoint the catalog supplies endpoint, key and model.
+
+Pilot follows the same idea with its `vlm` block rather than environment
+variables: a complete block (upstream, model, key) is explicit, a bare
+`vlm.model` selects a catalog id, and no block resolves by features. The
+verifier accepts either a complete block or a bare model and rejects a partial
+one, rather than mixing a block with catalog fields.
 
 ### Deployment
 
@@ -99,6 +104,8 @@ keeps only the variables in [runtime_env.txt](runtime_env.txt) and the catalog's
 `api_key_env` names before executing the consumer. The list includes Python,
 ROS, logging, cache paths and consumer settings. Additional runtime variables
 must be added explicitly; arbitrary inherited variables are dropped.
+`VLM_API_KEY` and `MEMGRAPH_LLM_API_KEY` are forwarded only when their own
+`*_BASE_URL` is set, so one component's credential does not reach another.
 `rbnx` uses the same list for Pilot, also preserving an explicit
 `ROBONIX_VLM_API_KEY` when that is the credential Pilot selected.
 
