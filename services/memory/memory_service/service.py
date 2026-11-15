@@ -70,6 +70,16 @@ from .storage.image_store import ImageStore  # noqa: E402
 from .core.remember import RememberPipeline  # noqa: E402
 from .core.retrieve import RetrievePipeline  # noqa: E402
 from .core.compact import CompactPipeline  # noqa: E402
+from .core import llm_search, observe  # noqa: E402
+
+
+def _validate_model_config() -> None:
+    llm_search._llm_config()
+    observe._vlm_config()
+
+
+# The module-level HTTP hook can serve requests before Driver initialization.
+_validate_model_config()
 
 # ── 2. Backend construction ─────────────────────────────────────────────
 
@@ -177,6 +187,7 @@ class MemoryService:
         return True
 
     async def init(self, _cfg=None) -> str:
+        _validate_model_config()
         nodes = [self.graph.get_node(nid) for nid in self.graph.all_ids()]
         nodes = [n for n in nodes if n is not None]
         self.tags.rebuild(nodes)
@@ -522,6 +533,7 @@ if _MCP_AVAILABLE:
     def _on_init(cfg):
         _ = cfg
         global _indices_initialized
+        _validate_model_config()
         log.info("on_init: MEMORY_DIR=%s initialized=%s", MEMORY_DIR, _indices_initialized)
 
         # Idempotent guard: only rebuild indices once per process lifetime.

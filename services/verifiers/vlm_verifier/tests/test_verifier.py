@@ -10,6 +10,11 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+try:
+    import yaml
+except ImportError:  # The verifier runtime ships PyYAML via robonix-api.
+    yaml = None
+
 from vlm_verifier import camera, core, vlm
 
 
@@ -21,6 +26,18 @@ def envelope(provider="wrist"):
 
 
 class ParsingTests(unittest.TestCase):
+
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/vision", "provider": "vllm", "model": "test-vl",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"vision": True},
+            "api_key_env": "TEST_KEY", "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path), "TEST_KEY": "secret"})
     def test_wrist_camera_prompt_recognizes_partial_opposing_jaws(self):
         """Accept valid wrist-camera evidence without requiring the full gripper."""
         prompt = vlm.SYSTEM_PROMPT
@@ -96,14 +113,79 @@ class ParsingTests(unittest.TestCase):
     def test_vlm_configuration(self):
         """Check vlm configuration."""
         valid = dict(base_url="http://localhost:123/v1/", api_key="secret", model="vision")
-        self.assertEqual(vlm.VlmConfig.parse(valid).base_url, "http://localhost:123/v1")
-        for key in valid:
-            invalid = dict(valid, **{key: ""})
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": ""}, clear=False):
+            self.assertEqual(vlm.VlmConfig.parse(valid).base_url, "http://localhost:123/v1")
+            for key in valid:
+                invalid = dict(valid, **{key: ""})
+                with self.assertRaises(ValueError):
+                    vlm.VlmConfig.parse(invalid)
+            for url in ("file:///x", "http://user:secret@host/v1", "https://host/v1?key=secret"):
+                with self.assertRaises(ValueError):
+                    vlm.VlmConfig.parse(dict(valid, base_url=url))
+
+    def test_vlm_configuration_from_catalog(self):
+        with self._catalog(base_url="http://127.0.0.1:9999/v1/"):
+            config = vlm.VlmConfig.parse(None)
+        self.assertEqual(config.base_url, "http://127.0.0.1:9999/v1")
+        self.assertEqual(config.model, "test-vl")
+        self.assertEqual(config.api_key, "secret")
+
+    def test_keyless_catalog_target_is_allowed(self):
+        with self._catalog(id="local/keyless", model="local", api_key_env=None):
+            config = vlm.VlmConfig.parse(None)
+        self.assertEqual(config.api_key, "")
+        self.assertFalse(config.requires_key)
+
+    def test_catalog_url_is_validated(self):
+        with self._catalog(base_url="https://user:pw@host/v1?key=secret"), self.assertRaises(ValueError):
+            vlm.VlmConfig.parse(None)
+
+    def test_explicit_vlm_wins_over_catalog(self):
+        with self._catalog():
+            config = vlm.VlmConfig.parse({
+                "base_url": "http://explicit.example/v1", "api_key": "explicit-key",
+                "model": "explicit-model",
+            })
+        self.assertEqual(config.base_url, "http://explicit.example/v1")
+        self.assertEqual(config.model, "explicit-model")
+        self.assertEqual(config.api_key, "explicit-key")
+
+    def test_explicit_vlm_ignores_a_broken_catalog(self):
+        with patch.dict(
+            os.environ,
+            {"ROBONIX_LLM_CATALOG": "/nonexistent/catalog.yaml"},
+            clear=False,
+        ):
+            config = vlm.VlmConfig.parse(
+                {
+                    "base_url": "http://explicit.example/v1",
+                    "api_key": "explicit-key",
+                    "model": "explicit-model",
+                }
+            )
+        self.assertEqual(config.base_url, "http://explicit.example/v1")
+        self.assertEqual(config.model, "explicit-model")
+
+    def test_vlm_model_can_select_a_catalog_id(self):
+        with self._catalog():
+            config = vlm.VlmConfig.parse({"model": "test/vision"})
+        self.assertEqual(config.base_url, "http://127.0.0.1:9999/v1")
+        self.assertEqual(config.model, "test-vl")
+
+    def test_vlm_model_without_catalog_is_an_error(self):
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": ""}, clear=False):
             with self.assertRaises(ValueError):
-                vlm.VlmConfig.parse(invalid)
-        for url in ("file:///x", "http://user:secret@host/v1", "https://host/v1?key=secret"):
-            with self.assertRaises(ValueError):
-                vlm.VlmConfig.parse(dict(valid, base_url=url))
+                vlm.VlmConfig.parse({"model": "test/vision"})
+
+    @unittest.skipIf(yaml is None, "PyYAML is not installed")
+    def test_vlm_block_is_optional_in_config_spec(self):
+        spec = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "config.spec").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotIn("required", spec)
+        self.assertNotIn("required", spec["properties"]["vlm"])
 
     def test_exact_camera_resolution(self):
         """Check exact camera resolution."""

@@ -1,0 +1,24 @@
+{
+  "model": {
+    "id": " local/test ", "provider": " vllm ", "model": " local ",
+    "base_url": " http://127.0.0.1:8000/v1/// ", "protocol": " openai-chat ",
+    "context": 4096, "api_key_env": "_MODEL_KEY_1"
+  },
+  "normalized": {
+    "id": "local/test", "provider": "vllm", "model": "local",
+    "base_url": "http://127.0.0.1:8000/v1", "protocol": "openai-chat",
+    "context": 4096, "api_key_env": "_MODEL_KEY_1"
+  },
+  "invalid": [
+    {"id": true}, {"provider": 123}, {"model": 0}, {"base_url": true},
+    {"api_key_env": true},
+    {"context": true}, {"context": 1.9}, {"context": "8192"},
+    {"context": 0}, {"context": -1}, {"context": 18446744073709551616},
+    {"price_input_per_mtok": true}, {"price_output_per_mtok": "0.1"},
+    {"price_input_per_mtok": null}, {"price_output_per_mtok": -1},
+    {"latency_p95_ms": true}, {"latency_p95_ms": "100"}, {"latency_p95_ms": -1},
+    {"features": null}, {"features": {"vision": "false"}},
+    {"protocol": null}, {"protocol": false}, {"protocol": " "}, {"base_url": "/"}
+  ],
+  "non_finite": [".nan", ".inf", "-.inf"]
+}

@@ -1,10 +1,12 @@
 """Tests for LLM-based memory search — prompt formatting, config, fallback paths."""
 
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _HERE = Path(__file__).resolve().parent
 _SVC = _HERE.parent
@@ -66,11 +68,24 @@ class TestFormatNode(unittest.TestCase):
 class TestLLMConfig(unittest.TestCase):
     """Env-var config resolution — no LLM needed."""
 
+    def _catalog(self, **fields):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "models.json"
+        model = {
+            "id": "test/llm", "provider": "vllm", "model": "test-llm",
+            "base_url": "http://127.0.0.1:9999/v1", "features": {"json_object": True},
+            "latency_p95_ms": 100, **fields,
+        }
+        path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+        return path
+
     def _clear_env(self):
         for k in ("MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY",
                   "MEMGRAPH_LLM_MODEL",
                   "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
-                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"):
+                  "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+                  "ROBONIX_LLM_CATALOG"):
             os.environ.pop(k, None)
 
     def test_no_creds_returns_false(self):
@@ -120,6 +135,68 @@ class TestLLMConfig(unittest.TestCase):
         os.environ["VLM_API_KEY"] = "sk"
         cfg = llm_search._llm_config()
         assert cfg["model"] == "gpt-4.1"
+
+    def test_catalog_load_error_is_not_hidden(self):
+        self._clear_env()
+        with patch.dict(
+            os.environ,
+            {"ROBONIX_LLM_CATALOG": "/nonexistent/catalog.yaml"},
+            clear=False,
+        ):
+            with self.assertRaises(FileNotFoundError):
+                llm_search._llm_config()
+
+    def test_explicit_env_wins_over_catalog(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+            "VLM_API_KEY": "legacy", "VLM_MODEL": "legacy-model",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg == {
+            "base_url": "https://legacy.invalid/v1", "api_key": "legacy",
+            "model": "legacy-model", "requires_key": True,
+        }
+
+
+    def test_endpoint_alone_keeps_the_legacy_config(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "https://legacy.invalid/v1"
+        assert cfg["model"] == "gpt-4.1"
+
+    def test_a_lone_key_does_not_disable_the_catalog(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_API_KEY": "forwarded-by-launcher",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "http://127.0.0.1:9999/v1"
+        assert cfg["model"] == "test-llm"
+
+    def test_a_blank_endpoint_does_not_disable_the_catalog(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "  ",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "http://127.0.0.1:9999/v1"
+
+    def test_keyless_catalog_is_available(self):
+        self._clear_env()
+        path = self._catalog(id="local/keyless", model="local")
+        with patch.dict(os.environ, {"ROBONIX_LLM_CATALOG": str(path)}):
+            assert llm_search.llm_search_available() is True
+            cfg = llm_search._llm_config()
+        assert cfg["requires_key"] is False
+        assert cfg["api_key"] == ""
 
 
 class TestLLMRankFallback(unittest.TestCase):

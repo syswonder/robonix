@@ -6,4 +6,4 @@ cd "$PKG"
 source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
 set -u
 export PYTHONPATH="$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
-exec "$PKG/rbnx-build/venv/bin/python" -m vlm_verifier.service
+exec "$PKG/rbnx-build/venv/bin/python" -m robonix_api.llm vlm_verifier.service

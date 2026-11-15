@@ -17,6 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from robonix_api import scribe_logger
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
 import os
 import platform
 import sys
@@ -236,20 +242,46 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
+def _compact_config() -> dict[str, str | None]:
+    """Resolve the summarizer endpoint; an explicit endpoint wins over the catalog.
+
+    Without an explicit endpoint it uses the catalog when one is configured,
+    else the historical VLM_* / OPENAI_* fallback so memory does not need a
+    separate API key.
+    """
+    target = None
+    if not explicit_env_set("VLM_BASE_URL"):
+        target = resolve_from_env(Requirements(max_output_tokens=1024))
+    if target is not None:
+        return {
+            "base_url": target.base_url,
+            "api_key": api_key_for(target),
+            "model": target.model,
+            "requires_key": target.api_key_env is not None,
+        }
+    return {
+        "base_url": (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip(),
+        "api_key": (os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip(),
+        "model": (os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5").strip(),
+        "requires_key": True,
+    }
+
+
 @memory.mcp("robonix/service/memory/compact")
 async def compact(msg: Empty) -> String:
     """Compact and summarize recent memories. Call this at the end of a session.
     Returns std_msgs/String JSON. Contract: robonix/service/memory/compact.
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
-    separate API key. Reads VLM_BASE_URL / VLM_API_KEY / VLM_MODEL (or the
-    OPENAI_* equivalents as fallback)."""
+    separate API key. An explicit VLM_BASE_URL wins; otherwise the deployment
+    catalog is used, then VLM_* / OPENAI_* (see `_compact_config`)."""
     _ = msg
-    base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-    api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+    config = _compact_config()
+    base_url = config["base_url"]
+    api_key = config["api_key"]
+    model = str(config["model"] or "gpt-5.5")
     log.info("compact (model=%s, base_url=%s)", model, _redact_url(base_url))
-    if not api_key:
+    if config["requires_key"] and not api_key:
         log.warning("compact: no LLM key set (VLM_API_KEY / OPENAI_API_KEY)")
         return String(data="compact: no LLM credentials available. "
                            "Set VLM_API_KEY in the deploy manifest's system.memory env block.")
@@ -275,6 +307,7 @@ def init(cfg: dict):
     global mem, MEMORY_DIR, MILVUS_URI, _APPLIED_CONFIG, _reopen
     try:
         resolved = _resolve_config(cfg)
+        _compact_config()
         if mem is not None:
             if resolved == _APPLIED_CONFIG:
                 log.info("on_init: already initialized with the same configuration")

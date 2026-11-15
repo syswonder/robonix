@@ -17,6 +17,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from robonix_api.llm import (
+    Requirements,
+    api_key_for,
+    explicit_env_set,
+    resolve_from_env,
+)
+
 from ..storage.image_store import _DEFAULT_IMAGE_ROOT
 from .types import ObjectCoord
 
@@ -25,19 +32,34 @@ log = logging.getLogger("scribe_mem")
 # ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
 
 def _vlm_config() -> dict:
+    """VLM endpoint; an explicit endpoint wins over the catalog."""
+    if not explicit_env_set("VLM_BASE_URL"):
+        target = resolve_from_env(
+            Requirements(features=("vision",), max_output_tokens=256)
+        )
+        if target is not None:
+            return {
+                "base_url": target.base_url,
+                "api_key": api_key_for(target),
+                "model": target.model,
+                "requires_key": target.api_key_env is not None,
+            }
     return {
         "base_url": (os.environ.get("VLM_BASE_URL")
-                     or os.environ.get("OPENAI_BASE_URL") or ""),
+                     or os.environ.get("OPENAI_BASE_URL") or "").strip(),
         "api_key": (os.environ.get("VLM_API_KEY")
-                    or os.environ.get("OPENAI_API_KEY") or ""),
+                    or os.environ.get("OPENAI_API_KEY") or "").strip(),
         "model": (os.environ.get("VLM_MODEL")
-                  or os.environ.get("OPENAI_MODEL") or "gpt-4.1"),
+                  or os.environ.get("OPENAI_MODEL") or "gpt-4.1").strip(),
+        "requires_key": True,
     }
 
 
 def _vlm_available() -> bool:
     cfg = _vlm_config()
-    return bool(cfg["api_key"]) and bool(cfg["base_url"])
+    return bool(cfg["base_url"]) and (
+        bool(cfg["api_key"]) or not cfg["requires_key"]
+    )
 
 
 # ── VLM image description ──────────────────────────────────────────────────
@@ -62,7 +84,7 @@ async def _vlm_describe(
     The caller falls back to template-based summary.
     """
     cfg = _vlm_config()
-    if not cfg["api_key"] or not cfg["base_url"]:
+    if not cfg["base_url"] or (cfg["requires_key"] and not cfg["api_key"]):
         return None
 
     import httpx
@@ -75,10 +97,9 @@ async def _vlm_describe(
     prompt = _VLM_PROMPT.format(objects=obj_labels)
 
     url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if cfg["api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
     body: dict = {
         "model": cfg["model"],
         "messages": [{
@@ -145,7 +166,7 @@ async def vlm_answer_question(
     Returns None when VLM is unavailable or on any failure.
     """
     cfg = _vlm_config()
-    if not cfg["api_key"] or not cfg["base_url"]:
+    if not cfg["base_url"] or (cfg["requires_key"] and not cfg["api_key"]):
         return None
 
     import httpx
@@ -191,10 +212,9 @@ async def vlm_answer_question(
         content_parts.append({"type": "text", "text": text_prompt})
 
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if cfg["api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
     body = {
         "model": cfg["model"],
         "messages": [{"role": "user", "content": content_parts}],
