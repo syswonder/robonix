@@ -778,7 +778,6 @@ impl VlmClient {
                         return Err(error).context("open VLM chat stream");
                     }
                 };
-                };
                 let status = response.status();
                 if status.is_success() {
                     // Until the stream ends, dropping it means the caller gave up.
@@ -1479,6 +1478,7 @@ mod tests {
             api_base: base.to_string(),
             api_key: "local-test".into(),
             model: "local-test".into(),
+            reasoning_effort: None,
             configured_context_window_tokens: None,
             prompt_cache_key: "local-test".into(),
             metrics_dir: Some(metrics_dir.to_path_buf()),
