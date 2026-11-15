@@ -132,9 +132,9 @@ class VLMObjectDetector:
         except ValueError:
             self.max_tokens = 1024
 
-        # The deployment's own VLM_* settings win; the catalog fills gaps.
+        # An explicitly configured endpoint wins; the catalog fills the rest.
         target = None
-        if not explicit_env_set("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"):
+        if not explicit_env_set("VLM_BASE_URL"):
             target = resolve_from_env(
                 Requirements(
                     features=("vision",),

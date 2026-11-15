@@ -33,12 +33,10 @@ class SceneGraphLLMClient:
         reasoning_effort: str | None = None,
     ) -> None:
         target = None
-        # Constructor arguments and the deployment's VLM_* settings are
-        # explicit; the catalog only fills in when neither says anything.
-        explicit = base_url is not None or api_key is not None or model is not None
-        if not explicit and not explicit_env_set(
-            "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL"
-        ):
+        # An explicit endpoint (argument or deployment setting) wins; a lone
+        # key or model may be one the catalog launcher forwarded.
+        explicit = bool((base_url or "").strip()) or explicit_env_set("VLM_BASE_URL")
+        if not explicit:
             # The graph client also serves the image-relation and caption
             # paths, so vision is the hard requirement.
             target = resolve_from_env(Requirements(features=("vision",)))

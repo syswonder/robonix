@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class LauncherTests(unittest.TestCase):
-    def _run(self, catalog):
+    def _run(self, catalog, **extra_env):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "probe.py").write_text(
@@ -30,6 +30,7 @@ class LauncherTests(unittest.TestCase):
                 "SCENE_DUALMAP_SAM_WEIGHTS": "/models/sam.pt",
                 "AGENT_MEMORY_DIR": "/memory",
             }
+            env.update(extra_env)
             if catalog is not None:
                 path = root / "models.json"
                 path.write_text(catalog if isinstance(catalog, str) else json.dumps(catalog))
@@ -69,6 +70,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(env["ROBONIX_LLM_KEY_ENVS"], "")
         for name in ("MODEL_AUTH", "UNUSED_PROVIDER_API_KEY", "UNRELATED_CREDENTIAL"):
             self.assertNotIn(name, env)
+
+    def test_explicit_model_settings_survive_the_catalog_launcher(self):
+        # Without this the catalog config in a deployment manifest could never
+        # win over the catalog, since the launcher would strip it.
+        result = self._run(
+            {"models": [{
+                "id": "local", "provider": "test", "model": "local",
+                "base_url": "http://127.0.0.1:8000/v1",
+            }]},
+            VLM_BASE_URL="https://explicit.invalid/v1",
+            VLM_MODEL="explicit-model",
+            MEMGRAPH_LLM_MODEL="memory-model",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads(result.stdout)["env"]
+        self.assertEqual(env["VLM_BASE_URL"], "https://explicit.invalid/v1")
+        self.assertEqual(env["VLM_MODEL"], "explicit-model")
+        self.assertEqual(env["MEMGRAPH_LLM_MODEL"], "memory-model")
 
     def test_legacy_launch_keeps_the_environment(self):
         result = self._run(None)

@@ -242,19 +242,15 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
-# The deployment's own settings; the catalog only fills in what they leave
-# unset. OPENAI_* stay out so an ambient key for other tools cannot disable it.
-_EXPLICIT_ENV = ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL")
-
-
 def _compact_config() -> dict[str, str | None]:
-    """Resolve the summarizer endpoint; explicit settings win over the catalog.
+    """Resolve the summarizer endpoint; an explicit endpoint wins over the catalog.
 
-    Without either it keeps the historical VLM_* / OPENAI_* fallback so memory
-    does not need a separate API key.
+    Without an explicit endpoint it uses the catalog when one is configured,
+    else the historical VLM_* / OPENAI_* fallback so memory does not need a
+    separate API key.
     """
     target = None
-    if not explicit_env_set(*_EXPLICIT_ENV):
+    if not explicit_env_set("VLM_BASE_URL"):
         target = resolve_from_env(Requirements(max_output_tokens=1024))
     if target is not None:
         return {
@@ -277,8 +273,8 @@ async def compact(msg: Empty) -> String:
     Returns std_msgs/String JSON. Contract: robonix/service/memory/compact.
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
-    separate API key. Reads the deployment catalog when configured, then
-    VLM_BASE_URL / VLM_API_KEY / VLM_MODEL (or the OPENAI_* equivalents)."""
+    separate API key. An explicit VLM_BASE_URL wins; otherwise the deployment
+    catalog is used, then VLM_* / OPENAI_* (see `_compact_config`)."""
     _ = msg
     config = _compact_config()
     base_url = config["base_url"]

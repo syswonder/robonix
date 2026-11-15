@@ -160,6 +160,35 @@ class TestLLMConfig(unittest.TestCase):
         }
 
 
+    def test_endpoint_alone_keeps_the_legacy_config(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "https://legacy.invalid/v1",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "https://legacy.invalid/v1"
+        assert cfg["model"] == "gpt-4.1"
+
+    def test_a_lone_key_does_not_disable_the_catalog(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_API_KEY": "forwarded-by-launcher",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "http://127.0.0.1:9999/v1"
+        assert cfg["model"] == "test-llm"
+
+    def test_a_blank_endpoint_does_not_disable_the_catalog(self):
+        self._clear_env()
+        with patch.dict(os.environ, {
+            "ROBONIX_LLM_CATALOG": str(self._catalog(api_key_env="TEST_KEY")),
+            "TEST_KEY": "secret", "VLM_BASE_URL": "  ",
+        }):
+            cfg = llm_search._llm_config()
+        assert cfg["base_url"] == "http://127.0.0.1:9999/v1"
+
     def test_keyless_catalog_is_available(self):
         self._clear_env()
         path = self._catalog(id="local/keyless", model="local")

@@ -24,12 +24,12 @@ class Requirements:
 
 
 def explicit_env_set(*names: str) -> bool:
-    """Whether any of *names* is set non-empty, before defaults apply.
+    """Whether any of *names* is set to a non-blank value.
 
-    A deployment's own ``VLM_*``/``MEMGRAPH_LLM_*`` settings are explicit
-    configuration; the catalog only fills in what they leave unset.
+    Callers pass the variables that anchor explicit configuration, normally
+    the endpoint. A blank value (as a launcher may forward) does not count.
     """
-    return any(os.environ.get(name) for name in names)
+    return any((os.environ.get(name) or "").strip() for name in names)
 
 
 def _resolve(catalog: ModelCatalog, requirements: Requirements) -> list[ModelSpec]:

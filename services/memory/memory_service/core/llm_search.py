@@ -39,18 +39,15 @@ log = logging.getLogger("scribe_mem")
 
 # ── LLM configuration ──────────────────────────────────────────────────────
 
-# The deployment's own settings, checked before defaults fill anything in.
-# OPENAI_* stay out: an ambient key meant for other tools must not disable the
-# catalog for this service.
-_EXPLICIT_ENV = (
-    "MEMGRAPH_LLM_BASE_URL", "MEMGRAPH_LLM_API_KEY", "MEMGRAPH_LLM_MODEL",
-    "VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL",
-)
+# Only an endpoint anchors explicit configuration: a lone key may be one the
+# catalog launcher forwarded for a catalog target, and OPENAI_* may belong to
+# another tool. Without an endpoint the catalog supplies endpoint, key and model.
+_EXPLICIT_ENDPOINT = ("MEMGRAPH_LLM_BASE_URL", "VLM_BASE_URL")
 
 
 def _llm_config() -> dict:
-    """Resolve the LLM endpoint; explicit settings win, the catalog fills gaps."""
-    if not explicit_env_set(*_EXPLICIT_ENV):
+    """Resolve the LLM endpoint; an explicit endpoint wins over the catalog."""
+    if not explicit_env_set(*_EXPLICIT_ENDPOINT):
         target = resolve_from_env(
             Requirements(features=("json_object",), max_output_tokens=512)
         )

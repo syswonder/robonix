@@ -31,12 +31,9 @@ log = logging.getLogger("scribe_mem")
 
 # ── VLM config (reuses Pilot's env vars) ───────────────────────────────────
 
-_EXPLICIT_ENV = ("VLM_BASE_URL", "VLM_API_KEY", "VLM_MODEL")
-
-
 def _vlm_config() -> dict:
-    """VLM endpoint; explicit settings win, the catalog fills gaps."""
-    if not explicit_env_set(*_EXPLICIT_ENV):
+    """VLM endpoint; an explicit endpoint wins over the catalog."""
+    if not explicit_env_set("VLM_BASE_URL"):
         target = resolve_from_env(
             Requirements(features=("vision",), max_output_tokens=256)
         )

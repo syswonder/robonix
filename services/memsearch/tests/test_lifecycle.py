@@ -331,6 +331,22 @@ class CompactConfigTests(unittest.TestCase):
             },
         )
 
+    def test_endpoint_alone_keeps_the_legacy_config(self):
+        with self._catalog(api_key_env="TEST_KEY"), patch.dict(os.environ, {
+            "VLM_BASE_URL": "https://legacy.invalid/v1", "VLM_API_KEY": "legacy",
+        }):
+            config = self.config()
+        self.assertEqual(config["base_url"], "https://legacy.invalid/v1")
+        self.assertEqual(config["model"], "gpt-5.5")
+
+    def test_a_lone_key_does_not_disable_the_catalog(self):
+        with self._catalog(api_key_env="TEST_KEY"), patch.dict(os.environ, {
+            "VLM_API_KEY": "forwarded-by-launcher",
+        }):
+            config = self.config()
+        self.assertEqual(config["base_url"], "http://127.0.0.1:9999/v1")
+        self.assertEqual(config["model"], "test-summarizer")
+
     def test_keyless_catalog_is_usable(self):
         with self._catalog(id="local/keyless", model="local", features={}):
             config = self.config()

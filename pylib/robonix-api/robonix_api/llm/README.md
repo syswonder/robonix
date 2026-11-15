@@ -75,10 +75,12 @@ missing variables. When the catalog variable is unset it returns `None`, which
 keeps the legacy configuration. The catalog is read once per process; restart
 the consumer after editing it.
 
-Explicit configuration wins: a consumer whose own `VLM_*` (or memory's
-`MEMGRAPH_LLM_*`) settings are set keeps them and does not consult the catalog,
-which only fills in what they leave unset. This is the same precedence Pilot,
-the verifier and Scene apply.
+Explicit configuration wins: a consumer with its own endpoint configured
+(`VLM_BASE_URL`, or memory's `MEMGRAPH_LLM_BASE_URL`) keeps that endpoint and
+does not consult the catalog; a key or model alone does not disable the catalog,
+since the launcher forwards catalog `api_key_env` names as keys. Without an
+explicit endpoint the catalog supplies endpoint, key and model. Pilot and the
+verifier apply the same rule with their `vlm` blocks.
 
 ### Deployment
 
