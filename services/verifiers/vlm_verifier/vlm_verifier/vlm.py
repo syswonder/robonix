@@ -10,6 +10,7 @@ from robonix_api.llm import (
     Requirements,
     api_key_for,
     catalog_from_env,
+    metrics,
     resolve_from_env,
 )
 
@@ -199,17 +200,20 @@ async def judge(config, envelope, before, after):
         ],
     }
     try:
-        async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
-            headers = {"Content-Type": "application/json"}
-            if config.api_key:
-                headers["Authorization"] = "Bearer " + config.api_key
-            response = await client.post(
-                config.base_url + "/chat/completions",
-                headers=headers,
-                json=payload,
-            )
+        with metrics.Call("vlm_verifier", "judge", config.base_url, config.model) as call:
+            async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
+                headers = {"Content-Type": "application/json"}
+                if config.api_key:
+                    headers["Authorization"] = "Bearer " + config.api_key
+                response = await client.post(
+                    config.base_url + "/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+            call.finish(response)
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            data = response.json()
+        content = data["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f"VLM HTTP status {exc.response.status_code}") from None
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):

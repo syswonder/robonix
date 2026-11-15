@@ -14,6 +14,7 @@ from robonix_api.llm import (
     Requirements,
     api_key_for,
     explicit_env_set,
+    metrics,
     resolve_from_env,
 )
 
@@ -98,10 +99,12 @@ class SceneGraphLLMClient:
         *,
         timeout: float | None = None,
         images: list[str] | None = None,
+        operation: str,
     ) -> dict[str, Any]:
         """One request expecting a JSON object reply; {} on any failure.
 
-        `images` are base64 JPEGs sent as multimodal parts of the user turn."""
+        `images` are base64 JPEGs sent as multimodal parts of the user turn.
+        `operation` names the request in the LLM metrics record."""
         if not self.available:
             return {}
 
@@ -130,10 +133,12 @@ class SceneGraphLLMClient:
             body["reasoning_effort"] = self.reasoning_effort
 
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout or self.timeout
-            ) as client:
-                r = await client.post(url, json=body, headers=headers)
+            with metrics.Call("scene", operation, self.base_url, self.model) as call:
+                async with httpx.AsyncClient(
+                    timeout=timeout or self.timeout
+                ) as client:
+                    r = await client.post(url, json=body, headers=headers)
+                call.finish(r)
                 if r.status_code >= 400:
                     log.warning(
                         "[scene-graph-llm] HTTP %d: %s",

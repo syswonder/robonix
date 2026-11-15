@@ -1118,7 +1118,7 @@ struct VlmTextCompletion {
 /// compaction ledger. Best-effort: callers keep source history if it fails.
 async fn collect_vlm_text(vlm: &VlmClient, messages: &[Message]) -> Option<VlmTextCompletion> {
     let mut stream = vlm
-        .chat_stream(messages, &[], None, ReplyShape::Text)
+        .chat_stream(messages, &[], None, ReplyShape::Text, "summary", None)
         .await
         .ok()?;
     let mut text = String::new();
@@ -1635,13 +1635,16 @@ pub async fn run_turn(
         // Opening cannot dispatch RTDL nodes, so one retry is safe here.
         let mut open_retried = false;
         let mut stream = loop {
-            match tokio::time::timeout(
-                vlm_idle_timeout(),
-                vlm.chat_stream(&messages, &[], Some(vlm.prompt_cache_key()), reply_shape),
-            )
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result)
+            match vlm
+                .chat_stream(
+                    &messages,
+                    &[],
+                    Some(vlm.prompt_cache_key()),
+                    reply_shape,
+                    "plan",
+                    Some(vlm_idle_timeout()),
+                )
+                .await
             {
                 Ok(stream) => break stream,
                 Err(error) if !open_retried => {
@@ -1702,7 +1705,7 @@ pub async fn run_turn(
                         Err(error) => { live.transport_failed = true; stream_error = Some(error.into()); break; }
                     }
                 }
-                _ = &mut idle => { stream_error = Some(anyhow::anyhow!("VLM stream idle timeout")); break; }
+                () = &mut idle => { stream.mark_timed_out(); stream_error = Some(anyhow::anyhow!("VLM stream idle timeout")); break; }
                 item = stream.next() => {
                     idle.as_mut().reset(tokio::time::Instant::now() + vlm_idle_timeout());
                     match item {

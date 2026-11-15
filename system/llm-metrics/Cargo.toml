@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+[package]
+name = "robonix-llm-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One JSON line per model request, for Robonix usage metrics."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+robonix-scribe.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

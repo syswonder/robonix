@@ -36,6 +36,9 @@ robonix-llm-catalog = { path = "../../system/llm-catalog" }
 robonix-pilot = { path = "../../system/pilot" }
 robonix-scribe.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 robonix-codegen.workspace = true
 tonic-build.workspace = true

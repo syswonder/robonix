@@ -238,7 +238,7 @@ def test_llm_client_no_key():
         assert not client.available
 
         result = _ensure_loop().run_until_complete(
-            client.chat_json("system", "user")
+            client.chat_json("system", "user", operation="test")
         )
         assert result == {}
     finally:
@@ -678,13 +678,13 @@ def test_llm_client_request_body():
         c = SceneGraphLLMClient(
             api_key="k", base_url="http://x", reasoning_effort="minimal"
         )
-        run(c.chat_json("sys", "user"))
+        run(c.chat_json("sys", "user", operation="test"))
         assert captured["body"]["reasoning_effort"] == "minimal"
         assert "max_tokens" not in captured["body"]
 
         captured.clear()
         c2 = SceneGraphLLMClient(api_key="k", base_url="http://x", reasoning_effort="")
-        run(c2.chat_json("sys", "user"))
+        run(c2.chat_json("sys", "user", operation="test"))
         assert "reasoning_effort" not in captured["body"]
     finally:
         httpx.AsyncClient = orig

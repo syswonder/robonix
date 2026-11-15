@@ -3229,6 +3229,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "toml",
@@ -3313,6 +3314,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "robonix-llm-metrics"
+version = "1.1.0"
+dependencies = [
+ "robonix-scribe",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "robonix-pilot"
 version = "1.1.0"
 dependencies = [
@@ -3327,6 +3338,7 @@ dependencies = [
  "robonix-atlas",
  "robonix-codegen",
  "robonix-llm-catalog",
+ "robonix-llm-metrics",
  "robonix-scribe",
  "serde",
  "serde_json",

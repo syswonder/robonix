@@ -544,6 +544,7 @@ soma_endpoint: 127.0.0.1:50091
         "MEMGRAPH_LLM_BASE_URL",
         "MEMGRAPH_LLM_API_KEY",
         "ROBONIX_CONFIG_PATH",
+        "ROBONIX_LLM_METRICS_DIR",
         "RBNX_BOOT_ID",
         "UNUSED_PROVIDER_API_KEY",
         "UNRELATED_CREDENTIAL",
@@ -603,6 +604,7 @@ soma_endpoint: 127.0.0.1:50091
             std::env::set_var("UNUSED_PROVIDER_API_KEY", "unused");
             std::env::set_var("UNRELATED_CREDENTIAL", "unused");
             std::env::set_var("RBNX_BOOT_ID", "test-boot");
+            std::env::set_var("ROBONIX_LLM_METRICS_DIR", "/tmp/llm-metrics");
         }
         for (explicit_key, config, expected_key) in [
             (None, "{}", ""),
@@ -623,6 +625,7 @@ soma_endpoint: 127.0.0.1:50091
             cmd.arg("-c").arg(concat!(
                 "test \"$CAT_KEY\" = secret && ",
                 "test \"$RBNX_BOOT_ID\" = test-boot && ",
+                "test \"$ROBONIX_LLM_METRICS_DIR\" = /tmp/llm-metrics && ",
                 "test \"$ROBONIX_LLM_KEY_ENVS\" = CAT_KEY && ",
                 "test -n \"$ROBONIX_LLM_CATALOG\" && test -n \"$PATH\" && ",
                 "test \"${UNUSED_PROVIDER_API_KEY+x}\" != x && ",
@@ -1829,6 +1832,13 @@ pub async fn execute(
     let session_dir = std::env::var_os("ROBONIX_SESSION_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("sessions"));
+    // Model usage records outlive the logs for the same reason; every child
+    // inherits the variable, so set it once here. An existing value wins.
+    let metrics_dir = std::env::var_os("ROBONIX_LLM_METRICS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("llm-metrics"));
+    std::fs::create_dir_all(&metrics_dir)
+        .with_context(|| format!("failed to create {}", metrics_dir.display()))?;
     // The CLI prepares and clears this directory before Scribe's first log
     // call. Do not remove files here: Scribe may already hold open handles.
     std::fs::create_dir_all(&log_dir)
@@ -1841,6 +1851,7 @@ pub async fn execute(
     // Safety: called before any child spawns, no concurrent access.
     unsafe {
         std::env::set_var("SCRIBE_LOG_DIR", log_dir.as_os_str());
+        std::env::set_var("ROBONIX_LLM_METRICS_DIR", metrics_dir.as_os_str());
     }
     scribe::info(
         "bootstrap",
