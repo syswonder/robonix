@@ -269,7 +269,6 @@ impl PilotConfig {
                 reasoning_effort,
                 api_format,
             )?
-
         };
         Ok(Self {
             atlas_endpoint,
@@ -277,7 +276,6 @@ impl PilotConfig {
             id,
             vlm,
         })
-
     }
 }
 
@@ -397,6 +395,7 @@ mod tests {
             vlm_upstream: None,
             vlm_api_key: None,
             vlm_model: None,
+            vlm_reasoning_effort: None,
             vlm_context_window_tokens: None,
             vlm_format: Some("openai".into()),
             config: None,

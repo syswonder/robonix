@@ -3339,6 +3339,7 @@ mod tests {
             api_key: String::new(),
             model: "test".into(),
             reasoning_effort: None,
+            catalog_id: None,
             context_window_tokens: None,
             api_format: "openai".into(),
         });
