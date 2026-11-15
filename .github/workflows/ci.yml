@@ -96,7 +96,11 @@ jobs:
       - name: Install test dependencies
         run: python3 -m pip install pytest
       - name: Test robonix-api
-        run: python3 -m pytest -q pylib/robonix-api/tests
+        # test_atlas_time_descriptor needs generated atlas bindings; the
+        # atlas-python job builds and covers it.
+        run: >-
+          python3 -m pytest -q pylib/robonix-api/tests
+          --ignore=pylib/robonix-api/tests/test_atlas_time_descriptor.py
 
   chronos-python:
     name: Chronos Python bindings
