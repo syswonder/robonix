@@ -544,6 +544,7 @@ soma_endpoint: 127.0.0.1:50091
         "MEMGRAPH_LLM_BASE_URL",
         "MEMGRAPH_LLM_API_KEY",
         "ROBONIX_CONFIG_PATH",
+        "ROBONIX_LLM_METRICS_DIR",
         "RBNX_BOOT_ID",
         "UNUSED_PROVIDER_API_KEY",
         "UNRELATED_CREDENTIAL",
@@ -603,6 +604,7 @@ soma_endpoint: 127.0.0.1:50091
             std::env::set_var("UNUSED_PROVIDER_API_KEY", "unused");
             std::env::set_var("UNRELATED_CREDENTIAL", "unused");
             std::env::set_var("RBNX_BOOT_ID", "test-boot");
+            std::env::set_var("ROBONIX_LLM_METRICS_DIR", "/tmp/llm-metrics");
         }
         for (explicit_key, config, expected_key) in [
             (None, "{}", ""),
@@ -623,6 +625,7 @@ soma_endpoint: 127.0.0.1:50091
             cmd.arg("-c").arg(concat!(
                 "test \"$CAT_KEY\" = secret && ",
                 "test \"$RBNX_BOOT_ID\" = test-boot && ",
+                "test \"$ROBONIX_LLM_METRICS_DIR\" = /tmp/llm-metrics && ",
                 "test \"$ROBONIX_LLM_KEY_ENVS\" = CAT_KEY && ",
                 "test -n \"$ROBONIX_LLM_CATALOG\" && test -n \"$PATH\" && ",
                 "test \"${UNUSED_PROVIDER_API_KEY+x}\" != x && ",

@@ -25,6 +25,7 @@ class LauncherTests(unittest.TestCase):
                 "UNRELATED_CREDENTIAL": "unused",
                 "ROBONIX_LLM_KEY_ENVS": "UNRELATED_CREDENTIAL",
                 "RBNX_BOOT_ID": "test-boot",
+                "ROBONIX_LLM_METRICS_DIR": "/tmp/llm-metrics",
                 "RBNX_INSTANCE_NAME": "probe",
                 "ROS_DOMAIN_ID": "31",
                 "SCENE_DUALMAP_SAM_WEIGHTS": "/models/sam.pt",
@@ -52,6 +53,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(env["MODEL_AUTH"], "catalog-value")
         self.assertEqual(env["ROBONIX_LLM_KEY_ENVS"], "MODEL_AUTH")
         self.assertEqual(env["RBNX_BOOT_ID"], "test-boot")
+        self.assertEqual(env["ROBONIX_LLM_METRICS_DIR"], "/tmp/llm-metrics")
         self.assertEqual(env["RBNX_INSTANCE_NAME"], "probe")
         self.assertEqual(env["ROS_DOMAIN_ID"], "31")
         self.assertEqual(env["SCENE_DUALMAP_SAM_WEIGHTS"], "/models/sam.pt")
