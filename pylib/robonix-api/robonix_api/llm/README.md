@@ -1,10 +1,11 @@
 # robonix_api.llm
 
-Model catalog and model resolver for Robonix consumers, shipped as the
-`robonix_api.llm` submodule of `robonix-api`.
+Model catalog, model resolver and per-request usage records for Robonix
+consumers, shipped as the `robonix_api.llm` submodule of `robonix-api`.
 
 Consumers resolve an endpoint from their requirements and connect directly;
-the catalog adds no proxy or service.
+the catalog adds no proxy or service. `metrics` records one JSON line per
+model call so usage can be counted across consumers.
 
 ## ModelCatalog
 
@@ -135,6 +136,7 @@ The requirements used by the in-tree consumers:
 The Rust implementation lives in `system/llm-catalog` and reads the same
 catalog with the same rules. The shared cases in
 `robonix_api/llm/contract/resolve_cases.json` are run by both test suites.
+
 ## Model usage records
 
 Shared helpers for Robonix components that call a model. `metrics` records
@@ -208,7 +210,6 @@ with the cases in [contract/usage_cases.json](contract/usage_cases.json).
 ```bash
 PYTHONPATH=pylib/robonix-api python3 -m unittest discover \
   -s pylib/robonix-api/tests -p 'test_llm_*.py' -v
-PYTHONPATH=pylib/robonix-api python3 -m unittest pylib/robonix-api/tests/test_llm_metrics.py
 cargo test -p robonix-llm-catalog
 cargo test -p robonix-llm-metrics
 ```
@@ -220,4 +221,5 @@ calls it directly with a generated image:
 
 ```bash
 export DEEPSEEK_API_KEY=...
-PYTHONPATH=pylib/robonix-api python3 pylib/robonix-api/examples/llm_deepseek_smoke.py```
+PYTHONPATH=pylib/robonix-api python3 pylib/robonix-api/examples/llm_deepseek_smoke.py
+```

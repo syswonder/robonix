@@ -106,8 +106,9 @@ The Atlas wire protocol (atlas_pb2 / atlas_pb2_grpc) is pre-generated and bundle
 `robonix_api.llm` is the shared model catalog and resolver used by
 Scene, Memory, Memsearch, the VLM Verifier, CI scripts and other consumers. It
 answers "which model endpoint should this request use?" from a declarative
-catalog and leaves the provider call to the consumer's own client. It does not
-proxy traffic, hold keys or track health. See
+catalog and leaves the provider call to the consumer's own client. The
+`metrics` helper appends one JSON line per model request for usage accounting.
+It does not proxy traffic, hold keys or track health. See
 [`robonix_api/llm/README.md`](robonix_api/llm/README.md) for the catalog format,
 the Python API and the deployment variables.
 

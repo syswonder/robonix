@@ -281,11 +281,15 @@ async def _compact(base_url: str, api_key: str, model: str) -> Path | None:
     if not chunks:
         return None
     prompt = COMPACT_PROMPT.format(chunks="\n\n---\n\n".join(c["content"] for c in chunks))
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        # Keyless local endpoints reject a bare "Bearer ".
+        headers["Authorization"] = f"Bearer {api_key}"
     with metrics.Call("memsearch", "compact", base_url, model) as call:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 json={"model": model, "messages": [{"role": "user", "content": prompt}]},
             )
         call.finish(response)

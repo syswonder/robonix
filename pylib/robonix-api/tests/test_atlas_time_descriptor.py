@@ -27,7 +27,9 @@ except ImportError as exc:
     pytest.skip(f"atlas bindings are not generated: {exc}", allow_module_level=True)
 
 if not (Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug/robonix-atlas").exists():
-    pytest.skip("robonix-atlas binary is not built", allow_module_level=True)
+    # Bindings but no binary means the job that generated them also owes a
+    # build; a silent skip there would hide a real regression.
+    pytest.fail("atlas bindings exist but target/debug/robonix-atlas is missing", pytrace=False)
 
 
 @pytest.fixture

@@ -897,8 +897,8 @@ impl VlmClient {
 
         // Walk the upstream chunk-by-chunk, accumulating tool-call deltas by
         // index until the upstream finishes; then emit one ToolCall per index
-        // and a final Finish event. Use mpsc + spawn so we can return the
-        // boxed Stream while the polling runs in the background.
+        // and a final Finish event. Use mpsc + spawn so the caller keeps
+        // reading while this task polls the upstream.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<VlmStreamItem>>(64);
         tokio::spawn(async move {
             let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
@@ -1004,7 +1004,6 @@ impl VlmClient {
                     return;
                 }
             }
-            let _ = finish; // surface to PilotEvent later if needed
             let _ = tx.send(Ok(VlmStreamItem::Finish)).await;
         });
 
