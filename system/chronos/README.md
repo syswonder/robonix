@@ -12,4 +12,6 @@ A strictly newer reference generation clears `Fault` to `Reset` and replaces its
 
 Outlier checks include the configured drift allowance over steady time since the last accepted observation, so permitted rate changes and observations within holdover uncertainty can update the model. Larger residuals remain rejected.
 
-Run `cargo test -p robonix-chronos --test core`.
+`ChronosConfig::from_yaml()` parses and validates explicit direct/affine domain configuration, timestamp units, quality limits and observation policy. Configuration describes collection but does not start it. Linux clock types are re-exported from `robonix-chronos-clock`.
+
+Run `cargo test -p robonix-chronos`.

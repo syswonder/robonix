@@ -4,6 +4,8 @@ use thiserror::Error;
 
 /// Reference clock sources accepted by the current Chronos implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ReferenceSourceKind {
     LinuxSystem,
     RosTime,
@@ -11,10 +13,15 @@ pub enum ReferenceSourceKind {
 
 /// Quality and freshness limits for the selected reference clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct ReferenceConfig {
     pub kind: ReferenceSourceKind,
+    #[cfg_attr(feature = "serde", serde(default = "default_max_uncertainty_ns"))]
     pub max_uncertainty_ns: u64,
+    #[cfg_attr(feature = "serde", serde(default = "default_max_status_age_ns"))]
     pub max_status_age_ns: u64,
+    #[cfg_attr(feature = "serde", serde(default = "default_max_clock_step_ns"))]
     pub max_clock_step_ns: u64,
 }
 
@@ -22,9 +29,9 @@ impl Default for ReferenceConfig {
     fn default() -> Self {
         Self {
             kind: ReferenceSourceKind::LinuxSystem,
-            max_uncertainty_ns: 1_000_000,
-            max_status_age_ns: 2_000_000_000,
-            max_clock_step_ns: 100_000_000,
+            max_uncertainty_ns: default_max_uncertainty_ns(),
+            max_status_age_ns: default_max_status_age_ns(),
+            max_clock_step_ns: default_max_clock_step_ns(),
         }
     }
 }
@@ -49,4 +56,16 @@ impl ReferenceConfig {
 pub enum ChronosConfigError {
     #[error("invalid reference clock configuration: {0}")]
     InvalidReference(String),
+}
+
+fn default_max_uncertainty_ns() -> u64 {
+    1_000_000
+}
+
+fn default_max_status_age_ns() -> u64 {
+    2_000_000_000
+}
+
+fn default_max_clock_step_ns() -> u64 {
+    100_000_000
 }

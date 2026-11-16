@@ -14,6 +14,8 @@ Linux reference sampling uses `CLOCK_BOOTTIME` to bound uncertainty and detect w
 
 Run `cargo test --locked -p robonix-chronos-clock -- --nocapture` and `cargo clippy -p robonix-chronos-clock --all-targets -- -D warnings`. Linux integration tests require `cc` for the isolated clock-failure fixture. macOS runs the deterministic unit tests; runtime clock reads require Linux.
 
+The optional `serde` feature enables reference configuration deserialization. `robonix-chronos` enables it for YAML parsing and domain validation; standalone clock consumers do not need it. That package re-exports the clock types and reports parsing, reference and domain errors through its own `ChronosConfigError`.
+
 ## Python
 
 The Python package `robonix-chronos-clock` exposes the Rust implementation as
