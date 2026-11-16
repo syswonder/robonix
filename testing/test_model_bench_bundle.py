@@ -57,6 +57,18 @@ class BundleTest(unittest.TestCase):
             self.assertEqual(saved["results"][0]["final"], "visible answer")
             self.assertEqual(len(saved["results"][0]["rounds"]), 1)
 
+    def test_the_model_and_its_endpoint_stay_as_recorded(self):
+        base = "https://api.deepseek.com/v1"
+        meta = {"model": "deepseek/deepseek-v4-pro", "endpoint_model": "deepseek-chat",
+                "host": "api.deepseek.com", "endpoint_url": base, "route": base}
+        output = self.root / "submission.zip"
+        bundle.write_bundle(output, [self.result({"meta": meta, "results": []})], {}, secrets=[base, "api.deepseek.com"])
+        with zipfile.ZipFile(output) as archive:
+            saved = json.loads(archive.read("result-001.json"))["meta"]
+        for key in ("model", "endpoint_model", "host", "endpoint_url"):
+            self.assertEqual(saved[key], meta[key])
+        self.assertNotIn(base, saved["route"])
+
     def test_credentials_patterns_and_sensitive_json_fields(self):
         value = {"api_key": "arbitrary-value", "Authorization": "anything", "prompt_tokens": 120,
                  "completion_tokens": 7, "nested": [True, None, 3, {

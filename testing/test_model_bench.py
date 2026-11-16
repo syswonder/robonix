@@ -59,6 +59,11 @@ class ModelBenchTest(unittest.TestCase):
         ), patch.object(bench.time, "sleep"):
             return bench.run_case(self.args, self.world, case, "case")
 
+    def test_a_result_names_its_endpoint_without_credentials(self):
+        self.assertEqual(bench.public_endpoint("https://user:pw@api.deepseek.com/v1/?key=x#f"), "https://api.deepseek.com/v1")
+        self.assertEqual(bench.public_endpoint("http://127.0.0.1:52582/v1"), "http://127.0.0.1:52582/v1")
+        self.assertEqual(bench.public_endpoint("http://[::1]:8000/v1"), "http://[::1]:8000/v1")
+
     def test_matched_provider_outputs_and_errors_are_recorded(self):
         records = [record(LIDAR, "lidar", call_id="scan"),
                    record(CAMERA, "camera", ok=False, call_id="failed")]
@@ -454,7 +459,11 @@ class ModelBenchTest(unittest.TestCase):
             names = bundle.namelist()
             for suffix in ("requests.jsonl", "pilot.log", ".stdout.jsonl", ".stderr.log", "bench.stdout.log", "bench.stderr.log"):
                 self.assertTrue(any(name.endswith(suffix) for name in names), suffix)
-            content = "\n".join(bundle.read(name).decode() for name in names)
+            # Where the model was reached is kept as recorded, and only there.
+            self.assertEqual((result["meta"]["host"], result["meta"]["endpoint_url"]), ("10.0.0.7", "http://10.0.0.7"))
+            for key in ("host", "endpoint_url"):
+                result["meta"].pop(key)
+            content = "\n".join([json.dumps(result)] + [bundle.read(name).decode() for name in names if name != "result-001.json"])
             for forbidden in ("planted-test-secret", "10.0.0.7", "unpublished-setting", "before this run"):
                 self.assertNotIn(forbidden, content)
             self.assertIn("CLI stderr", content)

@@ -80,7 +80,7 @@ python3 testing/model_bench/bench.py --env-file api.env --model qwen3.8-max=qwen
 python3 testing/model_bench/judge.py --env-file judge.env --model openai/gpt-5.4 testing/model_bench/results/*.json
 ```
 
-`--model id=vendor/name` names a model the way the board does, so runs over different endpoints line up. A result file is named after the model and the endpoint's host, and records the Robonix commit, the cases' hash and which `response_format` modes the endpoint honours; `judge.py` packs the files it judged into `results/model-bench-<time>.zip`, which is what is submitted on Robonix Hub.
+`--model id=vendor/name` names a model the way the board does, so runs over different endpoints line up. A result file is named after the model and the endpoint's host, and records the Robonix commit, the cases' hash, which `response_format` modes the endpoint honours, and where the model was reached: `meta.endpoint_model`, `meta.host` and `meta.endpoint_url` (the base URL without credentials or query). The Hub cannot see the model itself, so a submission bundle keeps these three and `meta.model` as recorded; `judge.py` packs the files it judged into `results/model-bench-<time>.zip`, which is what is submitted on Robonix Hub.
 
 ## Submission bundle
 
