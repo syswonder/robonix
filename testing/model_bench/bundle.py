@@ -194,12 +194,22 @@ def _scrub_log(data, secrets, jsonl=False):
                        indent=None if jsonl else 2) + "\n").encode()
 
 
+# What a result says about the model under test and where it was reached.
+# The Hub cannot see the model, so a submission keeps these as recorded.
+PUBLIC_META = ("model", "endpoint_model", "host", "endpoint_url")
+
+
 def write_bundle(destination: Path, results: list[Path], logs: dict[str, Path], secrets=()) -> None:
     """Write only scrubbed JSON and text logs, using neutral result filenames."""
     secrets = tuple(secrets)
     members = {}
     for index, path in enumerate(sorted(map(Path, results), key=str), 1):
-        value = scrub(json.loads(_read(path)), secrets)
+        original = json.loads(_read(path))
+        value = scrub(original, secrets)
+        if isinstance(original, dict) and isinstance(original.get("meta"), dict) and isinstance(value.get("meta"), dict):
+            for key in PUBLIC_META:
+                if key in original["meta"]:
+                    value["meta"][key] = original["meta"][key]
         members[f"result-{index:03d}.json"] = (json.dumps(
             value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
     for index, (name, path) in enumerate(sorted(logs.items()), 1):

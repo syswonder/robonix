@@ -517,6 +517,17 @@ def main() -> None:
             write_bundle(a.bundle.resolve(), a.written, logs_for_results(a.written), a.secrets)
 
 
+def public_endpoint(base: str) -> str:
+    """The endpoint as a submission names it: scheme, host, port and path, no credentials or query."""
+    u = urllib.parse.urlparse(base)
+    host = u.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if u.port:
+        host = f"{host}:{u.port}"
+    return urllib.parse.urlunparse((u.scheme, host, u.path.rstrip("/"), "", "", ""))
+
+
 def _run(a) -> None:
     git = lambda *args: subprocess.run(["git", *args], capture_output=True, text=True, cwd=HERE).stdout.strip()  # noqa: E731
 
@@ -560,7 +571,7 @@ def _run(a) -> None:
         vision = probe_vision(base, key, model, Path(a.images))
         if vision.startswith("error"):
             sys.exit(f"{model}: the endpoint did not answer the vision probe ({vision}); not running")
-        meta = {"model": label, "endpoint_model": model, "provenance": provenance, "scoring_version": SCORING_VERSION, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
+        meta = {"model": label, "endpoint_model": model, "host": host, "endpoint_url": public_endpoint(base), "provenance": provenance, "scoring_version": SCORING_VERSION, "formats": probe_formats(base, key, model), "modalities": ["text", "image"] if vision == "image" else ["text"],
                 "robonix_commit": git("rev-parse", "HEAD") or None, "cases_sha256": cases_sha256(Path(a.cases)),
                 "date": time.strftime("%Y-%m-%d")}
         for case in cases:
