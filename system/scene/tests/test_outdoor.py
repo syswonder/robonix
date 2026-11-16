@@ -44,6 +44,20 @@ def test_outdoor_load_does_not_wait_for_grid_and_tabs_do_not_load(scene):
     assert client.post('/api/maps/save',json={'map_id':'inside'}).status_code==409
 
 
+def test_untyped_load_infers_map_type_from_registration(scene, monkeypatch):
+    client,backend,binding,annotations,calls=scene
+    result=client.post('/api/maps/load',json=dict(map_id='outside'))
+    assert result.status_code==200,result.text
+    assert binding['map_type']=='outdoor' and binding['version']=='v1'
+    # Untyped indoor loads still route to the indoor flow (502 here only
+    # because the fixture has no occupancy hub), not to a type collision.
+    monkeypatch.setenv("SCENE_MAP_READY_TIMEOUT_S", "0.2")
+    result=client.post('/api/maps/load',json=dict(map_id='inside'))
+    assert result.status_code!=409,result.text
+    # An explicit wrong type still reports the ID collision.
+    assert client.post('/api/maps/load',json=dict(map_id='outside',map_type='indoor')).status_code==409
+
+
 def test_recording_and_unknown_state_block_switches(scene):
     client,backend,binding,annotations,calls=scene
     backend['recording']=True

@@ -1021,7 +1021,20 @@ def make_app(*, registry: ObjectRegistry,
                 return reserved
         async with ops_lock:
             try:
-                kind = body.get("map_type", "indoor")
+                kind = body.get("map_type")
+                if kind is None and map_providers:
+                    # Infer the map type from its actual registration: an
+                    # untyped load of an outdoor map must not default to
+                    # indoor, which misclassifies it as an ID collision.
+                    listing = await asyncio.to_thread(clients.list)
+                    owners = (
+                        {m.get("map_type") for m in listing.get("maps", [])
+                         if m.get("map_id") == map_id}
+                        if listing.get("ok") else set()
+                    )
+                    kind = next(iter(owners)) if len(owners) == 1 else "indoor"
+                if kind not in ("indoor", "outdoor"):
+                    return _anno_error(400, "Unknown map type")
                 if map_providers:
                     await asyncio.to_thread(clients.check_identity, kind, map_id)
                     if map_meta:
