@@ -303,8 +303,17 @@ class OutdoorScene:
                 return JSONResponse(result, headers={'Cache-Control': 'no-store'})
             except (ValueError, OSError) as error:
                 return JSONResponse({'ok': False, 'detail': str(error)}, status_code=503)
+        async def clouds(request):
+            if self.navigation is None:
+                return JSONResponse({'ok': False, 'detail': 'Navigation is not configured'}, status_code=503)
+            try:
+                result = await asyncio.to_thread(self.navigation.clouds)
+                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+            except (ValueError, OSError) as error:
+                return JSONResponse({'ok': False, 'detail': str(error)}, status_code=503)
         return [Route("/outdoor", outdoor_page, methods=["GET"]),
                 Route("/api/outdoor/state", self.state, methods=["GET"]),
                 Route("/api/outdoor/satellite", self.satellite, methods=["GET"]),
                 Route("/api/outdoor/costmaps/{layer}", costmap, methods=["GET"]),
+                Route("/api/outdoor/clouds", clouds, methods=["GET"]),
                 Route("/api/outdoor/{op}", self.operation, methods=["POST"])]

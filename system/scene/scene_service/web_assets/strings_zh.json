@@ -343,5 +343,8 @@
   "outdoor.panZoom": "拖动平移 / 滚轮缩放",
   "outdoor.mapOverlay": "map 坐标叠加",
   "outdoor.frameUnaligned": "坐标未对齐或变换过期，暂不叠加",
-  "outdoor.overlayLegend": "紫：全局障碍影响区 · 青：局部障碍影响区 · 黄线：执行路径 · 灰：未知 · 只读视图"
+  "outdoor.overlayLegend": "紫：全局障碍影响区 · 青：局部障碍影响区 · 黄线：执行路径 · 灰：未知 · 只读视图",
+  "outdoor.view3dCloud": "3D 点云",
+  "outdoor.cloudWaiting": "等待雷达点云…",
+  "outdoor.cloudUnavailable": "3D 点云不可用"
 }

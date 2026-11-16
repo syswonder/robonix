@@ -1926,6 +1926,9 @@ def make_app(*, registry: ObjectRegistry,
         return JSONResponse(_cost_sample(detector))
 
     routes = [
+        Mount("/web_assets",
+              app=StaticFiles(directory=_ASSET_DIR, check_dir=False),
+              name="web-assets"),
         Mount("/assets/rerun",
               app=_ExtensionlessJs(directory=RERUN_VIEWER_DIR, check_dir=False),
               name="rerun-assets"),

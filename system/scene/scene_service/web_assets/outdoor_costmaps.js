@@ -1,4 +1,5 @@
 // Port of b3798b8's CostmapPanel/mapPoint, using Scene's existing plain JS page.
+// The 3D toggle renders the downsampled lidar cloud in a three.js viewport.
 window.createOutdoorCostmaps = function(container, tr) {
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const ns='http://www.w3.org/2000/svg', keys=['global','local'], layers={};
@@ -86,10 +87,100 @@ window.createOutdoorCostmaps = function(container, tr) {
       finally{clearTimeout(timeout);layer.busy=false;layer.controller=null;if(active&&!document.hidden)layer.timer=setTimeout(layer.poll,1000);}
     };
   });
+
+  // --- 3D lidar cloud view (three.js, deferred scripts from outdoor.html) ---
+  let mode='2d', holder=null, canvas3d=null, renderer=null, scene3d=null, camera3d=null,
+      controls3d=null, points3d=null, cloudGeo=null, cloudTimer=null, raf=null, cloudError='';
+  const view3d=button(tr('view3dCloud'),()=>{mode=(mode==='2d')?'3d':'2d';sync3d();});
+  function ensure3d(){
+    if(holder)return true;
+    if(!window.THREE)return false;
+    if(!window.THREE.OrbitControls)return false;
+    try{
+      holder=document.createElement('div');holder.className='od-cost-3d';holder.hidden=true;
+      canvas3d=document.createElement('canvas');canvas3d.className='od-cost-canvas';holder.append(canvas3d);
+      renderer=new THREE.WebGLRenderer({canvas:canvas3d,antialias:true});
+      renderer.setPixelRatio(window.devicePixelRatio||1);
+      scene3d=new THREE.Scene();scene3d.background=new THREE.Color('#151b24');
+      camera3d=new THREE.PerspectiveCamera(60,1,0.1,120);
+      camera3d.position.set(6,5,4);
+      controls3d=new THREE.OrbitControls(camera3d,canvas3d);
+      controls3d.target.set(0,0,0);controls3d.enableDamping=true;
+      scene3d.add(new THREE.GridHelper(24,24,0x57656b,0x242f3a));
+      scene3d.add(new THREE.AxesHelper(1.2));
+      cloudGeo=new THREE.BufferGeometry();
+      const mat=new THREE.PointsMaterial({size:0.05,vertexColors:true,sizeAttenuation:true});
+      points3d=new THREE.Points(cloudGeo,mat);scene3d.add(points3d);
+      container.insertBefore(holder,footer);
+      new ResizeObserver(resize3d).observe(holder);
+    }catch(e){holder=null;return false;}
+    return true;
+  }
+  function resize3d(){
+    if(!renderer||!holder)return;
+    const w=holder.clientWidth||1,h=holder.clientHeight||1;
+    renderer.setSize(w,h,false);camera3d.aspect=w/h;camera3d.updateProjectionMatrix();
+  }
+  function frame3d(){
+    if(mode!=='3d'||!active)return;
+    controls3d.update();renderer.render(scene3d,camera3d);
+    raf=requestAnimationFrame(frame3d);
+  }
+  // Height colouring: blue at ground level through green to red at 1.5 m+.
+  function cloudColors(count,zs){
+    const colours=new Float32Array(count*3),mix=(a,b,t)=>a+(b-a)*Math.max(0,Math.min(1,t));
+    const low=[0.25,0.45,0.85],mid=[0.25,0.75,0.45],high=[0.95,0.3,0.2];
+    for(let i=0;i<count;i++){
+      const t=zs[i]/1.5,from=t<1?low:mid,to=t<1?mid:high,u=t<1?t:t-1;
+      colours[i*3]=mix(from[0],to[0],u);colours[i*3+1]=mix(from[1],to[1],u);colours[i*3+2]=mix(from[2],to[2],u);
+    }
+    return colours;
+  }
+  async function poll3d(){
+    if(mode!=='3d'||!active||document.hidden)return;
+    try{
+      const response=await fetch('/api/outdoor/clouds',{cache:'no-store'});
+      const data=await response.json();if(!response.ok)throw Error(data.detail||data.error||response.statusText);
+      const raw=atob(data.points_b64),bytes=new Uint8Array(raw.length);
+      for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+      const xyz=new Float32Array(bytes.buffer,bytes.byteOffset,Math.floor(raw.length/4));
+      const count=data.count,positions=xyz.slice(0,count*3);
+      const zs=new Float32Array(count);for(let i=0;i<count;i++)zs[i]=positions[i*3+2];
+      cloudGeo.setAttribute('position',new THREE.BufferAttribute(positions,3));
+      cloudGeo.setAttribute('color',new THREE.BufferAttribute(cloudColors(count,zs),3));
+      cloudGeo.computeBoundingSphere();cloudError='';
+    }catch(e){cloudError=tr('cloudUnavailable')+(e.name==='AbortError'?'':': '+e.message);}
+    if(mode==='3d'&&active&&!document.hidden)cloudTimer=setTimeout(poll3d,1000);
+  }
+  function sync3d(){
+    if(!active){
+      if(raf){cancelAnimationFrame(raf);raf=null;}
+      if(cloudTimer){clearTimeout(cloudTimer);cloudTimer=null;}
+      return;
+    }
+    const is3d=mode==='3d';
+    svg.hidden=is3d;
+    view3d.classList.toggle('primary',is3d);
+    view3d.disabled=is3d&&!ensure3d();
+    if(holder)holder.hidden=!is3d;
+    if(is3d&&!holder){view3d.title=tr('cloudUnavailable');}
+    if(is3d&&holder){
+      resize3d();
+      if(!raf)raf=requestAnimationFrame(frame3d);
+      if(!cloudTimer)poll3d();
+      status.textContent=cloudError||tr('cloudWaiting');
+    }else{
+      if(raf){cancelAnimationFrame(raf);raf=null;}
+      if(cloudTimer){clearTimeout(cloudTimer);cloudTimer=null;}
+      draw();
+    }
+  }
+
   function update(){
     clearInterval(clock);
     keys.forEach(key=>{const l=layers[key];clearTimeout(l.timer);if(active&&!document.hidden)l.poll();else l.controller?.abort();});
     if(active&&!document.hidden){clock=setInterval(draw,250);draw();}
+    sync3d();
   }
   document.addEventListener('visibilitychange',update);
   return {setActive(value){if(value===active)return;active=value;container.hidden=!value;update();}};

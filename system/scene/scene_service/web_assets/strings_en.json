@@ -343,5 +343,8 @@
   "outdoor.panZoom": "Drag to pan / scroll to zoom",
   "outdoor.mapOverlay": "Overlay in map frame",
   "outdoor.frameUnaligned": "Transform missing or stale; layer hidden",
-  "outdoor.overlayLegend": "Purple: global obstacles · Cyan: local obstacles · Yellow: execution path · Gray: unknown · Read only"
+  "outdoor.overlayLegend": "Purple: global obstacles · Cyan: local obstacles · Yellow: execution path · Gray: unknown · Read only",
+  "outdoor.view3dCloud": "3D cloud",
+  "outdoor.cloudWaiting": "Waiting for the lidar cloud…",
+  "outdoor.cloudUnavailable": "3D cloud unavailable"
 }

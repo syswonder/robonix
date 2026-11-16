@@ -58,6 +58,30 @@ def test_untyped_load_infers_map_type_from_registration(scene, monkeypatch):
     assert client.post('/api/maps/load',json=dict(map_id='outside',map_type='indoor')).status_code==409
 
 
+def test_cloud_http_facade_is_read_only_and_failures_are_independent(scene):
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    sys.path.insert(0, str(Path(__file__).parents[4] / 'service-navigation-outdoor-rbnx'))
+    from outdoor_nav.scene import SceneNavigation
+    from outdoor_nav.http import ApiError
+    from scene_service.outdoor import OutdoorScene
+    from starlette.applications import Starlette
+    client,backend,binding,annotations,calls=scene
+    reader=SceneNavigation(execution_enabled=False)
+    def clouds():
+        raise ApiError(503,'Waiting for the lidar cloud')
+    reader.clouds=clouds
+    facade=OutdoorScene(None,binding,None,None,None,None,{},reader)
+    cloud_client=TestClient(Starlette(routes=facade.routes(lambda:'')))
+    assert cloud_client.get('/api/outdoor/clouds').status_code==503
+    reader.clouds=lambda:{'ok':True,'frame_id':'base_link','count':3,'points_b64':'AAAA'}
+    assert cloud_client.get('/api/outdoor/clouds').json()['count']==3
+    facade_none=OutdoorScene(None,binding,None,None,None,None,{},None)
+    none_client=TestClient(Starlette(routes=facade_none.routes(lambda:'')))
+    assert none_client.get('/api/outdoor/clouds').status_code==503
+
+
 def test_recording_and_unknown_state_block_switches(scene):
     client,backend,binding,annotations,calls=scene
     backend['recording']=True
@@ -119,7 +143,10 @@ def test_collision_and_external_version_change_hide_stale_semantics(scene):
 
 
 def test_costmap_http_facade_is_read_only_and_failures_are_independent(scene):
+    import sys
+    from pathlib import Path
     from types import SimpleNamespace
+    sys.path.insert(0, str(Path(__file__).parents[4] / 'service-navigation-outdoor-rbnx'))
     from outdoor_nav.scene import SceneNavigation
     from outdoor_nav.http import ApiError
     from scene_service.outdoor import OutdoorScene
