@@ -153,6 +153,9 @@ struct CapabilityProviderState {
     /// portable across the provider's / consumer's filesystem boundaries.
     capability_md: String,
     last_heartbeat_ms: u64,
+    /// Local Chronos steady time for eviction; never published as reference time.
+    #[serde(skip)]
+    last_heartbeat_steady_ns: u64,
     endpoints: Vec<DeclaredEndpoint>,
     /// Last value reported by SetLifecycleState. Providers remain REGISTERED
     /// until their lifecycle Driver explicitly publishes a transition.
@@ -375,11 +378,26 @@ impl AtlasRegistry {
 }
 
 impl AtlasRegistry {
-    pub fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+    /// Read Chronos reference milliseconds, rejecting read or quality failure.
+    pub fn now_ms() -> Result<u64, Status> {
+        Ok(Self::snapshot()?.0)
+    }
+
+    /// Pair reference milliseconds with local steady nanoseconds before mutation.
+    /// Unverified Linux time remains usable; unavailable or negative time does not.
+    fn snapshot() -> Result<(u64, u64), Status> {
+        let snapshot = robonix_chronos_clock::snapshot()
+            .map_err(|error| Status::unavailable(format!("Chronos time read failed: {error}")))?;
+        if !snapshot.reference.available {
+            return Err(Status::unavailable(format!(
+                "Chronos reference unavailable: {}",
+                snapshot.reference.reason
+            )));
+        }
+        let reference_ns = u64::try_from(snapshot.reference.timestamp_ns).map_err(|error| {
+            Status::unavailable(format!("Chronos timestamp out of range: {error}"))
+        })?;
+        Ok((reference_ns / 1_000_000, snapshot.steady.timestamp_ns))
     }
 
     fn assign_id() -> String {
@@ -437,6 +455,7 @@ impl AtlasRegistry {
                     existing.kind, kind
                 )));
             }
+            let (now_ms, steady_ns) = Self::snapshot()?;
             // Same-kind takeover. Drop the previous provider's endpoints
             // and pushed state; the caller will redeclare what it owns.
             // Channels targeting dropped Capabilities are also auto-closed.
@@ -445,7 +464,8 @@ impl AtlasRegistry {
             existing.registration_id = Uuid::new_v4().to_string();
             existing.capability_md_path = capability_md_path.trim().to_string();
             existing.capability_md = capability_md.to_string();
-            existing.last_heartbeat_ms = Self::now_ms();
+            existing.last_heartbeat_ms = now_ms;
+            existing.last_heartbeat_steady_ns = steady_ns;
             existing.endpoints.clear();
             existing.pushed_state = None;
             existing.state_detail.clear();
@@ -456,6 +476,7 @@ impl AtlasRegistry {
             );
             return Ok(provider_id);
         }
+        let (now_ms, steady_ns) = Self::snapshot()?;
         state.providers.insert(
             provider_id.clone(),
             CapabilityProviderState {
@@ -465,7 +486,8 @@ impl AtlasRegistry {
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
                 capability_md: capability_md.to_string(),
-                last_heartbeat_ms: Self::now_ms(),
+                last_heartbeat_ms: now_ms,
+                last_heartbeat_steady_ns: steady_ns,
                 endpoints: Vec::new(),
                 pushed_state: None,
                 state_detail: String::new(),
@@ -544,17 +566,19 @@ impl AtlasRegistry {
         Ok(prev)
     }
 
-    /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
+    /// Update reference and steady heartbeat times together, returning reference ms.
+    /// Clock failure returns UNAVAILABLE without changing either time.
     pub async fn heartbeat(&self, provider_id: &str) -> Result<u64, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
-        let now = Self::now_ms();
         let mut state = self.inner.write().await;
         let provider = state
             .providers
             .get_mut(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
-        provider.last_heartbeat_ms = now;
-        Ok(now)
+        let (now_ms, steady_ns) = Self::snapshot()?;
+        provider.last_heartbeat_ms = now_ms;
+        provider.last_heartbeat_steady_ns = steady_ns;
+        Ok(now_ms)
     }
 
     /// Declare ONE transport for ONE contract on a registered provider. Returns
@@ -790,6 +814,7 @@ impl AtlasRegistry {
         let params: pb::TransportParams = (&ep.params).into();
         let time_descriptor = ep.time_descriptor.as_ref().map(Into::into);
 
+        let opened_at_ms = Self::now_ms()?;
         let channel_id = format!("ch-{}", Uuid::new_v4().simple());
         state.channels.insert(
             channel_id.clone(),
@@ -800,7 +825,7 @@ impl AtlasRegistry {
                 contract_id: contract_id.clone(),
                 transport,
                 endpoint: endpoint.clone(),
-                opened_at_ms: Self::now_ms(),
+                opened_at_ms,
             },
         );
         info!(
@@ -1026,6 +1051,115 @@ fn resolve_endpoint(
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    /// A steady regression stops eviction and its server before any state changes.
+    async fn eviction_regression_is_atomic_and_stops_server() {
+        let registry = Arc::new(AtlasRegistry::default());
+        registry
+            .register(
+                "clock-test",
+                pb::Kind::Service,
+                "robonix/service/test",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "clock-test",
+                "robonix/service/test/stream",
+                Transport::Ros2,
+                "/clock_test",
+                ros2_params(),
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .connect(
+                "consumer",
+                "clock-test",
+                "robonix/service/test/stream",
+                Transport::Ros2,
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .write()
+            .await
+            .providers
+            .get_mut("clock-test")
+            .unwrap()
+            .last_heartbeat_steady_ns = u64::MAX;
+        let before = registry.inspect_json().await.unwrap();
+        let error = eviction_loop(registry.clone(), 1, 1, 1).await.unwrap_err();
+        assert!(format!("{error:#}").contains("steady time regressed"));
+        assert_eq!(registry.inspect_json().await.unwrap(), before);
+
+        // Disabled eviction is an explicit deployment setting, not a failure.
+        if read_env_u64(
+            "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
+            DEFAULT_HEARTBEAT_TIMEOUT_MS,
+        ) != 0
+        {
+            let interval_ms = read_env_u64(
+                "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
+                DEFAULT_EVICTION_INTERVAL_MS,
+            );
+            tokio::time::resume();
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = reserved.local_addr().unwrap();
+            drop(reserved);
+            let server = tokio::spawn(serve_atlas(registry.clone(), address));
+            let mut client = crate::client::AtlasClient::connect_with_retry(
+                address.to_string(),
+                50,
+                std::time::Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+            // Establish a real HTTP/2 connection before the eviction timer fires.
+            client
+                .inner()
+                .query(pb::QueryRequest::default())
+                .await
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(
+                std::time::Duration::from_millis(interval_ms)
+                    .saturating_add(std::time::Duration::from_millis(1)),
+            )
+            .await;
+            // Network shutdown needs real I/O readiness, not automatic timer jumps.
+            tokio::time::resume();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(6), server)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("steady time regressed"));
+            assert!(!format!("{error:#}").contains("shutdown timed out"));
+            assert_eq!(registry.inspect_json().await.unwrap(), before);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    client.heartbeat("clock-test")
+                )
+                .await
+                .unwrap()
+                .is_err(),
+                "established connections must close"
+            );
+        }
+        assert_eq!(
+            Arc::strong_count(&registry),
+            1,
+            "eviction must release its registry"
+        );
+    }
 
     fn ros2_params() -> pb::TransportParams {
         pb::TransportParams {
@@ -1711,6 +1845,7 @@ cross_namespace = true
                 capability_md_path: String::new(),
                 capability_md: String::new(),
                 last_heartbeat_ms: 0,
+                last_heartbeat_steady_ns: 0,
                 endpoints: vec![DeclaredEndpoint {
                     contract_id: "robonix/primitive/chassis/odom".to_string(),
                     transport: Transport::Ros2,
@@ -1974,10 +2109,10 @@ async fn eviction_loop(
     timeout_ms: u64,
     gc_after_ms: u64,
     interval_ms: u64,
-) {
+) -> Result<()> {
     if timeout_ms == 0 {
         info!("[atlas] heartbeat eviction disabled (timeout=0)");
-        return;
+        return Ok(());
     }
     info!(
         "[atlas] heartbeat eviction: terminate-after={timeout_ms}ms \
@@ -1986,16 +2121,29 @@ async fn eviction_loop(
     let interval = std::time::Duration::from_millis(interval_ms);
     loop {
         tokio::time::sleep(interval).await;
-        let now = AtlasRegistry::now_ms();
         let mut state = registry.inner.write().await;
+        let now_ns = robonix_chronos_clock::steady_time()
+            .context("Chronos steady time read failed during heartbeat eviction")?
+            .timestamp_ns;
+        // Validate all ages before any lifecycle/channel mutation. A regression
+        // must stop this operation, rather than treating a provider as fresh.
+        let ages_ms: HashMap<String, u64> = state
+            .providers
+            .iter()
+            .map(|(id, provider)| {
+                let elapsed_ns = now_ns
+                    .checked_sub(provider.last_heartbeat_steady_ns)
+                    .context("Chronos steady time regressed during heartbeat eviction")?;
+                Ok((id.clone(), elapsed_ns / 1_000_000))
+            })
+            .collect::<Result<_>>()?;
 
         // Phase 1: lapsed → TERMINATED.
         let lapsed: Vec<String> = state
             .providers
             .iter()
-            .filter(|(_, provider)| {
-                now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms
-                    && provider.state() != pb::LifecycleState::StateTerminated
+            .filter(|(id, provider)| {
+                ages_ms[*id] > timeout_ms && provider.state() != pb::LifecycleState::StateTerminated
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -2015,9 +2163,9 @@ async fn eviction_loop(
         let stale: Vec<String> = state
             .providers
             .iter()
-            .filter(|(_, provider)| {
+            .filter(|(id, provider)| {
                 provider.state() == pb::LifecycleState::StateTerminated
-                    && now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms + gc_after_ms
+                    && ages_ms[*id] > timeout_ms.saturating_add(gc_after_ms)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -2029,9 +2177,9 @@ async fn eviction_loop(
 }
 
 /// Start the Atlas gRPC server on `listen` using the given registry.
-/// Spawns a background heartbeat-eviction task and exposes BOTH the new
-/// `Atlas` service and the deprecated `RobonixRuntime` shim on the same
-/// gRPC port.
+/// Supervise heartbeat eviction alongside the Atlas service. Steady clock
+/// failure or eviction task failure stops the server with an error. Dropping
+/// this future also cancels eviction, so it cannot retain an orphan registry.
 pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
     let timeout_ms = read_env_u64(
         "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
@@ -2045,7 +2193,8 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
         "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
         DEFAULT_EVICTION_INTERVAL_MS,
     );
-    let _eviction_task = tokio::spawn(eviction_loop(
+    let mut eviction_tasks = tokio::task::JoinSet::new();
+    eviction_tasks.spawn(eviction_loop(
         Arc::clone(&registry),
         timeout_ms,
         gc_after_ms,
@@ -2055,10 +2204,29 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
     let svc = AtlasService::new(Arc::clone(&registry));
 
     info!("[atlas] gRPC listening on {listen}");
-    tonic::transport::Server::builder()
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let server = tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))
-        .serve(listen)
-        .await
-        .context("Atlas server failed")?;
-    Ok(())
+        .serve_with_shutdown(listen, async {
+            let _ = stopped.await;
+        });
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result.context("Atlas server failed"),
+        result = eviction_tasks.join_next(), if timeout_ms != 0 => {
+            let failure = match result {
+                Some(Ok(Err(error))) => error,
+                Some(Err(error)) => anyhow::Error::from(error).context("Atlas heartbeat eviction task failed"),
+                _ => anyhow::anyhow!("Atlas heartbeat eviction stopped unexpectedly"),
+            };
+            let _ = shutdown.send(());
+            // Drain accepted connections so embedded callers cannot keep using
+            // a registry whose mandatory eviction task has stopped.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+                Ok(Ok(())) => Err(failure),
+                Ok(Err(error)) => Err(failure.context(format!("Atlas server shutdown also failed: {error}"))),
+                Err(_) => Err(failure.context("Atlas server shutdown timed out")),
+            }
+        }
+    }
 }
