@@ -64,7 +64,8 @@ pub fn spawn_module_health_poller(
             for target in &targets {
                 let was_available = available.get(&target.label).copied().unwrap_or(false);
                 match poll_target(&mut atlas, &consumer_id, &svc, target).await {
-                    Ok(success) => {
+                    Ok(None) => continue,
+                    Ok(Some(success)) => {
                         if !was_available {
                             log::info!(
                                 "[vitals] module health poll connected: {} ({})",
@@ -96,6 +97,10 @@ pub fn spawn_module_health_poller(
                                     target.expected.policy,
                                 )
                                 .await
+                                .unwrap_or_else(|error| {
+                                    log::error!("[vitals] stale check time read failed: {error}");
+                                    None
+                                })
                             {
                                 log_module_event(&event, target.expected.policy);
                             }
@@ -108,6 +113,12 @@ pub fn spawn_module_health_poller(
                                 && let Some(event) = svc
                                     .synthesize_expected_module_unavailable(&target.expected)
                                     .await
+                                    .unwrap_or_else(|error| {
+                                        log::error!(
+                                            "[vitals] missing module time read failed: {error}"
+                                        );
+                                        None
+                                    })
                             {
                                 log_module_event(&event, target.expected.policy);
                             }
@@ -180,7 +191,7 @@ async fn poll_target(
     consumer_id: &str,
     svc: &VitalsServiceImpl,
     target: &ModuleHealthPollTarget,
-) -> Result<ModuleHealthPollSuccess> {
+) -> Result<Option<ModuleHealthPollSuccess>> {
     let (channel_id, provider_id, channel) =
         atlas_client::connect_to_capability(atlas, consumer_id, &target.contract_id)
             .await
@@ -197,11 +208,20 @@ async fn poll_target(
             .map(module_key_for)
             .unwrap_or_else(|| provider_id.clone());
 
-        let event = svc.ingest_module_health_report(report).await.map_err(|e| {
-            anyhow::anyhow!("ingest module health from provider '{provider_id}': {e}")
-        })?;
+        let event = match svc.ingest_module_health_report(report).await {
+            Ok(event) => event,
+            Err(error) if error.downcast_ref::<std::io::Error>().is_some() => {
+                log::error!("[vitals] module health time read failed: {error}");
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error.context(format!(
+                    "ingest module health from provider '{provider_id}'"
+                )));
+            }
+        };
 
-        Ok::<_, anyhow::Error>(ModuleHealthPollSuccess { module_key, event })
+        Ok::<_, anyhow::Error>(Some(ModuleHealthPollSuccess { module_key, event }))
     }
     .await;
 

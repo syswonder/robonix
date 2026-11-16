@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One session's transcript file, and how much of the session has already been
 /// written to it.
@@ -65,8 +64,8 @@ impl Transcript {
     }
 
     /// Append every history message not yet in the file, then the task state
-    /// if it changed.
-    pub fn record(&mut self, history: &[Message], task: &TaskTable) {
+    /// if it changed. Clock failures return an error with records retained for retry.
+    pub fn record(&mut self, history: &[Message], task: &TaskTable) -> std::io::Result<()> {
         // History only shrinks through compaction, which resets `written`;
         // clamp anyway so a shorter history never skips new messages.
         let start = self.written.min(history.len());
@@ -75,10 +74,10 @@ impl Transcript {
         self.written = history.len();
         if &self.task != task {
             self.pending
-                .push(json!({ "ts": now(), "kind": "task_state", "task": task }));
+                .push(json!({ "kind": "task_state", "task": task }));
             self.task = task.clone();
         }
-        self.flush();
+        self.flush()
     }
 
     /// Note a compaction. Call [`Transcript::record`] first so the evicted
@@ -89,9 +88,8 @@ impl Transcript {
         evicted: usize,
         pinned: usize,
         summarized: bool,
-    ) {
+    ) -> std::io::Result<()> {
         let record = json!({
-            "ts": now(),
             "kind": "compaction",
             "evicted_messages": evicted,
             "pinned_messages": pinned,
@@ -100,7 +98,7 @@ impl Transcript {
         });
         self.pending.push(record);
         self.written = history.len();
-        self.flush();
+        self.flush()
     }
 
     /// Rebuild a session from its transcript, or `None` when it has none.
@@ -117,14 +115,21 @@ impl Transcript {
     /// All records go out in one append. If it fails, the file is cut back to
     /// its previous length so no half-written line or duplicate is left, the
     /// failure is logged, and the records stay queued for the next call; a
-    /// turn never stops for it. A file that does not end in a newline (a crash
+    /// turn never stops for file I/O failures. Clock failures propagate without
+    /// dropping pending records. A file that does not end in a newline (a crash
     /// mid-line) gets one first, so the fragment stays a line of its own that
     /// replay skips.
-    fn flush(&mut self) {
+    fn flush(&mut self) -> std::io::Result<()> {
         if self.pending.is_empty() {
-            return;
+            return Ok(());
         }
-        let result = self.try_append();
+        for record in &mut self.pending {
+            if record.get("ts").is_none() {
+                record["ts"] = Value::String(now()?);
+            }
+        }
+        let header_time = now()?;
+        let result = self.try_append(&header_time);
         match result {
             Ok(()) => self.pending.clear(),
             Err(error) => warn!(
@@ -133,9 +138,11 @@ impl Transcript {
                 self.pending.len()
             ),
         }
+        Ok(())
     }
 
-    fn try_append(&self) -> std::io::Result<()> {
+    /// Append a complete batch and preserve the previous file length on write failure.
+    fn try_append(&self, header_time: &str) -> std::io::Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -148,7 +155,7 @@ impl Transcript {
         let mut text = String::new();
         if length == 0 {
             let header = json!({
-                "ts": now(),
+                "ts": header_time,
                 "kind": "session",
                 "session_id": self.session_id,
                 "pilot_version": env!("CARGO_PKG_VERSION"),
@@ -251,8 +258,9 @@ fn message_fields(message: &Message) -> Value {
     fields
 }
 
+/// Queue message fields; flush assigns timestamps before writing any records.
 fn message_record(message: &Message) -> Value {
-    let mut record = json!({ "ts": now(), "kind": "message" });
+    let mut record = json!({ "kind": "message" });
     if let (Some(record), Value::Object(fields)) = (record.as_object_mut(), message_fields(message))
     {
         record.extend(fields);
@@ -265,16 +273,62 @@ fn parse_message(record: &Value) -> Option<Message> {
     serde_json::from_value(record.clone()).ok()
 }
 
-fn now() -> String {
-    let ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    ts_fmt(ns)
+fn now() -> std::io::Result<String> {
+    Ok(ts_fmt(robonix_chronos_clock::wall_timestamp_ns()?))
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    mod clock_faults {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../chronos/clock/tests/support/mod.rs"
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    /// Retain queued messages on clock errors and accept valid timestamps with poor quality.
+    fn clock_errors_keep_transcript_records_for_retry() {
+        clock_faults::run_case(
+            "transcript::tests::clock_errors_keep_transcript_records_for_retry",
+            || {
+                for mode in [1, 2] {
+                    clock_faults::mode(0);
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut transcript = transcript_in(dir.path());
+                    let history = vec![Message::user("preserve this message")];
+                    clock_faults::mode(mode);
+                    assert!(transcript.record(&history, &TaskTable::default()).is_err());
+                    assert_eq!(transcript.pending.len(), 1);
+                    assert!(!transcript.path.exists());
+                    clock_faults::mode(0);
+                    transcript.record(&history, &TaskTable::default()).unwrap();
+                    assert!(transcript.pending.is_empty());
+                    assert_eq!(
+                        contents(&replay(&transcript.path).unwrap().history),
+                        ["preserve this message"]
+                    );
+                    let text = std::fs::read_to_string(&transcript.path).unwrap();
+                    assert_eq!(text.matches("preserve this message").count(), 1);
+                }
+                let dir = tempfile::tempdir().unwrap();
+                let mut transcript = transcript_in(dir.path());
+                clock_faults::mode(4);
+                transcript
+                    .record(&[Message::user("quality warning")], &TaskTable::default())
+                    .unwrap();
+                assert!(transcript.pending.is_empty());
+                clock_faults::mode(0);
+                assert_eq!(
+                    contents(&replay(&transcript.path).unwrap().history),
+                    ["quality warning"]
+                );
+            },
+        );
+    }
+
     use super::*;
 
     fn transcript_in(dir: &std::path::Path) -> Transcript {
@@ -302,16 +356,16 @@ mod tests {
         task.receive("fetch the cup");
 
         let mut history = vec![Message::user("task"), Message::assistant("step 1")];
-        transcript.record(&history, &task);
+        transcript.record(&history, &task).unwrap();
         history.push(Message::user_with_image("look", "aGVsbG8=".to_string()));
-        transcript.record(&history, &task);
-        transcript.record(&history, &task);
+        transcript.record(&history, &task).unwrap();
+        transcript.record(&history, &task).unwrap();
 
         // Compaction replaces all but the last message with a summary.
         history = vec![Message::user("summary"), Message::user("look")];
-        transcript.record_compaction(&history, 2, 0, true);
+        transcript.record_compaction(&history, 2, 0, true).unwrap();
         history.push(Message::assistant("step 2"));
-        transcript.record(&history, &task);
+        transcript.record(&history, &task).unwrap();
 
         let text = std::fs::read_to_string(&transcript.path).unwrap();
         let kinds: Vec<String> = text
@@ -365,9 +419,9 @@ mod tests {
             pending: Vec::new(),
         };
         let mut history = vec![Message::user("one")];
-        transcript.record(&history, &TaskTable::default());
+        transcript.record(&history, &TaskTable::default()).unwrap();
         history = vec![Message::user("summary")];
-        transcript.record_compaction(&history, 1, 0, false);
+        transcript.record_compaction(&history, 1, 0, false).unwrap();
         assert_eq!(transcript.pending.len(), 2);
 
         // The disk recovers; an earlier crash left half a line behind.
@@ -375,7 +429,7 @@ mod tests {
         std::fs::create_dir(&blocked).unwrap();
         std::fs::write(&transcript.path, "{\"kind\":\"session\"}\n{\"kind\":\"mess").unwrap();
         history.push(Message::assistant("two"));
-        transcript.record(&history, &TaskTable::default());
+        transcript.record(&history, &TaskTable::default()).unwrap();
         assert!(transcript.pending.is_empty());
 
         let restored = replay(&transcript.path).unwrap();

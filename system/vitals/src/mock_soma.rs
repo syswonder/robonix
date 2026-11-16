@@ -33,7 +33,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -277,17 +277,15 @@ impl MockSomaService {
         }
     }
 
-    async fn next_snapshot(&self) -> SomaHealthSnapshot {
-        let seq = {
-            let mut guard = self.seq.write().await;
-            *guard += 1;
-            *guard
-        };
+    async fn next_snapshot(&self) -> std::io::Result<SomaHealthSnapshot> {
         let arm_data = match &self.arm_bridge {
             Some(bridge) => bridge.collect().await,
             None => None,
         };
-        generate_snapshot(self.scenario, seq, arm_data.as_ref())
+        let mut seq = self.seq.write().await;
+        let snapshot = generate_snapshot(self.scenario, *seq + 1, arm_data.as_ref())?;
+        *seq += 1;
+        Ok(snapshot)
     }
 }
 
@@ -511,7 +509,9 @@ impl RobonixSystemSomaGetHealth for MockSomaService {
         _request: Request<GetHealthRequest>,
     ) -> Result<Response<GetHealthResponse>, Status> {
         Ok(Response::new(GetHealthResponse {
-            snapshot: Some(self.next_snapshot().await),
+            snapshot: Some(self.next_snapshot().await.map_err(|error| {
+                Status::unavailable(format!("Chronos time read failed: {error}"))
+            })?),
         }))
     }
 }
@@ -531,8 +531,11 @@ impl RobonixSystemSomaHealth for MockSomaService {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let snapshot = service.next_snapshot().await;
-                if tx.send(Ok(snapshot)).await.is_err() {
+                let snapshot = service.next_snapshot().await.map_err(|error| {
+                    Status::unavailable(format!("Chronos time read failed: {error}"))
+                });
+                let failed = snapshot.is_err();
+                if tx.send(snapshot).await.is_err() || failed {
                     break;
                 }
             }
@@ -548,8 +551,8 @@ pub fn generate_snapshot(
     scenario: MockScenario,
     seq: u64,
     arm_data: Option<&ArmData>,
-) -> SomaHealthSnapshot {
-    let now = monotonic_ns();
+) -> std::io::Result<SomaHealthSnapshot> {
+    let now = monotonic_ns()?;
     let now_i64 = now as i64;
     let ramp_enabled = matches!(scenario, MockScenario::Ramp | MockScenario::Mixed);
     let fault_enabled = matches!(scenario, MockScenario::Fault | MockScenario::Mixed);
@@ -809,7 +812,7 @@ pub fn generate_snapshot(
     let motion_allowed = safety_aggregate == SAFETY_NORMAL;
     let motor_power_allowed = safety_aggregate == SAFETY_NORMAL;
 
-    SomaHealthSnapshot {
+    Ok(SomaHealthSnapshot {
         schema_version: SCHEMA_VERSION,
         body_id: body_id.to_string(),
         seq,
@@ -866,7 +869,7 @@ pub fn generate_snapshot(
                 "fan1_input",
             ),
         ],
-    }
+    })
 }
 
 fn component(
@@ -936,9 +939,9 @@ fn scalar(value: f64, unit: &str) -> Scalar {
     }
 }
 
-fn monotonic_ns() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+fn monotonic_ns() -> std::io::Result<u64> {
+    static START: OnceLock<u64> = OnceLock::new();
+    crate::clock::monotonic_ns(&START)
 }
 
 #[allow(dead_code)]
@@ -949,6 +952,33 @@ fn _health_ok() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_clock_failure_is_reported_and_recovers() {
+        use crate::clock::test_support::{mode, run_case};
+        run_case(
+            "mock_soma::tests::snapshot_clock_failure_is_reported_and_recovers",
+            || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let service = MockSomaService::new(
+                        MockScenario::Normal,
+                        Duration::from_millis(100),
+                        None,
+                    );
+                    mode(16);
+                    assert!(service.next_snapshot().await.is_err());
+                    assert_eq!(*service.seq.read().await, 0);
+                    let snapshot = service.next_snapshot().await.unwrap();
+                    assert_eq!(snapshot.seq, 1);
+                    assert!(snapshot.faults.is_empty());
+                });
+            },
+        );
+    }
     use crate::CMD_SHUTDOWN;
     use crate::pb::contracts::robonix_lifecycle_driver_client::RobonixLifecycleDriverClient;
     use crate::pb::lifecycle::DriverRequest;
@@ -1081,7 +1111,7 @@ mod tests {
 
     #[test]
     fn normal_snapshot_has_one_arm() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None).unwrap();
         // body + computer_jetson + cpu + gpu + arm + battery_main = 6
         // + 6 joints = 12
         assert_eq!(snapshot.components.len(), 12);
@@ -1097,7 +1127,7 @@ mod tests {
 
     #[test]
     fn fault_scenario_produces_fault_at_sequence_4() {
-        let snapshot = generate_snapshot(MockScenario::Fault, 4, None);
+        let snapshot = generate_snapshot(MockScenario::Fault, 4, None).unwrap();
         assert!(!snapshot.faults.is_empty());
         assert!(snapshot.faults.iter().any(|f| f.fault_id == "overcurrent"));
         let j3 = snapshot
@@ -1110,7 +1140,7 @@ mod tests {
 
     #[test]
     fn toggle_scenario_disables_joint_6_at_sequence_4() {
-        let snapshot = generate_snapshot(MockScenario::Toggle, 4, None);
+        let snapshot = generate_snapshot(MockScenario::Toggle, 4, None).unwrap();
         let j6 = snapshot
             .actuators
             .iter()
@@ -1130,7 +1160,7 @@ mod tests {
             MockScenario::Mixed,
         ] {
             for seq in 1..=12 {
-                let s = generate_snapshot(scenario, seq, None);
+                let s = generate_snapshot(scenario, seq, None).unwrap();
                 // Every snapshot must have 12 components and exactly 6 actuators.
                 assert_eq!(
                     s.components.len(),
@@ -1180,7 +1210,7 @@ mod tests {
     #[test]
     fn normal_scenario_never_produces_faults() {
         for seq in 1..=20 {
-            let s = generate_snapshot(MockScenario::Normal, seq, None);
+            let s = generate_snapshot(MockScenario::Normal, seq, None).unwrap();
             assert!(s.faults.is_empty(), "Normal seq={}: unexpected faults", seq);
             for a in &s.actuators {
                 assert!(a.communication_ok, "Normal seq={}: comm not ok", seq);
@@ -1194,6 +1224,7 @@ mod tests {
     #[test]
     fn ramp_scenario_joint_1_temp_increases() {
         let t1 = generate_snapshot(MockScenario::Ramp, 1, None)
+            .unwrap()
             .actuators
             .iter()
             .find(|a| a.component_id == "body/arm/joint_1")
@@ -1203,6 +1234,7 @@ mod tests {
             .unwrap()
             .value;
         let t22 = generate_snapshot(MockScenario::Ramp, 22, None)
+            .unwrap()
             .actuators
             .iter()
             .find(|a| a.component_id == "body/arm/joint_1")
@@ -1212,6 +1244,7 @@ mod tests {
             .unwrap()
             .value;
         let t30 = generate_snapshot(MockScenario::Ramp, 30, None)
+            .unwrap()
             .actuators
             .iter()
             .find(|a| a.component_id == "body/arm/joint_1")
@@ -1229,6 +1262,7 @@ mod tests {
         );
         // Seq 31 restarts ramp (seq 1 is 40+1.6*0=40, seq 31 wraps same way).
         let t31 = generate_snapshot(MockScenario::Ramp, 31, None)
+            .unwrap()
             .actuators
             .iter()
             .find(|a| a.component_id == "body/arm/joint_1")
@@ -1244,7 +1278,7 @@ mod tests {
     #[test]
     fn fault_scenario_joint_3_toggles_periodically() {
         for seq in 1..=20 {
-            let s = generate_snapshot(MockScenario::Fault, seq, None);
+            let s = generate_snapshot(MockScenario::Fault, seq, None).unwrap();
             let j3 = s
                 .actuators
                 .iter()
@@ -1270,7 +1304,7 @@ mod tests {
     #[test]
     fn toggle_scenario_joint_6_toggles_periodically() {
         for seq in 1..=20 {
-            let s = generate_snapshot(MockScenario::Toggle, seq, None);
+            let s = generate_snapshot(MockScenario::Toggle, seq, None).unwrap();
             let j6 = s
                 .actuators
                 .iter()
@@ -1289,7 +1323,7 @@ mod tests {
     #[test]
     fn mixed_scenario_combines_all_behaviors() {
         // Seq 4: fault active + toggle disabled + ramp building up.
-        let s4 = generate_snapshot(MockScenario::Mixed, 4, None);
+        let s4 = generate_snapshot(MockScenario::Mixed, 4, None).unwrap();
         assert!(s4.faults.iter().any(|f| f.fault_id == "overcurrent"));
         let j3 = s4
             .actuators
@@ -1305,7 +1339,7 @@ mod tests {
         assert!(!j6.torque_enabled);
 
         // Seq 2: no faults, no toggle, ramp at early stage.
-        let s2 = generate_snapshot(MockScenario::Mixed, 2, None);
+        let s2 = generate_snapshot(MockScenario::Mixed, 2, None).unwrap();
         assert!(s2.faults.is_empty());
     }
 }
