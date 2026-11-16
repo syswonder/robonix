@@ -7,9 +7,11 @@ description = "Chronos reference and steady clock readings without system servic
 
 [features]
 python = ["dep:pyo3"]
+serde = ["dep:serde"]
 
 [dependencies]
 pyo3 = { version = "0.29.3", optional = true, features = ["abi3-py310"] }
+serde = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
