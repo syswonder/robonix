@@ -175,3 +175,21 @@ Configuration:
   `log` key of `--config-json`, which `rbnx` fills from the manifest. Falls back
   to `SCRIBE_FILE_LEVEL`, then `info`. A standalone `--log` flag is accepted but
   not applied.
+
+Atlas reads reference timestamps and local steady time through the in-process
+[`robonix-chronos-clock`](../chronos/clock/README.md) library, without requiring
+a running Chronos service. Registration, takeover, heartbeat, and channel
+creation return `UNAVAILABLE` before mutating state if reference time cannot
+be read, is unavailable, or cannot fit the unsigned timestamp. Unverified Linux
+reference time is accepted. Heartbeat eviction uses steady time, so reference
+clock steps cannot expire or extend a provider's timeout. A steady read failure
+or regression stops Atlas with an error rather than leaving eviction disabled.
+`AtlasRegistry::now_ms()` now returns `Result<u64, tonic::Status>`.
+
+Heartbeat eviction settings are `ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS` (default
+90000; 0 disables eviction), `ROBONIX_ATLAS_GC_AFTER_TERMINATED_MS` (default
+600000), and `ROBONIX_ATLAS_EVICTION_INTERVAL_MS` (default 10000).
+
+Run `cargo test -p robonix-atlas --test clock_failures` on Linux with `cc` for
+clock failure, recovery and heartbeat expiry tests over real gRPC connections.
+Fault injection runs in a subprocess and does not change host time.
