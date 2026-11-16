@@ -17,5 +17,5 @@ steps:
             success: true
             args: {command: "echo robonix-ci-marker-bravo"}
             output:
-              text_regex: '^robonix-ci-marker-bravo\n?$'
+              text_regex: '^robonix-ci-marker-bravo\sexit code: 0$'
   - status: done
