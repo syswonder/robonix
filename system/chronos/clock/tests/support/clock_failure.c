@@ -23,6 +23,7 @@ int clock_gettime(clockid_t clock, struct timespec *value) {
     if (result == 0 && clock == CLOCK_REALTIME) {
         if (selected == 2) value->tv_sec = -1;
         if (selected == 8) value->tv_sec += 86400;
+        if (selected == 32) value->tv_sec -= 86400;
     }
     return result;
 }
