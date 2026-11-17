@@ -388,8 +388,27 @@ async fn main() -> Result<()> {
     // Start the gRPC server immediately so Vitals is ready before SOMA.
     // The SOMA connection retries in the background.
     {
+        let freshness = std::sync::Arc::new(tokio::sync::Mutex::new(
+            soma_ingest::SomaFreshnessTracker::default(),
+        ));
+        {
+            let freshness = std::sync::Arc::clone(&freshness);
+            let stale_svc = svc.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(100));
+                loop {
+                    tick.tick().await;
+                    let mut tracker = freshness.lock().await;
+                    let mut latest = stale_svc.latest_snapshot().await;
+                    if tracker.expire(&mut latest, Instant::now()) {
+                        stale_svc.update_snapshot(latest).await;
+                    }
+                }
+            });
+        }
         let svc_for_stream = svc.clone();
         let rules_for_stream = soma_rules.clone();
+        let freshness = std::sync::Arc::clone(&freshness);
         let mut reconnect_atlas = atlas.clone();
         let reconnect_consumer_id = cfg.id.clone();
         let reconnect_soma_endpoint = cfg.soma_endpoint.clone();
@@ -426,6 +445,8 @@ async fn main() -> Result<()> {
                                 &rules_for_stream,
                                 monotonic_ns(),
                             );
+                            let mut tracker = freshness.lock().await;
+                            let vitals = tracker.update(&snapshot, vitals, Instant::now());
                             svc_for_stream.update_snapshot(vitals).await;
                         }
                         Ok(None) => {

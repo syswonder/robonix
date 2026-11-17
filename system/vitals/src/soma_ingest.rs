@@ -12,6 +12,7 @@ use crate::pb::vitals::{BodyComponent, BodyHealth, ComponentHealth, PowerState, 
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tonic::transport::{Channel, Endpoint};
 
 /// Component health is nominal.
@@ -22,7 +23,106 @@ pub const HEALTH_WARN: u32 = 1;
 pub const HEALTH_ERROR: u32 = 2;
 /// Component data is stale (sensor / stream timed out).
 pub const HEALTH_STALE: u32 = 3;
+/// No health sample has been reported for the component.
+pub const HEALTH_UNKNOWN: u32 = 4;
 
+/// Keep the last known component states and expire them when Soma stops
+/// refreshing the health stream or omits a previously reported component.
+#[derive(Debug, Default)]
+pub struct SomaFreshnessTracker {
+    ttl: Duration,
+    last_signal_at: HashMap<String, Instant>,
+    signal_status: HashMap<String, ComponentHealth>,
+}
+
+impl SomaFreshnessTracker {
+    /// Merge one Soma frame, retaining monitored components that disappear from
+    /// a later fallback frame so their last known state can age into STALE.
+    pub fn update(
+        &mut self,
+        soma: &SomaHealthSnapshot,
+        mut snapshot: VitalsSnapshot,
+        now: Instant,
+    ) -> VitalsSnapshot {
+        self.ttl = Duration::from_millis(u64::from(soma.ttl_ms.max(1)));
+        for status in &snapshot.components {
+            if status.health == HEALTH_UNKNOWN {
+                self.signal_status
+                    .entry(status.name.clone())
+                    .or_insert_with(|| status.clone());
+                self.last_signal_at
+                    .entry(status.name.clone())
+                    .or_insert(now);
+            } else {
+                self.last_signal_at.insert(status.name.clone(), now);
+                self.signal_status
+                    .insert(status.name.clone(), status.clone());
+            }
+        }
+        let cleared: Vec<_> = self
+            .signal_status
+            .keys()
+            .filter(|name| fault_signal_cleared(soma, name))
+            .cloned()
+            .collect();
+        for name in cleared {
+            self.signal_status.remove(&name);
+            self.last_signal_at.remove(&name);
+        }
+        self.apply(&mut snapshot, now);
+        snapshot
+    }
+
+    /// Age cached hardware states even when Soma has stopped sending frames.
+    pub fn expire(&mut self, snapshot: &mut VitalsSnapshot, now: Instant) -> bool {
+        self.apply(snapshot, now)
+    }
+
+    /// Refresh retained component signals and mark expired observations stale.
+    fn apply(&mut self, snapshot: &mut VitalsSnapshot, now: Instant) -> bool {
+        let mut changed = false;
+        for (signal_name, status) in &mut self.signal_status {
+            let signal_expired = self
+                .last_signal_at
+                .get(signal_name)
+                .is_some_and(|last| now.duration_since(*last) >= self.ttl);
+            if signal_expired && status.health != HEALTH_STALE {
+                status.health = HEALTH_STALE;
+                status.detail = format!(
+                    "{signal_name} health report timed out after {} ms",
+                    self.ttl.as_millis()
+                );
+                changed = true;
+            }
+        }
+        let ids: std::collections::HashSet<_> = self.signal_status.keys().collect();
+        snapshot
+            .components
+            .retain(|component| !ids.contains(&component.name));
+        snapshot
+            .components
+            .extend(self.signal_status.values().cloned());
+        snapshot
+            .components
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        changed
+    }
+}
+
+/// Retire a fault signal only when its source explicitly confirms recovery.
+fn fault_signal_cleared(snapshot: &SomaHealthSnapshot, name: &str) -> bool {
+    let Some((component_id, fault_id)) = name.split_once("/fault/") else {
+        return false;
+    };
+    if let Some(fault) = snapshot
+        .faults
+        .iter()
+        .find(|fault| fault.component_id == component_id && fault.fault_id == fault_id)
+    {
+        return !fault.active;
+    }
+    false
+}
 const QUALITY_VALID: u32 = 0;
 const QUALITY_STALE: u32 = 1;
 const QUALITY_INVALID: u32 = 3;
@@ -259,11 +359,6 @@ pub fn default_thresholds() -> Vec<SomaThresholdRule> {
 /// output keeps Vitals' existing fields stable while deriving health from
 /// Soma facts, active faults, and configured thresholds.
 ///
-/// TODO(gap): TTL-based STALE detection is not yet implemented.
-///   Design doc §4.1 requires: when `soma_ts_ns + ttl_ms < now`, affected
-///   components should be marked HEALTH_STALE.  The snapshot carries `ttl_ms`
-///   but `snapshot_to_vitals` does not check it — a stale stream (e.g. Soma
-///   process hung) will keep reporting the last-known values indefinitely.
 pub fn snapshot_to_vitals(
     snapshot: &SomaHealthSnapshot,
     rules: &[SomaThresholdRule],
@@ -275,6 +370,26 @@ pub fn snapshot_to_vitals(
         .map(|c| (c.id.as_str(), c.kind))
         .collect();
     let mut components = Vec::new();
+
+    for component in &snapshot.components {
+        components.push(ComponentHealth {
+            name: component.id.clone(),
+            health: match component.health {
+                0 => HEALTH_OK,
+                1 => HEALTH_WARN,
+                2 => HEALTH_ERROR,
+                3 => HEALTH_STALE,
+                _ => HEALTH_UNKNOWN,
+            },
+            detail: component.detail.clone(),
+            value: if component.present && component.online {
+                1.0
+            } else {
+                0.0
+            },
+            threshold: 1.0,
+        });
+    }
 
     for actuator in &snapshot.actuators {
         let kind = component_kind
@@ -297,33 +412,53 @@ pub fn snapshot_to_vitals(
             "driver_temp",
             actuator.driver_temp.as_ref(),
         );
-        if !actuator.communication_ok {
+        if let Some(value) = actuator_control_value(snapshot, actuator, "communication_ok") {
+            let communication_ok = value >= 0.5;
             components.push(ComponentHealth {
                 name: format!("{}/communication", actuator.component_id),
-                health: HEALTH_ERROR,
-                detail: format!("{} communication is not OK", actuator.component_id),
-                value: 0.0,
+                health: if communication_ok {
+                    HEALTH_OK
+                } else {
+                    HEALTH_ERROR
+                },
+                detail: if communication_ok {
+                    String::new()
+                } else {
+                    format!("{} communication is not OK", actuator.component_id)
+                },
+                value: if communication_ok { 1.0 } else { 0.0 },
                 threshold: 1.0,
             });
         }
-        if actuator.vendor_error_code != 0 {
+        if let Some(value) = actuator_control_value(snapshot, actuator, "vendor_error_code") {
+            let code = value as u32;
             components.push(ComponentHealth {
                 name: format!("{}/vendor_error", actuator.component_id),
-                health: HEALTH_ERROR,
-                detail: format!(
-                    "{} vendor_error_code=0x{:X}",
-                    actuator.component_id, actuator.vendor_error_code
-                ),
-                value: actuator.vendor_error_code as f32,
+                health: if code == 0 { HEALTH_OK } else { HEALTH_ERROR },
+                detail: if code == 0 {
+                    String::new()
+                } else {
+                    format!("{} vendor_error_code=0x{:X}", actuator.component_id, code)
+                },
+                value: code as f32,
                 threshold: 0.0,
             });
         }
-        if !actuator.torque_enabled {
+        if let Some(value) = actuator_control_value(snapshot, actuator, "torque_enabled") {
+            let torque_enabled = value >= 0.5;
             components.push(ComponentHealth {
                 name: format!("{}/torque_enabled", actuator.component_id),
-                health: HEALTH_WARN,
-                detail: format!("{} torque is disabled", actuator.component_id),
-                value: 0.0,
+                health: if torque_enabled {
+                    HEALTH_OK
+                } else {
+                    HEALTH_WARN
+                },
+                detail: if torque_enabled {
+                    String::new()
+                } else {
+                    format!("{} torque is disabled", actuator.component_id)
+                },
+                value: if torque_enabled { 1.0 } else { 0.0 },
                 threshold: 1.0,
             });
         }
@@ -671,6 +806,7 @@ fn body_healths(snapshot: &SomaHealthSnapshot) -> Vec<BodyHealth> {
     bodies
 }
 
+/// Aggregate observed body faults without turning missing actuator data into a fault.
 fn body_health_for_component(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> BodyHealth {
     // NOTE(gap): Only SafetyState.aggregate_state is checked here.
     //   SafetyEndpointState[] (individual hardware/software/remote e-stops)
@@ -694,10 +830,10 @@ fn body_health_for_component(snapshot: &SomaHealthSnapshot, root: &ComponentStat
         || snapshot.faults.iter().any(|f| {
             f.active && f.severity >= FAULT_ERROR && component_contains(root, &f.component_id)
         })
-        || snapshot
-            .actuators
-            .iter()
-            .any(|a| !a.communication_ok && component_contains(root, &a.component_id))
+        || snapshot.actuators.iter().any(|a| {
+            actuator_control_value(snapshot, a, "communication_ok").is_some_and(|value| value < 0.5)
+                && component_contains(root, &a.component_id)
+        })
     {
         state = 1;
     }
@@ -727,6 +863,41 @@ fn actuator_by_component_id<'a>(
         .actuators
         .iter()
         .find(|a| a.component_id == component_id)
+}
+
+/// Exclude placeholder actuator flags when component availability is unobserved.
+fn actuator_status_observed(snapshot: &SomaHealthSnapshot, actuator: &ActuatorState) -> bool {
+    !snapshot.components.iter().any(|component| {
+        component.id == actuator.component_id
+            && matches!(component.health, HEALTH_UNKNOWN | HEALTH_STALE)
+    })
+}
+
+/// Prefer reported control values; legacy full-state producers use typed flags.
+fn actuator_control_value(
+    snapshot: &SomaHealthSnapshot,
+    actuator: &ActuatorState,
+    name: &str,
+) -> Option<f64> {
+    if let Some(metric) = snapshot
+        .metrics
+        .iter()
+        .find(|metric| metric.component_id == actuator.component_id && metric.name == name)
+    {
+        return scalar_value(metric.value.as_ref());
+    }
+    if name == "vendor_error_code" && actuator.vendor_error_code != 0 {
+        return Some(f64::from(actuator.vendor_error_code));
+    }
+    if !actuator_status_observed(snapshot, actuator) {
+        return None;
+    }
+    match name {
+        "communication_ok" => Some(if actuator.communication_ok { 1.0 } else { 0.0 }),
+        "torque_enabled" => Some(if actuator.torque_enabled { 1.0 } else { 0.0 }),
+        "vendor_error_code" => Some(f64::from(actuator.vendor_error_code)),
+        _ => None,
+    }
 }
 
 fn power_by_component_id<'a>(
@@ -845,6 +1016,7 @@ fn first_non_empty(values: &[&str]) -> String {
         .to_string()
 }
 
+/// Summarize explicit faults and observed communication failures within this body.
 fn body_message(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> String {
     let active_faults: Vec<&str> = snapshot
         .faults
@@ -855,11 +1027,10 @@ fn body_message(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> String
     if !active_faults.is_empty() {
         return format!("active faults: {}", active_faults.join(", "));
     }
-    if snapshot
-        .actuators
-        .iter()
-        .any(|a| !a.communication_ok && component_contains(root, &a.component_id))
-    {
+    if snapshot.actuators.iter().any(|a| {
+        actuator_control_value(snapshot, a, "communication_ok").is_some_and(|value| value < 0.5)
+            && component_contains(root, &a.component_id)
+    }) {
         return "actuator communication fault".to_string();
     }
     String::new()
@@ -914,7 +1085,343 @@ fn segment_matches(pattern: &str, value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::mock_soma::{MockScenario, generate_snapshot};
-    use crate::pb::soma::FaultState;
+    use crate::pb::soma::{ComponentStatus, FaultState};
+
+    #[test]
+    /// Missing temperature samples expire independently of fresh availability.
+    fn missing_temperature_signal_is_retained_then_expires_to_stale() {
+        let now = Instant::now();
+        let mut source = generate_snapshot(MockScenario::Ramp, 24, None);
+        source.ttl_ms = 100;
+        let mut tracker = SomaFreshnessTracker::default();
+        tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &default_thresholds(), 1),
+            now,
+        );
+        for actuator in &mut source.actuators {
+            actuator.motor_temp = None;
+        }
+        let mut latest = tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &default_thresholds(), 2),
+            now + Duration::from_millis(50),
+        );
+        let name = "body/arm/joint_1/motor_temp";
+        assert_eq!(
+            latest
+                .components
+                .iter()
+                .find(|signal| signal.name == name)
+                .unwrap()
+                .health,
+            HEALTH_ERROR
+        );
+        assert!(tracker.expire(&mut latest, now + Duration::from_millis(101)));
+        assert_eq!(
+            latest
+                .components
+                .iter()
+                .find(|signal| signal.name == name)
+                .unwrap()
+                .health,
+            HEALTH_STALE
+        );
+        assert_ne!(
+            latest
+                .components
+                .iter()
+                .find(|signal| signal.name == "body/arm/joint_1")
+                .unwrap()
+                .health,
+            HEALTH_STALE
+        );
+    }
+
+    #[test]
+    /// Mock fault recovery clears retained faults instead of leaving stale alarms.
+    fn mock_fault_profile_recovers_and_remains_clear_after_ttl() {
+        let now = Instant::now();
+        let mut fault = generate_snapshot(MockScenario::Fault, 4, None);
+        fault.ttl_ms = 100;
+        let mut tracker = SomaFreshnessTracker::default();
+        let first = tracker.update(&fault, snapshot_to_vitals(&fault, &[], 1), now);
+        let name = "body/arm/joint_3/fault/overcurrent";
+        assert!(
+            first
+                .components
+                .iter()
+                .any(|signal| signal.name == name && signal.health == HEALTH_ERROR)
+        );
+        let mut recovery = generate_snapshot(MockScenario::Fault, 8, None);
+        recovery.ttl_ms = 100;
+        let clear = tracker.update(
+            &recovery,
+            snapshot_to_vitals(&recovery, &[], 2),
+            now + Duration::from_millis(50),
+        );
+        assert!(clear.components.iter().all(|signal| signal.name != name));
+        let mut latest = tracker.update(
+            &recovery,
+            snapshot_to_vitals(&recovery, &[], 3),
+            now + Duration::from_millis(140),
+        );
+        tracker.expire(&mut latest, now + Duration::from_millis(151));
+        assert!(latest.components.iter().all(|signal| signal.name != name));
+    }
+
+    #[test]
+    /// Explicit normal controls clear retained communication and torque alarms.
+    fn observed_actuator_recovery_clears_control_signals() {
+        let now = Instant::now();
+        let mut source = generate_snapshot(MockScenario::Normal, 1, None);
+        let actuator = source
+            .actuators
+            .iter_mut()
+            .find(|actuator| actuator.component_id == "body/arm/joint_1")
+            .unwrap();
+        actuator.communication_ok = false;
+        actuator.torque_enabled = false;
+        actuator.vendor_error_code = 9;
+        let mut tracker = SomaFreshnessTracker::default();
+        tracker.update(&source, snapshot_to_vitals(&source, &[], 1), now);
+        let actuator = source
+            .actuators
+            .iter_mut()
+            .find(|actuator| actuator.component_id == "body/arm/joint_1")
+            .unwrap();
+        actuator.communication_ok = true;
+        actuator.torque_enabled = true;
+        actuator.vendor_error_code = 0;
+        let recovered = tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &[], 2),
+            now + Duration::from_millis(1),
+        );
+        for name in ["communication", "torque_enabled", "vendor_error"] {
+            let key = format!("body/arm/joint_1/{name}");
+            assert_eq!(
+                recovered
+                    .components
+                    .iter()
+                    .find(|signal| signal.name == key)
+                    .unwrap()
+                    .health,
+                HEALTH_OK
+            );
+        }
+    }
+
+    #[test]
+    /// An explicit inactive record retires its retained fault signal.
+    fn inactive_fault_record_clears_retained_alarm() {
+        let now = Instant::now();
+        let mut source = SomaHealthSnapshot {
+            ttl_ms: 1000,
+            components: vec![ComponentStatus {
+                id: "body/joint".into(),
+                health: HEALTH_ERROR,
+                ..Default::default()
+            }],
+            faults: vec![FaultState {
+                component_id: "body/joint".into(),
+                fault_id: "overcurrent".into(),
+                severity: FAULT_ERROR,
+                active: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tracker = SomaFreshnessTracker::default();
+        tracker.update(&source, snapshot_to_vitals(&source, &[], 1), now);
+        source.components[0].health = HEALTH_OK;
+        source.faults[0].active = false;
+        let recovered = tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &[], 2),
+            now + Duration::from_millis(1),
+        );
+        assert!(
+            recovered
+                .components
+                .iter()
+                .all(|signal| !signal.name.contains("/fault/"))
+        );
+    }
+
+    #[test]
+    /// Availability does not certify controls omitted from a sparse frame.
+    fn sparse_control_reports_retain_alarms_until_explicit_recovery() {
+        let now = Instant::now();
+        let id = "body/arm/joint_1";
+        let mut source = generate_snapshot(MockScenario::Normal, 1, None);
+        source.ttl_ms = 100;
+        source.metrics.extend(
+            [
+                ("communication_ok", 0.0),
+                ("torque_enabled", 0.0),
+                ("vendor_error_code", 7.0),
+            ]
+            .into_iter()
+            .map(|(name, value)| crate::pb::soma::Metric {
+                component_id: id.into(),
+                name: name.into(),
+                value: Some(Scalar {
+                    value,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        );
+        source.faults.push(FaultState {
+            component_id: id.into(),
+            fault_id: "device_fault".into(),
+            severity: FAULT_ERROR,
+            active: true,
+            ..Default::default()
+        });
+        let mut tracker = SomaFreshnessTracker::default();
+        tracker.update(&source, snapshot_to_vitals(&source, &[], 1), now);
+        for metric in &mut source.metrics {
+            if metric.component_id == id
+                && matches!(
+                    metric.name.as_str(),
+                    "communication_ok" | "torque_enabled" | "vendor_error_code"
+                )
+            {
+                metric.value = None;
+            }
+        }
+        source.faults.clear();
+        let mut partial = tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &[], 2),
+            now + Duration::from_millis(50),
+        );
+        for suffix in ["communication", "vendor_error", "fault/device_fault"] {
+            let name = format!("{id}/{suffix}");
+            assert_eq!(
+                partial
+                    .components
+                    .iter()
+                    .find(|signal| signal.name == name)
+                    .unwrap()
+                    .health,
+                HEALTH_ERROR
+            );
+        }
+        tracker.expire(&mut partial, now + Duration::from_millis(101));
+        assert_eq!(
+            partial
+                .components
+                .iter()
+                .find(|signal| signal.name == format!("{id}/vendor_error"))
+                .unwrap()
+                .health,
+            HEALTH_STALE
+        );
+        for metric in &mut source.metrics {
+            if metric.component_id == id
+                && matches!(
+                    metric.name.as_str(),
+                    "communication_ok" | "torque_enabled" | "vendor_error_code"
+                )
+            {
+                metric.value = Some(Scalar {
+                    value: if metric.name == "vendor_error_code" {
+                        0.0
+                    } else {
+                        1.0
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+        source.faults.push(FaultState {
+            component_id: id.into(),
+            fault_id: "device_fault".into(),
+            active: false,
+            ..Default::default()
+        });
+        let recovered = tracker.update(
+            &source,
+            snapshot_to_vitals(&source, &[], 3),
+            now + Duration::from_millis(120),
+        );
+        assert!(
+            recovered
+                .components
+                .iter()
+                .all(|signal| !signal.name.ends_with("/fault/device_fault"))
+        );
+        assert_eq!(
+            recovered
+                .components
+                .iter()
+                .find(|signal| signal.name == format!("{id}/vendor_error"))
+                .unwrap()
+                .health,
+            HEALTH_OK
+        );
+    }
+
+    #[test]
+    /// Placeholder actuator flags do not bypass the UNKNOWN grace period.
+    fn unknown_actuator_does_not_generate_body_or_control_faults() {
+        let mut source = SomaHealthSnapshot {
+            components: vec![
+                ComponentStatus {
+                    id: "body".into(),
+                    kind: KIND_BODY,
+                    present: true,
+                    online: true,
+                    ..Default::default()
+                },
+                ComponentStatus {
+                    id: "body/base".into(),
+                    parent_id: "body".into(),
+                    kind: KIND_BODY,
+                    present: true,
+                    online: true,
+                    ..Default::default()
+                },
+                ComponentStatus {
+                    id: "body/base/left_wheel".into(),
+                    parent_id: "body/base".into(),
+                    kind: KIND_WHEEL,
+                    health: HEALTH_UNKNOWN,
+                    present: true,
+                    ..Default::default()
+                },
+            ],
+            actuators: vec![ActuatorState {
+                component_id: "body/base/left_wheel".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let unknown = snapshot_to_vitals(&source, &[], 1);
+        assert_eq!(unknown.bodies[0].state, 0);
+        assert!(unknown.bodies[0].message.is_empty());
+        assert!(
+            unknown
+                .components
+                .iter()
+                .all(|signal| !signal.name.ends_with("/communication")
+                    && !signal.name.ends_with("/torque_enabled"))
+        );
+        source.components[2].health = HEALTH_ERROR;
+        let offline = snapshot_to_vitals(&source, &[], 2);
+        assert_eq!(offline.bodies[0].state, 1);
+        assert!(offline.bodies[0].message.contains("communication"));
+        assert!(
+            offline
+                .components
+                .iter()
+                .any(|signal| signal.name.ends_with("/communication")
+                    && signal.health == HEALTH_ERROR)
+        );
+    }
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
@@ -926,6 +1433,151 @@ mod tests {
             .find(|c| c.name == "body/arm/joint_1/motor_temp")
             .expect("joint_1 motor temp health");
         assert_eq!(joint.health, HEALTH_ERROR);
+    }
+
+    #[test]
+    /// Preserve Soma's component status in the normalized Vitals signal.
+    fn component_status_is_exposed_as_vitals_health() {
+        let soma = SomaHealthSnapshot {
+            body_id: "robot".into(),
+            components: vec![ComponentStatus {
+                id: "body/head_camera".into(),
+                health: HEALTH_ERROR,
+                online: false,
+                present: true,
+                detail: "driver offline".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let vitals = snapshot_to_vitals(&soma, &[], 123);
+        let camera = vitals
+            .components
+            .iter()
+            .find(|component| component.name == "body/head_camera")
+            .expect("camera component health");
+
+        assert_eq!(camera.health, HEALTH_ERROR);
+        assert_eq!(camera.detail, "driver offline");
+    }
+
+    #[test]
+    /// An omitted component becomes stale after its last observation expires.
+    fn missing_component_report_ages_to_stale() {
+        let now = Instant::now();
+        let frame = |health, online, detail: &str| SomaHealthSnapshot {
+            body_id: "robot".into(),
+            ttl_ms: 100,
+            components: vec![ComponentStatus {
+                id: "body/head_camera".into(),
+                health,
+                online,
+                present: true,
+                detail: detail.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tracker = SomaFreshnessTracker::default();
+        let healthy = frame(HEALTH_OK, true, "");
+        tracker.update(&healthy, snapshot_to_vitals(&healthy, &[], 1), now);
+
+        let no_sample = frame(HEALTH_UNKNOWN, false, "no health reading");
+        let mut vitals = tracker.update(
+            &no_sample,
+            snapshot_to_vitals(&no_sample, &[], 2),
+            now + Duration::from_millis(50),
+        );
+        assert_eq!(
+            vitals
+                .components
+                .iter()
+                .find(|component| component.name == "body/head_camera")
+                .expect("camera component")
+                .health,
+            HEALTH_OK
+        );
+
+        assert!(tracker.expire(&mut vitals, now + Duration::from_millis(101)));
+        let camera = vitals
+            .components
+            .iter()
+            .find(|component| component.name == "body/head_camera")
+            .expect("timed-out camera component");
+        assert_eq!(camera.health, HEALTH_STALE);
+        assert!(camera.detail.contains("timed out"));
+    }
+
+    #[test]
+    /// A device with no initial report eventually becomes stale, not healthy.
+    fn initially_unknown_component_ages_to_stale() {
+        let now = Instant::now();
+        let soma = SomaHealthSnapshot {
+            body_id: "robot".into(),
+            ttl_ms: 100,
+            components: vec![ComponentStatus {
+                id: "body/head_camera".into(),
+                health: HEALTH_UNKNOWN,
+                online: false,
+                present: true,
+                detail: "no health reading".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tracker = SomaFreshnessTracker::default();
+        let mut vitals = tracker.update(&soma, snapshot_to_vitals(&soma, &[], 1), now);
+        assert_eq!(vitals.components[0].health, HEALTH_UNKNOWN);
+
+        assert!(tracker.expire(&mut vitals, now + Duration::from_millis(101)));
+        assert_eq!(vitals.components[0].health, HEALTH_STALE);
+    }
+
+    #[test]
+    /// Repeated fallback frames must not keep a prior observation fresh.
+    fn previously_reported_component_times_out_when_later_frames_omit_health() {
+        let now = Instant::now();
+        let make_snapshot = |health, online, detail: &str| SomaHealthSnapshot {
+            body_id: "robot".into(),
+            ttl_ms: 1_000,
+            components: vec![ComponentStatus {
+                id: "body/head_camera".into(),
+                health,
+                online,
+                present: true,
+                detail: detail.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut tracker = SomaFreshnessTracker::default();
+        let first = make_snapshot(HEALTH_OK, true, "");
+        tracker.update(&first, snapshot_to_vitals(&first, &[], 1), now);
+        let missing = make_snapshot(HEALTH_UNKNOWN, false, "no reading");
+        let mut vitals = tracker.update(
+            &missing,
+            snapshot_to_vitals(&missing, &[], 2),
+            now + Duration::from_millis(500),
+        );
+        assert_eq!(
+            vitals
+                .components
+                .iter()
+                .find(|component| component.name == "body/head_camera")
+                .expect("camera component")
+                .health,
+            HEALTH_OK
+        );
+
+        assert!(tracker.expire(&mut vitals, now + Duration::from_millis(1_001),));
+        let camera = vitals
+            .components
+            .iter()
+            .find(|component| component.name == "body/head_camera")
+            .expect("timed-out camera component");
+        assert_eq!(camera.health, HEALTH_STALE);
+        assert!(camera.detail.contains("timed out"));
     }
 
     #[test]

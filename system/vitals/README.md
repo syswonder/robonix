@@ -31,6 +31,20 @@ The `health_piper` primitive implements `robonix/primitive/health/stream` and
 wraps `piper_sdk`. It is **not** part of the Robonix source tree — create it in your
 deployment's `primitives/` directory following the [vendor onboarding guide](https://book.robonix.ai/integration-guide/vendor-onboarding.html).
 
+Soma includes every component declared in `soma.yaml` in the snapshot. A
+component with no health sample is `UNKNOWN`; Vitals retains the last known
+component state and changes it to `STALE` after the source TTL expires. Loss of
+the complete Soma stream also ages the last reported component states to
+`STALE`. Derived telemetry such as temperature is tracked independently, so
+fresh availability reports do not hide missing measurements. Explicit normal
+actuator controls or cleared faults recover their corresponding signals.
+Unknown actuator placeholders do not create body faults. Sparse primitive
+frames use Soma's nullable control metrics to avoid treating defaulted flags
+as recovery; legacy full-state actuator reports remain supported. A provider must
+report an explicit `online=false`, communication
+failure, or fault for Vitals to detect an individual device that stops producing
+data while its health stream remains alive.
+
 ### Mock SOMA path (no SOMA needed)
 
 The `--mock-soma` flag starts an embedded gRPC server inside the Vitals process that
