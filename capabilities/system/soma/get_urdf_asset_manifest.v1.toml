@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+[contract]
+id      = "robonix/system/soma/get_urdf_asset_manifest"
+version = "1"
+kind    = "service"
+idl     = "soma/srv/GetUrdfAssetManifest.srv"
+description = "Return the URDF and immutable metadata for its local render resources."
+
+[mode]
+type = "rpc"
