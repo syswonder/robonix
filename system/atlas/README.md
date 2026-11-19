@@ -106,11 +106,12 @@ JSON for MCP.
 
 A channel starts one execution. For async `rpc` capabilities, both `/status` and
 `/cancel` companions must support the selected transport. Each companion gets its
-own allocation. `close()` waits up to five seconds for confirmed completion;
-`close_with_timeout(Duration)` changes the wait. Async close cancels and polls
-status every two seconds. Stream close stops sending and drains responses until
-the server ends the stream. A local timeout, lost connection, or cancellation
-acceptance does not confirm termination. If the server never ends a stream,
+own allocation. An MCP tool error on the start call lets `close()` release the
+channel without canceling a run. `close()` waits up to five seconds for confirmed
+completion. `close_with_timeout(Duration)` changes the wait. Async close cancels
+and polls status every two seconds. Stream close stops sending and drains
+responses until the server ends the stream. A local timeout, lost connection, or
+cancellation acceptance does not confirm termination. If the server never ends a stream,
 close fails and retains its allocation rather than canceling it locally and
 claiming completion.
 

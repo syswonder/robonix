@@ -102,7 +102,7 @@ class _Mcp:
         with client.lock:
             if client.portal is None:
                 from anyio.from_thread import start_blocking_portal
-                client.portal_cm = start_blocking_portal(name="robonix-mcp-client")
+                client.portal_cm = start_blocking_portal()
                 client.portal = client.portal_cm.__enter__()
         self.session_cm = client.portal.wrap_async_context_manager(
             _session(self.execution.channel.endpoint, _remaining(deadline)),
@@ -142,8 +142,8 @@ class _Mcp:
             result = execution.client.portal.call(partial(
                 _invoke, self.session, cid.rsplit("/", 1)[-1], args, remaining,
             ))
-            # A synchronous handler has returned even if its business payload is malformed.
-            if not execution.companions:
+            # A tool error rejects the start before there is a run to cancel.
+            if result.isError or not execution.companions:
                 with execution.lock:
                     execution.terminal = True
             raw = _decode(result)

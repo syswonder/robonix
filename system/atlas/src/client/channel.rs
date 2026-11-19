@@ -506,11 +506,12 @@ impl<C: ChannelContract> Channel<C> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        // Protocol completion is known even if the business payload cannot be decoded.
-        if !self.is_async() {
+        let rejected = result.is_error.unwrap_or(false);
+        // A tool error rejects the start before there is a run to cancel.
+        if rejected || !self.is_async() {
             self.execution.progress.lock().unwrap().terminal = true;
         }
-        ensure!(!result.is_error.unwrap_or(false), "MCP tool error: {text}");
+        ensure!(!rejected, "MCP tool error: {text}");
         let value = match result.structured_content {
             Some(v) => v,
             None => serde_json::from_str(&text).context("MCP result decoding failed")?,

@@ -552,6 +552,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             channel.call({})
         channel.close()
         self.assertFalse(self.channel_exists(channel))
+        channel = self.connect(NAV)
+        with self.assertRaisesRegex(RuntimeError, "MCP tool error"):
+            channel.call({"goal": "invalid"})
+        channel.close()
+        self.assertFalse(self.channel_exists(channel))
         self.configure(status_error=True)
         channel = self.connect(NAV)
         channel.call({})
@@ -596,10 +601,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 execute = contracts.RobonixSystemExecutorExecuteStub(wire)
                 control = contracts.RobonixSystemExecutorControlPlanStub(wire)
 
-                def plan(identifier):
+                def plan(identifier, args_json="{}"):
                     return pilot_pb2.Plan(plan_id=identifier, session_id="channel-test", root_index=0,
                         nodes=[pilot_pb2.RtdlNode(node_kind=2, op_id="nav", description="test navigation", call=pilot_pb2.CapabilityCall(
-                            call_id=identifier, provider_id="channel-test", contract_id=NAV, args_json="{}"))])
+                            call_id=identifier, provider_id="channel-test", contract_id=NAV, args_json=args_json))])
 
                 def held():
                     return [c for c in self.atlas.inspect()["channels"].values()
@@ -628,11 +633,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     terminals = [e.node_state for e in rows if e.HasField("node_state")]
                     self.assertEqual(terminals[-1].state, 3)
                     self.assertFalse(held())
+                    self.configure()
+                    rows = list(execute.Execute(plan("tool-error", '{"goal":"invalid"}'), timeout=10))
+                    errors = [e.node_state.leaf_result.error for e in rows if e.HasField("node_state")]
+                    self.assertTrue(any("MCP tool error" in e for e in errors), errors)
+                    self.assertFalse(held())
                     self.configure(invalid_status=True)
                     rows = list(execute.Execute(plan("invalid-status"), timeout=10))
                     errors = [e.node_state.leaf_result.error for e in rows if e.HasField("node_state")]
                     self.assertTrue(any("unknown capability state" in e for e in errors), errors)
                     self.assertTrue(held(), "invalid status must retain the main allocation")
+                    self.configure(finish=True)
+                    deadline = time.monotonic() + 10
+                    while held() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    self.assertFalse(held(), "terminal status must release the retained allocation")
         finally:
             process.terminate()
             process.wait(timeout=10)
