@@ -18,4 +18,6 @@ Start Atlas, then run `cargo run -p robonix-chronos -- --atlas 127.0.0.1:50051 -
 
 INIT constructs the runtime, ACTIVATE starts publication, DEACTIVATE ends existing streams, and SHUTDOWN joins workers and closes the server. Shutdown and communication budgets use real time. Snapshot quality retains read failures instead of inventing timestamps.
 
+Pilot discovers `robonix/system/chronos/get_wall_time` through Atlas. Executor calls it over MCP at `/mcp` on the same listener as gRPC. The capability takes no arguments and returns `datetime` in RFC 3339. Chronos uses the host time zone unless `TZ` is set in its environment. The call returns an error if Chronos is inactive or cannot read the time or resolve its time zone.
+
 Run `cargo test -p robonix-chronos`; `grpc_process` launches a separate daemon and exercises discovery, repeated stream delivery and lifecycle shutdown. Rebuild stubs from the Chronos contracts and message IDL before connecting.

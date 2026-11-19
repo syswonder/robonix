@@ -6,6 +6,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use jiff::{Timestamp, fmt::temporal::DateTimePrinter, tz::TimeZone};
 use robonix_atlas::{client::AtlasClient, pb as atlas_pb};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_stream::{Stream, wrappers::WatchStream};
@@ -23,7 +24,6 @@ type SnapshotStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 const LIFECYCLE_CAPACITY: usize = 8;
 
-/// Lifecycle serialization and runtime ownership are shared by all three RPCs.
 #[derive(Clone)]
 pub(super) struct ChronosService {
     state: Arc<Mutex<State>>,
@@ -41,6 +41,14 @@ struct State {
     publisher: Option<PublicationWorker>,
     session: Option<watch::Sender<bool>>,
     terminated: bool,
+}
+
+impl State {
+    fn active_session(&self) -> Option<&watch::Sender<bool>> {
+        self.session
+            .as_ref()
+            .filter(|_| self.publisher.is_some() && !self.terminated)
+    }
 }
 
 impl ChronosService {
@@ -68,6 +76,34 @@ impl ChronosService {
 
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown.subscribe()
+    }
+
+    pub(super) async fn wall_datetime(&self) -> Result<String> {
+        let reading = {
+            let state = self.state.lock().await;
+            ensure!(state.active_session().is_some(), "Chronos is inactive");
+            robonix_chronos_clock::wall_time().context("Read Chronos wall time")?
+        };
+        ensure!(
+            reading.available,
+            "Chronos wall time unavailable: {}",
+            reading.reason
+        );
+        tokio::task::spawn_blocking(move || {
+            let timestamp = Timestamp::from_nanosecond(i128::from(reading.timestamp_ns))?;
+            let offset = TimeZone::try_system()
+                .context("Resolve the Chronos local time zone")?
+                .to_offset(timestamp);
+            ensure!(
+                offset.seconds() % 60 == 0,
+                "The Chronos UTC offset cannot be represented in RFC 3339"
+            );
+            Ok(DateTimePrinter::new()
+                .precision(Some(0))
+                .timestamp_with_offset_to_string(&timestamp, offset))
+        })
+        .await
+        .context("Join Chronos wall time formatting")?
     }
 
     /// Stop streams and both workers, retaining any cleanup error for the caller.
@@ -266,12 +302,12 @@ impl ChronosService {
     /// Subscribe while holding the lifecycle lock so activation cannot race cache access.
     async fn quality_stream(&self) -> Result<SnapshotStream<wire::ClockQualitySnapshot>, Status> {
         let state = self.state.lock().await;
-        if state.publisher.is_none() || state.session.is_none() || state.terminated {
-            return Err(Status::unavailable("Chronos is inactive"));
-        }
+        let session = state
+            .active_session()
+            .ok_or_else(|| Status::unavailable("Chronos is inactive"))?;
         Ok(Box::pin(SessionStream::new(
             self.quality.subscribe(),
-            state.session.as_ref().expect("active session").subscribe(),
+            session.subscribe(),
         )))
     }
 }
@@ -400,13 +436,10 @@ impl contracts::robonix_system_chronos_reference_time_server::RobonixSystemChron
         _request: Request<()>,
     ) -> Result<Response<Self::ReferenceTimeStream>, Status> {
         let state = self.state.lock().await;
-        if state.publisher.is_none() || state.session.is_none() || state.terminated {
-            return Err(Status::unavailable("Chronos is inactive"));
-        }
-        let stream = SessionStream::new(
-            self.reference.subscribe(),
-            state.session.as_ref().expect("active session").subscribe(),
-        );
+        let session = state
+            .active_session()
+            .ok_or_else(|| Status::unavailable("Chronos is inactive"))?;
+        let stream = SessionStream::new(self.reference.subscribe(), session.subscribe());
         Ok(Response::new(Box::pin(stream)))
     }
 }
