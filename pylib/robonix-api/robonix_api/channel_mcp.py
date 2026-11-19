@@ -19,19 +19,42 @@ async def _session(endpoint, timeout):
 
     async with AsyncExitStack() as stack:
         import httpx
-        uri = endpoint if endpoint.startswith(("http://", "https://")) else f"http://{endpoint}"
-        if "/mcp" not in uri:
-            uri = uri.rstrip("/") + "/mcp"
+        uri = httpx.URL(endpoint if endpoint.startswith(("http://", "https://")) else f"http://{endpoint}")
+        if uri.path in ("", "/"):
+            uri = uri.copy_with(path="/mcp")
+        resolved = uri
+        initializing = True
+
+        async def use_resolved_url(request):
+            if request.url == uri:
+                request.url = resolved
+
+        async def check_redirect(response):
+            nonlocal resolved
+            if not response.has_redirect_location:
+                return
+            url = response.request.url
+            target = url.join(response.headers["location"])
+            # Old registrations may differ from the MCP route by a trailing slash.
+            if (initializing and resolved == uri and response.status_code in (307, 308)
+                    and {url.path, target.path} == {"/mcp", "/mcp/"}
+                    and target == url.copy_with(path=target.path)):
+                resolved = target
+            else:
+                response.raise_for_status()
+
         # Provider traffic must not depend on the consumer's shell proxy settings.
         client = await stack.enter_async_context(httpx.AsyncClient(
-            trust_env=False, timeout=httpx.Timeout(5, read=None),
+            trust_env=False, timeout=httpx.Timeout(5, read=None), follow_redirects=True,
+            event_hooks={"request": [use_resolved_url], "response": [check_redirect]},
         ))
-        transport = streamable_http_client(uri, http_client=client)
+        transport = streamable_http_client(str(uri), http_client=client)
         streams = await stack.enter_async_context(transport)
         session = await stack.enter_async_context(ClientSession(streams[0], streams[1]))
         import anyio
         with anyio.fail_after(timeout):
             await session.initialize()
+        initializing = False
         yield session
 
 
@@ -62,14 +85,21 @@ def _invalid_constant(value):
 
 
 def _decode(result):
+    text = "\n".join(c.text for c in result.content if c.type == "text")
     if result.isError:
-        text = "\n".join(c.text for c in result.content if c.type == "text")
         raise RuntimeError(f"MCP tool error: {text}")
-    if result.structuredContent is not None:
-        value = result.structuredContent
-    else:
-        text = "\n".join(c.text for c in result.content if c.type == "text")
+    value = result.structuredContent
+    if value is None:
         value = json.loads(text, object_pairs_hook=_json_object, parse_constant=_invalid_constant)
+    elif value.keys() == {"result"} and isinstance(value["result"], dict):
+        # FastMCP may wrap the structured reply while leaving the text reply flat.
+        try:
+            flat = json.loads(text, object_pairs_hook=_json_object, parse_constant=_invalid_constant)
+        except ValueError:
+            pass
+        else:
+            if flat == value["result"]:
+                value = flat
     if not isinstance(value, dict):
         raise ValueError("MCP response must be a JSON object")
     return value

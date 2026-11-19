@@ -513,7 +513,18 @@ impl<C: ChannelContract> Channel<C> {
         }
         ensure!(!rejected, "MCP tool error: {text}");
         let value = match result.structured_content {
-            Some(v) => v,
+            Some(v) => {
+                // FastMCP may wrap the structured reply while leaving the text reply flat.
+                if v.as_object().is_some_and(|object| object.len() == 1)
+                    && let Some(inner) = v.get("result").filter(|inner| inner.is_object())
+                    && let Ok(flat) = serde_json::from_str::<Value>(&text)
+                    && &flat == inner
+                {
+                    flat
+                } else {
+                    v
+                }
+            }
             None => serde_json::from_str(&text).context("MCP result decoding failed")?,
         };
         ensure!(value.is_object(), "MCP response must be a JSON object");
@@ -697,15 +708,16 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     } else {
         format!("http://{endpoint}")
     };
-    let uri = if base.contains("/mcp") {
-        base
-    } else {
-        format!("{}/mcp", base.trim_end_matches('/'))
-    };
+    let mut uri = reqwest::Url::parse(&base).context("invalid MCP endpoint")?;
+    if uri.path() == "/" {
+        uri.set_path("/mcp");
+    }
     // Reinitialization must not replay a business request with uncertain effects.
     let config =
-        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(uri)
-            .reinit_on_expired_session(false);
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+            uri.as_str(),
+        )
+        .reinit_on_expired_session(false);
     let http = reqwest::Client::builder().no_proxy().build()?;
     ().serve(
         rmcp::transport::streamable_http_client::StreamableHttpClientTransport::with_client(

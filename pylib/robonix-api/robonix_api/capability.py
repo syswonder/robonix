@@ -664,7 +664,8 @@ class _ProviderBase:
 
     @property
     def mcp_endpoint(self) -> str:
-        return f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
+        path = self._mcp_app.settings.streamable_http_path if self._mcp_app is not None else "/mcp"
+        return f"http://{self._advertise_host()}:{self._mcp_port}{path}"
 
     # -- Layer 2: provides_grpc decorator + attach_grpc_servicer -----------
 
@@ -922,7 +923,7 @@ class _ProviderBase:
         log.info("MCP HTTP serving on %s:%d", self._bind_host, self._mcp_port)
 
     def _declare_mcp_handlers(self) -> None:
-        endpoint = f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
+        endpoint = self.mcp_endpoint
         for fn in self._mcp_handlers:
             cid = getattr(fn, "_robonix_contract_id", None)
             if cid is None:

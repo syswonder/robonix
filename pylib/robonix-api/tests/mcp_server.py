@@ -5,9 +5,12 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from navigation_mcp import GetNavigationSpeedLimit_Request, GetNavigationSpeedLimit_Response
+from robonix_api.tool import mcp_contract
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
@@ -57,7 +60,7 @@ async def get_robot_context() -> CallToolResult:
 
 
 @app.tool()
-async def navigate(goal: dict | None = None) -> dict:
+async def navigate(goal: dict | None = None) -> Any:
     trace("navigate")
     settings = config()
     await asyncio.sleep(settings.get("start_delay", 0))
@@ -69,7 +72,7 @@ async def navigate(goal: dict | None = None) -> dict:
 
 
 @app.tool()
-async def status(run_id: str = "") -> CallToolResult:
+async def status(run_id: str = "") -> Any:
     trace("status", run_id)
     settings = config()
     await asyncio.sleep(settings.get("status_delay", 0))
@@ -87,17 +90,21 @@ async def status(run_id: str = "") -> CallToolResult:
         state = "SUCCEEDED"
     elif stop_at is not None and time.monotonic() >= stop_at:
         state = "CANCELED"
-    value = {"known": True, "state": state, "detail": state.lower()}
-    return CallToolResult(content=[TextContent(type="text", text=json.dumps(value))], structuredContent=value)
+    return {"known": True, "state": state, "detail": state.lower()}
 
 
 @app.tool()
-async def cancel(run_id: str = "") -> dict:
+async def cancel(run_id: str = "") -> Any:
     trace("cancel", run_id)
     settings = config()
     if not settings.get("ignore_cancel"):
         runs[run_id] = time.monotonic() + settings.get("cancel_delay", 0)
     return {"accepted": True, "detail": "requested"}
+
+
+@mcp_contract(app, contract_id="robonix/service/navigation/get_speed_limit")
+def get_speed_limit(req: GetNavigationSpeedLimit_Request) -> GetNavigationSpeedLimit_Response:
+    return GetNavigationSpeedLimit_Response(available=True, max_linear_speed_mps=0.26)
 
 
 app.run(transport="streamable-http")

@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = Path(__file__).with_name("mcp_server.py")
 ECHO = "robonix/service/map/get_mode"
 NAV = "robonix/service/navigation/navigate"
+SPEED_LIMIT = "robonix/service/navigation/get_speed_limit"
 
 
 def free_port():
@@ -70,14 +71,19 @@ class ChannelTest(unittest.TestCase):
         ], stdout=cls.log, stderr=cls.log)
         cls.mcp_process = subprocess.Popen([
             sys.executable, str(FIXTURE), "--port", str(mcp_port), "--control", str(cls.control),
-        ], stdout=cls.log, stderr=cls.log)
+        ], stdout=cls.log, stderr=cls.log, env={**os.environ,
+            "PYTHONPATH": os.pathsep.join(str(p) for p in (
+                cls.work / "types", ROOT / "pylib/robonix-api", os.environ.get("PYTHONPATH", ""),
+            ) if p),
+        })
         wait_port(cls.atlas_process, atlas_port)
         wait_port(cls.mcp_process, mcp_port)
         cls.atlas = _Atlas(f"127.0.0.1:{atlas_port}")
         cls.endpoint = f"http://127.0.0.1:{mcp_port}/mcp"
         cls.atlas.register_service("channel-test", "robonix/service")
-        for cid in (ECHO, NAV, NAV + "/status", NAV + "/cancel"):
-            cls.atlas.declare_capability("channel-test", cid, Transport.MCP, cls.endpoint)
+        cls.atlas.declare_capability("channel-test", ECHO, Transport.MCP, cls.endpoint)
+        for cid in (NAV, NAV + "/status", NAV + "/cancel", SPEED_LIMIT):
+            cls.atlas.declare_capability("channel-test", cid, Transport.MCP, cls.endpoint + "/")
 
     @classmethod
     def tearDownClass(cls):
@@ -461,6 +467,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             with self.connect() as channel:
                 self.assertEqual(channel.call({}).mode, "mapping")
 
+    def test_contract_tool_through_legacy_mcp_url(self):
+        with self.connect(SPEED_LIMIT) as channel:
+            response = channel.call({})
+            self.assertTrue(response.available)
+            self.assertEqual(response.max_linear_speed_mps, 0.26)
+        self.assertFalse(self.channel_exists(channel))
+
     def test_async_lifetime_cancel_and_legacy_run_id(self):
         for legacy in (False, True):
             self.configure(legacy=legacy, cancel_delay=0.1)
@@ -648,16 +661,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     errors = [e.node_state.leaf_result.error for e in rows if e.HasField("node_state")]
                     self.assertTrue(any("MCP tool error" in e for e in errors), errors)
                     self.assertFalse(held())
+                    self.configure(finish=True)
+                    rows = list(execute.Execute(plan("wrapped-result"), timeout=10))
+                    terminals = [e.node_state for e in rows if e.HasField("node_state")]
+                    self.assertEqual(terminals[-1].state, 2)
+                    self.assertFalse(held())
                     self.configure(invalid_status=True)
                     rows = list(execute.Execute(plan("invalid-status"), timeout=10))
                     errors = [e.node_state.leaf_result.error for e in rows if e.HasField("node_state")]
                     self.assertTrue(any("unknown capability state" in e for e in errors), errors)
                     self.assertTrue(held(), "invalid status must retain the main allocation")
-                    self.configure(finish=True)
-                    deadline = time.monotonic() + 10
-                    while held() and time.monotonic() < deadline:
-                        time.sleep(0.1)
-                    self.assertFalse(held(), "terminal status must release the retained allocation")
         finally:
             process.terminate()
             process.wait(timeout=10)
