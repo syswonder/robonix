@@ -300,6 +300,17 @@ class ChannelTest(unittest.TestCase):
                 f'[contract]\nid="robonix/primitive/{name}"\nversion="1"\nkind="primitive"\n'
                 f'idl=" {idl} "\n[mode]\ntype=" topic_out "\n'
             )
+        env = self.prepare_rust_bindings(project, contracts)
+        (project / "src").mkdir()
+        (project / "src/main.rs").write_text(
+            '#![allow(dead_code)]\n'
+            'include!(concat!(env!("OUT_DIR"), "/contract_proto_modules.rs"));\nfn main() {}\n'
+        )
+        subprocess.run(["cargo", "check", "--offline", "--manifest-path", str(project / "Cargo.toml")],
+                       cwd=ROOT, check=True, env=env)
+
+    def prepare_rust_bindings(self, project, contracts):
+        project.mkdir(exist_ok=True)
         proto = project / "proto"
         subprocess.run([
             str(ROOT / "target/debug/robonix-codegen"), "--lang", "proto",
@@ -310,6 +321,7 @@ class ChannelTest(unittest.TestCase):
             '[workspace]\n[dependencies]\n'
             f'robonix-atlas={{path={json.dumps(str(ROOT / "system/atlas"))}}}\n'
             'anyhow="1"\nprost="0.14"\ntonic="0.14"\ntonic-prost="0.14"\ntokio-stream="0.1"\n'
+            '[dev-dependencies]\ntokio={version="1",features=["macros","rt","time"]}\n'
             '[build-dependencies]\ntonic-prost-build="0.14"\nprotoc-bin-vendored="3.2"\n'
         )
         (project / "build.rs").write_text('''use std::path::PathBuf;
@@ -325,22 +337,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ''')
-        (project / "src").mkdir()
-        (project / "src/main.rs").write_text(
-            '#![allow(dead_code)]\n'
-            'include!(concat!(env!("OUT_DIR"), "/contract_proto_modules.rs"));\nfn main() {}\n'
-        )
         # Keep the compiler fixture on the workspace's resolved dependency versions.
         (project / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
-        subprocess.run(["cargo", "check", "--offline", "--manifest-path", str(project / "Cargo.toml")],
-                       cwd=ROOT, check=True, env={**os.environ,
-                           "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))})
+        return {**os.environ, "CARGO_TARGET_DIR": os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))}
 
     def test_rust_grpc_channels(self):
         self.start_grpc()
-        subprocess.run(["cargo", "test", "-p", "robonix-atlas", "--test", "channel_grpc", "--", "--ignored"],
-            cwd=ROOT, check=True, env={**os.environ, "ROBONIX_TEST_ATLAS": self.atlas._endpoint,
-                "ROBONIX_TEST_CONTROL": str(self.control)})
+        project = self.work / "rust-grpc"
+        env = self.prepare_rust_bindings(project, ROOT / "capabilities")
+        (project / "tests").mkdir()
+        (project / "tests/channel_grpc.rs").write_bytes(Path(__file__).with_name("channel_grpc.rs").read_bytes())
+        subprocess.run(["cargo", "test", "--offline", "--manifest-path", str(project / "Cargo.toml"),
+                        "--test", "channel_grpc"], cwd=ROOT, check=True,
+                       env={**env, "ROBONIX_TEST_ATLAS": self.atlas._endpoint,
+                            "ROBONIX_TEST_CONTROL": str(self.control)})
 
     def test_scene_verifier_consumer(self):
         sys.path.insert(0, str(ROOT / "services/verifiers/scene_verifier"))

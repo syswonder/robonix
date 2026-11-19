@@ -35,7 +35,6 @@ reqwest.workspace = true
 protoc-bin-vendored.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
-robonix-codegen.workspace = true
 
 [dev-dependencies]
 # robonix-sdk dev-dep removed — Node-* wire schema retired and the SDK

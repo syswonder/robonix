@@ -10,10 +10,7 @@
     rustdoc::invalid_html_tags
 )]
 mod pb {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/channel-test/contract_proto_modules.rs"
-    ));
+    include!(concat!(env!("OUT_DIR"), "/contract_proto_modules.rs"));
 }
 
 use anyhow::Result;
@@ -36,7 +33,6 @@ async fn connect<C: ChannelContract>(atlas: &AtlasClient) -> Result<Channel<C>> 
 }
 
 #[tokio::test]
-#[ignore = "requires test_channel.py's live Atlas and gRPC fixtures"]
 async fn grpc_channels() -> Result<()> {
     let atlas = AtlasClient::connect(std::env::var("ROBONIX_TEST_ATLAS")?).await?;
     let control = std::env::var("ROBONIX_TEST_CONTROL")?;
