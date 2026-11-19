@@ -1,0 +1,3 @@
+---
+# Current wall time in RFC 3339 with the Chronos process's local UTC offset.
+string datetime

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-//! Linux Chronos executable: shared lifecycle and cached gRPC snapshot streams.
+//! Linux Chronos executable with gRPC and MCP endpoints.
 
 mod config;
 mod encoding;
+mod mcp;
 mod pb;
 mod publication;
 mod service;
@@ -39,7 +40,7 @@ pub async fn run() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let listener = TcpListener::bind(cfg.listen)
         .await
-        .context("bind Chronos gRPC listener")?;
+        .context("bind Chronos listener")?;
     let advertised = dial_address(listener.local_addr()?);
     let mut atlas = tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(10),
@@ -53,12 +54,17 @@ pub async fn run() -> Result<()> {
     let server_svc = svc.clone();
     let server_shutdown = svc.shutdown_receiver();
     let mut server = tokio::spawn(async move {
+        let routes =
+            tonic::service::Routes::new(RobonixLifecycleDriverServer::new(server_svc.clone()))
+                .add_service(RobonixSystemChronosQualityServer::new(server_svc.clone()))
+                .add_service(RobonixSystemChronosReferenceTimeServer::new(
+                    server_svc.clone(),
+                ))
+                .into_axum_router()
+                .route_service(mcp::PATH, mcp::http_service(server_svc, advertised.ip()));
         tonic::transport::Server::builder()
-            .add_service(RobonixLifecycleDriverServer::new(server_svc.clone()))
-            .add_service(RobonixSystemChronosQualityServer::new(server_svc.clone()))
-            .add_service(RobonixSystemChronosReferenceTimeServer::new(
-                server_svc.clone(),
-            ))
+            .accept_http1(true)
+            .add_routes(routes.into())
             .serve_with_incoming_shutdown(
                 TcpListenerStream::new(listener),
                 wait_shutdown(server_shutdown),
@@ -95,10 +101,7 @@ pub async fn run() -> Result<()> {
     let outcome = if let Err(error) = startup_result {
         Err(error)
     } else {
-        robonix_scribe::info!(
-            "Chronos gRPC ready on {advertised} as '{}'",
-            cfg.provider_id
-        );
+        robonix_scribe::info!("Chronos ready on {advertised} as '{}'", cfg.provider_id);
         let mut tick = tokio::time::interval(Duration::from_secs(20));
         tick.tick().await;
         let shutdown = wait_shutdown(svc.shutdown_receiver());
@@ -110,8 +113,8 @@ pub async fn run() -> Result<()> {
                 _ = &mut shutdown => break Ok(()),
                 result = &mut server => {
                     server_joined = true;
-                    break result.context("join Chronos gRPC server")
-                        .and_then(|r| r.context("Chronos gRPC server failed"));
+                    break result.context("join Chronos server")
+                        .and_then(|r| r.context("Chronos server failed"));
                 }
                 _ = tick.tick() => {
                     match tokio::time::timeout(Duration::from_secs(5), atlas.heartbeat(&cfg.provider_id)).await {
@@ -146,7 +149,7 @@ pub async fn run() -> Result<()> {
             Ok(result) => result.context("join Chronos server cleanup")??,
             Err(_) => {
                 robonix_scribe::warn!(
-                    "Chronos gRPC shutdown exceeded five seconds; closing remaining connections"
+                    "Chronos shutdown exceeded five seconds; closing remaining connections"
                 );
                 server.abort();
                 let _ = server.await;
@@ -156,7 +159,6 @@ pub async fn run() -> Result<()> {
     outcome.and(cleanup)
 }
 
-/// Declare exact generated service names and method routes for Atlas discovery.
 async fn declare(atlas: &mut AtlasClient, id: &str, endpoint: &str) -> Result<()> {
     for (contract, service, method, contract_path) in [
         (
@@ -192,6 +194,17 @@ async fn declare(atlas: &mut AtlasClient, id: &str, endpoint: &str) -> Result<()
             )
             .await?;
     }
+    let tool = mcp::wall_time_tool();
+    atlas
+        .declare_capability_with_description(
+            id,
+            mcp::CONTRACT_ID,
+            atlas_pb::Transport::Mcp,
+            &format!("http://{endpoint}{}", mcp::PATH),
+            atlas_client::mcp_params(serde_json::to_string(&tool.input_schema)?),
+            mcp::DESCRIPTION,
+        )
+        .await?;
     Ok(())
 }
 

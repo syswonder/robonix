@@ -24,7 +24,7 @@ pub(super) struct Args {
     /// Atlas endpoint; defaults to 127.0.0.1:50051.
     #[arg(long, env = "ROBONIX_ATLAS")]
     pub atlas: Option<String>,
-    /// gRPC listen address; defaults to 127.0.0.1:50094.
+    /// Listen address for gRPC and MCP. Defaults to 127.0.0.1:50094.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
     /// Atlas runtime identity; defaults to chronos.

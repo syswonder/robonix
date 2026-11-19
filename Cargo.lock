@@ -1681,6 +1681,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link",
 ]
 
 [[package]]
@@ -3116,11 +3117,15 @@ checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
  "pastey",
  "pin-project-lite",
+ "rand 0.10.2",
  "reqwest 0.13.4",
  "rmcp-macros",
  "schemars",
@@ -3131,7 +3136,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3179,9 +3186,11 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jiff",
  "libc",
  "prost",
  "protoc-bin-vendored",
+ "rmcp",
  "robonix-atlas",
  "robonix-chronos-clock",
  "robonix-codegen",
@@ -3196,6 +3205,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower-http",
 ]
 
 [[package]]
@@ -4437,6 +4447,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",

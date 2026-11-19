@@ -6,6 +6,11 @@ use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::Duration;
 
+use jiff::Timestamp;
+use rmcp::{
+    ServiceExt, model::CallToolRequestParams,
+    transport::streamable_http_client::StreamableHttpClientTransport,
+};
 use robonix_atlas::{
     client::AtlasClient,
     pb as atlas_pb,
@@ -34,8 +39,7 @@ impl Drop for ChildGuard {
 }
 
 #[tokio::test]
-/// A separate daemon process is discovered through Atlas and serves both real streams.
-async fn daemon_process_registers_streams_and_shuts_down() {
+async fn daemon_process_serves_streams_and_wall_time() {
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let atlas_addr = reserved.local_addr().unwrap();
     drop(reserved);
@@ -49,6 +53,7 @@ async fn daemon_process_registers_streams_and_shuts_down() {
         .await
         .unwrap();
     let mut child = ChildGuard(Command::new(env!("CARGO_BIN_EXE_robonix-chronos"))
+        .env("TZ", "Asia/Shanghai")
         .args(["--atlas", &atlas_addr.to_string(), "--listen", "127.0.0.1:0",
             "--provider-id", "chronos-process-test", "--config-json",
             r#"{"core":{"reference":{"kind":"linux_system"},"quality":{"refresh_interval_ns":10000000}}}"#])
@@ -75,6 +80,44 @@ async fn daemon_process_registers_streams_and_shuts_down() {
     .await
     .unwrap();
     assert_eq!(provider.capabilities.len(), 3);
+    let (time_edge, time_endpoint, params) = atlas
+        .connect_capability(
+            "chronos-smoke-consumer",
+            &provider.id,
+            "robonix/system/chronos/get_wall_time",
+            atlas_pb::Transport::Mcp,
+        )
+        .await
+        .unwrap();
+    let Some(atlas_pb::transport_params::Kind::Mcp(params)) = params.kind else {
+        panic!("Chronos must advertise MCP transport parameters");
+    };
+    let mut time_client = timeout(
+        Duration::from_secs(2),
+        ().serve(StreamableHttpClientTransport::from_uri(time_endpoint)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let tools = time_client.list_all_tools().await.unwrap();
+    assert_eq!(tools[0].name, "get_wall_time");
+    assert_eq!(
+        serde_json::to_value(&tools[0].input_schema).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&params.input_schema_json).unwrap()
+    );
+    let before = Timestamp::now().as_second();
+    let result = time_client
+        .call_tool(CallToolRequestParams::new("get_wall_time"))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(false));
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+    let datetime = output["datetime"].as_str().unwrap();
+    assert!(datetime.ends_with("+08:00"), "{datetime}");
+    let timestamp = datetime.parse::<Timestamp>().unwrap().as_second();
+    assert!((before..=Timestamp::now().as_second()).contains(&timestamp));
+
     let (edge, endpoint, params) = atlas
         .connect_capability(
             "chronos-smoke-consumer",
@@ -118,6 +161,29 @@ async fn daemon_process_registers_streams_and_shuts_down() {
     let mut driver = RobonixLifecycleDriverClient::connect(address)
         .await
         .unwrap();
+    let reply = driver
+        .driver(pb::lifecycle::DriverRequest {
+            command: 2,
+            config_json: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(reply.ok, "{}", reply.error);
+    let result = time_client
+        .call_tool(CallToolRequestParams::new("get_wall_time"))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("inactive")
+    );
+    time_client.close().await.unwrap();
+    atlas.disconnect_capability(&time_edge).await.unwrap();
     let reply = driver
         .driver(pb::lifecycle::DriverRequest {
             command: 3,

@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/chronos/get_wall_time"
+version = "1"
+kind = "service"
+idl = "chronos/srv/GetWallTime.srv"
+description = "Get the current date and time in the Chronos process's local time zone."
+
+[mode]
+type = "rpc"
