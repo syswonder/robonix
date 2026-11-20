@@ -938,5 +938,5 @@ are refused during active navigation. These integrations require field validatio
 「代价地图」沿用 outdoorNav `b3798b8` 的单图叠加：全局紫色、局部青色，转换到 map 坐标显示，支持图层开关、定位山猫、全图和鼠标浏览。
 顶部默认仅显示定位、IMU 和导航核心状态，其余数据与事件通过“详细信息”展开。
 数据超过 3 秒标注过期，过期坐标变换不用于绘制。仅打开标签页时每秒刷新，采集中也可查看。
-部署在 `outdoor_navigation.navigation_http_url` 设置本机导航 HTTP 地址（山猫为 `http://127.0.0.1:19985`）；
-浏览器通过只读 `/api/outdoor/costmaps/global` 和 `/api/outdoor/costmaps/local` 获取快照，检查模式也可使用。
+代价地图由导航服务通过 Atlas 能力 `robonix/service/navigation_outdoor/costmap` 提供，
+Scene 经 `outdoor_navigation` 直接读取，不需要额外配置地址。
