@@ -80,6 +80,7 @@ jobs:
           python3 -m pytest -q
           system/scene/tests/test_goal_planner.py
           system/scene/tests/test_malformed_grid_inputs.py
+          system/scene/tests/test_rerun_overview.py
 
   robonix-api-tests:
     name: robonix-api unit tests

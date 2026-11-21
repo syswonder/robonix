@@ -391,6 +391,9 @@ async def capture(page, frame, output: Path, label: str, view: str) -> dict:
     state = await frame.evaluate(STATE)
     proof = await recording_proof(recording, scene_path, view, state["id"])
     await page.screenshot(path=str(output / f"{label}-{view}-unfocused.png"))
+    # Checked before focusing: the object focus may turn the robot out of view.
+    pixels = output / f"{label}-{view}-canvas.png"
+    await canvas.screenshot(path=str(pixels))
     if view == "3d":
         focus = await page.request.post("/api/viewer/focus",
                                         data={"object_id": proof["object"]["id"]}, max_retries=2)
@@ -398,8 +401,6 @@ async def capture(page, frame, output: Path, label: str, view: str) -> dict:
             raise RuntimeError("Scene's existing object focus action failed")
         await asyncio.sleep(1)
     await page.screenshot(path=str(output / f"{label}-{view}-page.png"))
-    pixels = output / f"{label}-{view}-canvas.png"
-    await canvas.screenshot(path=str(pixels))
     return {**proof, **validate_pixels(pixels, proof["object_color"])}
 
 

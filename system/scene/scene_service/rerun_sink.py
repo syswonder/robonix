@@ -97,7 +97,16 @@ def _layout(view):
     )
 
 
-def _blueprint_3d(look_target=None):
+def _overview(x0: float, y0: float, x1: float, y1: float):
+    """An eye south of the map and 45 degrees above it, far enough back to see
+    the whole grid; rerun's own framing follows the objects and can cut off
+    the part of the map the robot is on."""
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    back = math.hypot(x1 - x0, y1 - y0) * .8
+    return [cx, cy - back, back], [cx, cy, 0.0]
+
+
+def _blueprint_3d(look_target=None, position=None):
     """The 3D page; `look_target` aims the camera, which is how the panel
     points the viewer at an object (rerun has no selection setter)."""
     import rerun.blueprint as rrb
@@ -107,6 +116,7 @@ def _blueprint_3d(look_target=None):
     # centre.
     eye = rrb.EyeControls3D(
         kind=rrb.Eye3DKind.FirstPerson, eye_up=[0.0, 0.0, 1.0], speed=5.0,
+        position=position,
         look_target=None if look_target is None
         else [float(v) for v in look_target])
     return _layout(rrb.Spatial3DView(
@@ -489,6 +499,18 @@ class RerunSink:
             vertex_texcoords=[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
             albedo_texture=texture,
         ), static=True)
+        bounds = f"{x0:.1f},{y0:.1f},{x1:.1f},{y1:.1f}"
+        if self._sent.get("/map/eye") != bounds:
+            # Aim an untouched viewer once; later growth only updates the default.
+            first = "/map/eye" not in self._sent
+            self._sent["/map/eye"] = bounds
+            position, target = _overview(x0, y0, x1, y1)
+            try:
+                self._rr.send_blueprint(
+                    _blueprint_3d(target, position), make_active=first,
+                    make_default=True, recording=self._map3d.recording)
+            except Exception as error:  # noqa: BLE001
+                log.debug("[scene-rerun] framing the map failed: %r", error)
 
     def log_objects(self, objects: Iterable[Any],
                     clouds: Optional[dict[str, Sequence]] = None,
