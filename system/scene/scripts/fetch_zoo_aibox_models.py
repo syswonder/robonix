@@ -22,7 +22,7 @@ teaches their ``convert.py`` the rk1820 target:
     fetch_zoo_aibox_models.py verify
 
     # from the PC - board smoke test per deploy-aibox-scene
-    fetch_zoo_aibox_models.py board [--host aibox] [--image IMG]
+    fetch_zoo_aibox_models.py board [--host aibox] [--board-dir DIR] [--image IMG]
 
 Artifacts land in ``<work>/models/zoo`` (ONNX, torch refs) and
 ``<work>/rknn-zoo`` (.rknn/.weight); the live board bundle is never touched.
@@ -32,13 +32,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shlex
 import subprocess
 import sys
 import urllib.request
 
 ZOO_BASE = ("https://ftrg.zbox.filez.com/v2/delivery/data"
             "/95f00b0fc900458ba134f8b180b3f7a1/examples")
-BOARD_DIR = "/root/robonix/dualmap/model/npu-zoo"
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
@@ -182,11 +182,11 @@ def cmd_board(args: argparse.Namespace) -> None:
     if not runs:
         raise SystemExit("nothing to test - run verify first")
     subprocess.run(["ssh", "-o", "BatchMode=yes", args.host,
-                    f"mkdir -p {BOARD_DIR}"], check=True)
+                    f"mkdir -p {shlex.quote(args.board_dir)}"], check=True)
     subprocess.run(["scp", "-o", "BatchMode=yes", *files,
-                    f"{args.host}:{BOARD_DIR}/"], check=True)
+                    f"{args.host}:{args.board_dir}/"], check=True)
     subprocess.run(["ssh", "-o", "BatchMode=yes", args.host,
-                    f"cd {BOARD_DIR} && " + " && ".join(runs)], check=True)
+                    f"cd {shlex.quote(args.board_dir)} && " + " && ".join(runs)], check=True)
     print(f"[board] done. The live bundle at .../model/npu/ is untouched; "
           f"swap clip_image.rknn/.weight there manually after review.")
 
@@ -211,6 +211,8 @@ def main() -> None:
         "~/aibox-npu/rknn-model-zoo/examples/yolo_world/model/bus.jpg"))
     p = sub.add_parser("board", help="board smoke test via ssh")
     p.add_argument("--host", default="aibox")
+    p.add_argument("--board-dir", default="/tmp/aibox-npu-zoo",
+                   help="scratch directory on the board for the test files")
     p.add_argument("--image", default=os.path.expanduser(
         "~/aibox-npu/rknn-model-zoo/examples/yolo_world/model/bus.jpg"))
 

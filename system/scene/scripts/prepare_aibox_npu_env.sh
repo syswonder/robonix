@@ -197,14 +197,8 @@ host_python_minors() {
 }
 
 ensure_uv() {
-    if command -v uv >/dev/null; then
-        return
-    fi
-    ((CHECK_ONLY == 0)) || die 'uv is missing; install mode can bootstrap it from astral.sh'
-    command -v curl >/dev/null || die 'curl is required to install uv'
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
-    command -v uv >/dev/null || die 'uv installation did not add uv to PATH'
+    command -v uv >/dev/null ||
+        die 'uv is missing; install it first: https://docs.astral.sh/uv/getting-started/installation/'
 }
 
 ensure_uv_python() {

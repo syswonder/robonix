@@ -307,6 +307,8 @@ def check(host: dict):
     if not (BUILD / 'docker-env.json').exists():
         raise RuntimeError('No verified Docker image; run the Scene jetson-docker build first')
     selected = json.loads((BUILD / 'docker-env.json').read_text())
+    if 'l4t' not in host:
+        raise RuntimeError('The Scene jetson-docker target needs a Jetson host (/etc/nv_tegra_release is missing)')
     if (not host['l4t'].startswith(selected['l4t_prefix'])
             or selected['inference'] != inference_backend()
             or selected['source'] != source_hash()):

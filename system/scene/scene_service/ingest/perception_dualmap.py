@@ -235,12 +235,9 @@ class DualMapDetector(ConceptGraphsDetector):
                 if not os.path.isfile(os.path.join(npu_dir, name)):
                     log.warning("[scene-dualmap] NPU model missing: %s", os.path.join(npu_dir, name))
                     return False
-            if not clip_weights:
-                clip_weights = next((p for p in ("/opt/models/clip/ViT-B-32.pt", "/root/weights/clip/ViT-B-32.pt")
-                                     if os.path.isfile(p)), "")
-            if not clip_weights:
+            if not os.path.isfile(clip_weights):
                 log.warning("[scene-dualmap] NPU mode needs SCENE_DUALMAP_CLIP_WEIGHTS "
-                            "(openai ViT-B/32 checkpoint) for the CLIP text tower")
+                            "(openai ViT-B/32 checkpoint) for the CLIP text tower: %r", clip_weights)
                 return False
             needed = ()
         else:
