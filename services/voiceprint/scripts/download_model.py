@@ -11,7 +11,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 MODEL = '3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx'
-SHA256 = 'f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11'
+SHA256 = 'e6af4d4c444f3dab01d991bb9b7d5af98eb979e329f6c8880a19d5553561ed25'
 
 
 def matches(path: Path) -> bool:
