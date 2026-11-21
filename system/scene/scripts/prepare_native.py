@@ -102,15 +102,21 @@ print(json.dumps({'ros_build_tools': 'ok'}))
 
 
 def detect() -> dict:
-    release = Path('/etc/nv_tegra_release').read_text()
-    match = re.search(r'# R(\d+).*?REVISION:\s*([\d.]+)', release)
-    if match is None:
-        raise RuntimeError('Cannot read Jetson L4T version from /etc/nv_tegra_release')
     system = platform.freedesktop_os_release()
-    model = Path('/proc/device-tree/model').read_text().rstrip('\0\n')
-    return dict(l4t=f'{match[1]}.{match[2]}', distro=system['ID'], ubuntu=system['VERSION_ID'],
-                arch=platform.machine(), python=f'{sys.version_info.major}.{sys.version_info.minor}',
-                model=model)
+    host = dict(distro=system['ID'], ubuntu=system['VERSION_ID'],
+                arch=platform.machine(), python=f'{sys.version_info.major}.{sys.version_info.minor}')
+    model = Path('/proc/device-tree/model')
+    if model.exists():
+        host['model'] = model.read_text().rstrip('\0\n')
+    release = Path('/etc/nv_tegra_release')
+    # Jetson BSP facts: other arm64 hosts (e.g. the Rockchip AIBOX) ship
+    # neither file, and only the jetson-docker target consumes l4t.
+    if release.exists():
+        match = re.search(r'# R(\d+).*?REVISION:\s*([\d.]+)', release.read_text())
+        if match is None:
+            raise RuntimeError('Cannot read Jetson L4T version from /etc/nv_tegra_release')
+        host['l4t'] = f'{match[1]}.{match[2]}'
+    return host
 
 
 def select_profile(host: dict, *, check_python: bool = True) -> dict:

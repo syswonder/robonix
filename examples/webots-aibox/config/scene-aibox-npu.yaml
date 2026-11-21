@@ -1,0 +1,16 @@
+# Scene NPU config for the boot-path deployment (copy of the board's
+# run/scene-aibox-npu.yaml; edit here, then mirror the values into the
+# scene entry in robonix_manifest.yaml, which delivers them via
+# Driver(CMD_INIT)).
+perception:
+  backend: dualmap
+  dualmap:
+    keyframe_translation_m: 0.5
+    keyframe_rotation_deg: 8.0
+    keyframe_time_s: 5.0
+    stable_num: 2
+    classes: []
+    floor_gate: false
+    global_map: false
+confidence_threshold: 0.20
+max_detections: 30

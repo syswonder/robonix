@@ -714,6 +714,8 @@ Hugging Face mirror endpoint (default `https://hf-mirror.com`); the canonical
 | `SCENE_PERCEPTION_BACKEND` | `concept_graphs` | perception backend when the manifest does not set `perception.backend` (`concept_graphs` / `dualmap`) |
 | `SCENE_DUALMAP_CLASSES` | (unset) | host file with one YOLO-World class name per line for the DualMap backend; `start.sh` mounts it read-only. The manifest's `perception.dualmap.classes` list takes precedence |
 | `SCENE_DUALMAP_ROOT` | `/opt/dualmap` | DualMap checkout inside the container (`docker/Dockerfile.dualmap` puts it there) |
+| `SCENE_DUALMAP_NPU_DIR` | (unset) | enables the AIBOX RKNPU3 path; the directory must contain the YOLO-World, MobileSAM encoder and decoder, and CLIP image RKNN graphs listed in the `Scene NPU models` section of `examples/webots-aibox/README.md` |
+| `SCENE_DUALMAP_CLIP_WEIGHTS` | required for NPU mode | OpenAI ViT-B/32 checkpoint for the CPU text tower |
 | `ROBONIX_SCENE_IMAGE` | `robonix-scene` | image `start.sh` runs; use `robonix-scene-dualmap` for the DualMap backend |
 
 ## Object memory (Save/Load snapshots)
