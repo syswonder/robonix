@@ -117,7 +117,8 @@ class ChannelTest(unittest.TestCase):
         })
         wait_port(cls.atlas_process, atlas_port)
         wait_port(cls.mcp_process, mcp_port)
-        cls.atlas = _Atlas(f"127.0.0.1:{atlas_port}")
+        cls.atlas_address = f"127.0.0.1:{atlas_port}"
+        cls.atlas = _Atlas(cls.atlas_address)
         cls.endpoint = f"http://127.0.0.1:{mcp_port}/mcp"
         cls.atlas.register_service("channel-test", "robonix/service")
         cls.atlas.declare_capability("channel-test", ECHO, Transport.MCP, cls.endpoint)
@@ -136,9 +137,7 @@ class ChannelTest(unittest.TestCase):
         cls.atlas_process.terminate()
         cls.mcp_process.wait(timeout=10)
         cls.atlas_process.wait(timeout=10)
-        if cls.atlas._channel_client.portal_cm:
-            cls.atlas._channel_client.portal.call(cls.atlas._channel_client.portal.stop, True)
-            cls.atlas._channel_client.portal_cm.__exit__(None, None, None)
+        cls.atlas._channel_client.stop_portal()
         cls.atlas._channel.close()
         cls.log.close()
         sys.path.remove(str(cls.work / "types"))
@@ -438,6 +437,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             self.configure(scene_response={"result": valid})
             self.assertTrue(asyncio.run(fetch_robot_context("verifier", "channel-test", 1)).pose_known)
+
+    def test_process_exits_after_mcp_call(self):
+        script = (
+            "import sys\n"
+            "from robonix_api import Transport\n"
+            "from robonix_api.atlas import _Atlas\n"
+            f"atlas = _Atlas({self.atlas_address!r})\n"
+            "with atlas.connect_channel(consumer_id='exit-test', provider_id='channel-test',\n"
+            f"        contract_id={ECHO!r}, transport=Transport.MCP) as channel:\n"
+            "    channel.call({})\n"
+        )
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(p) for p in (
+            self.work / "types", ROOT / "pylib/robonix-api", os.environ.get("PYTHONPATH", ""),
+        ) if p)}
+        subprocess.run([sys.executable, "-c", script], env=env, check=True, timeout=30)
 
     def test_nav_stress_consumer(self):
         sys.path.insert(0, str(ROOT / "testing"))

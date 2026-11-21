@@ -2,6 +2,7 @@
 """MCP sessions and generated message bindings owned by an execution Channel."""
 from __future__ import annotations
 
+import atexit
 import importlib
 import json
 import math
@@ -142,6 +143,7 @@ class _Mcp:
                 from anyio.from_thread import start_blocking_portal
                 client.portal_cm = start_blocking_portal()
                 client.portal = client.portal_cm.__enter__()
+                atexit.register(client.stop_portal)
         self.session_cm = client.portal.wrap_async_context_manager(
             _session(self.execution.channel.endpoint, _remaining(deadline)),
         )

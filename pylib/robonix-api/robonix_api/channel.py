@@ -56,6 +56,18 @@ class _ChannelClient:
         with self.lock:
             return self.channels.get(channel_id)
 
+    def stop_portal(self):
+        # Interpreter shutdown freezes the daemon loop thread, so an unstopped portal
+        # leaves the exiting main thread waiting on it forever.
+        with self.lock:
+            portal, portal_cm = self.portal, self.portal_cm
+            self.portal = self.portal_cm = None
+        if portal is not None:
+            try:
+                portal.call(portal.stop, True)
+            finally:
+                portal_cm.__exit__(None, None, None)
+
     def _descriptor(self, contract_id, transport, deadline):
         atlas = self.atlas
         # atlas.py defines _wire_stub and _wire_pb to use QueryContract defined in atlas.proto
