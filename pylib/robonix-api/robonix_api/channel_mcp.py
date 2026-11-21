@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import threading
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -80,8 +81,15 @@ def _json_object(pairs):
     return value
 
 
-def _invalid_constant(value):
-    raise ValueError(f"Invalid JSON constant: {value}")
+def _as_structured(value):
+    # FastMCP's structured output carries non-finite floats as null.
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _as_structured(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_as_structured(item) for item in value]
+    return value
 
 
 def _decode(result):
@@ -90,15 +98,15 @@ def _decode(result):
         raise RuntimeError(f"MCP tool error: {text}")
     value = result.structuredContent
     if value is None:
-        value = json.loads(text, object_pairs_hook=_json_object, parse_constant=_invalid_constant)
+        value = json.loads(text, object_pairs_hook=_json_object)
     elif value.keys() == {"result"} and isinstance(value["result"], dict):
         # FastMCP may wrap the structured reply while leaving the text reply flat.
         try:
-            flat = json.loads(text, object_pairs_hook=_json_object, parse_constant=_invalid_constant)
+            flat = json.loads(text, object_pairs_hook=_json_object)
         except ValueError:
             pass
         else:
-            if flat == value["result"]:
+            if _as_structured(flat) == value["result"]:
                 value = flat
     if not isinstance(value, dict):
         raise ValueError("MCP response must be a JSON object")

@@ -43,6 +43,26 @@ def wait_port(process, port):
     raise RuntimeError("test server did not start")
 
 
+class McpDecodeTest(unittest.TestCase):
+    def decode(self, text, structured=None):
+        from robonix_api.channel_mcp import _decode
+        return _decode(SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=text)],
+            isError=False, structuredContent=structured,
+        ))
+
+    def test_non_finite_floats_from_python_servers(self):
+        # FastMCP writes LaserScan ranges beyond range_max as Infinity in text
+        # and as null in its wrapped structured output.
+        text = '{"header": {"frame_id": "hokuyo"}, "ranges": [0.5, Infinity, NaN]}'
+        for structured in (None, {"result": {"header": {"frame_id": "hokuyo"}, "ranges": [0.5, None, None]}}):
+            with self.subTest(structured=structured is not None):
+                value = self.decode(text, structured)
+                self.assertEqual(value["header"], {"frame_id": "hokuyo"})
+                self.assertEqual(value["ranges"][:2], [0.5, float("inf")])
+                self.assertNotEqual(value["ranges"][2], value["ranges"][2])
+
+
 class ChannelLimitTest(unittest.TestCase):
     def limit(self, value):
         from robonix_api.channel import _channel_limit
@@ -405,14 +425,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         asyncio.run(fetch_robot_context("verifier", "channel-test", 1))
                     self.assertEqual(set(self.atlas.inspect()["channels"]), before)
 
-            for invalid_text in (
-                json.dumps(valid).replace('"stale": false', '"stale": true, "stale": false'),
-                json.dumps(valid).replace('"x": 0.0', '"x": NaN'),
-            ):
-                self.configure(text_only=True, scene_text=invalid_text)
-                with self.assertRaisesRegex(RuntimeError, "Duplicate JSON key|Invalid JSON constant"):
-                    asyncio.run(fetch_robot_context("verifier", "channel-test", 1))
-                self.assertEqual(set(self.atlas.inspect()["channels"]), before)
+            self.configure(text_only=True, scene_text=json.dumps(valid).replace(
+                '"stale": false', '"stale": true, "stale": false'))
+            with self.assertRaisesRegex(RuntimeError, "Duplicate JSON key"):
+                asyncio.run(fetch_robot_context("verifier", "channel-test", 1))
+            self.assertEqual(set(self.atlas.inspect()["channels"]), before)
+            # NaN reads as null, which the pose check then rejects.
+            self.configure(text_only=True, scene_text=json.dumps(valid).replace('"x": 0.0', '"x": NaN'))
+            with self.assertRaises(ValueError):
+                asyncio.run(fetch_robot_context("verifier", "channel-test", 1))
+            self.assertEqual(set(self.atlas.inspect()["channels"]), before)
 
             self.configure(scene_response={"result": valid})
             self.assertTrue(asyncio.run(fetch_robot_context("verifier", "channel-test", 1)).pose_known)

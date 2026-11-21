@@ -538,7 +538,7 @@ impl<C: ChannelContract> Channel<C> {
                 // FastMCP may wrap the structured reply while leaving the text reply flat.
                 if v.as_object().is_some_and(|object| object.len() == 1)
                     && let Some(inner) = v.get("result").filter(|inner| inner.is_object())
-                    && let Ok(flat) = serde_json::from_str::<Value>(&text)
+                    && let Ok(flat) = parse_tool_text(&text)
                     && &flat == inner
                 {
                     flat
@@ -546,7 +546,7 @@ impl<C: ChannelContract> Channel<C> {
                     v
                 }
             }
-            None => serde_json::from_str(&text).context("MCP result decoding failed")?,
+            None => parse_tool_text(&text).context("MCP result decoding failed")?,
         };
         ensure!(value.is_object(), "MCP response must be a JSON object");
         Ok(value)
@@ -723,6 +723,39 @@ impl<C: ChannelContract> Channel<C> {
     }
 }
 
+/// Parse an MCP tool's text reply. Python MCP servers write non-finite floats
+/// (e.g. LaserScan ranges) as `NaN`/`Infinity`, which JSON lacks; read them as
+/// null, as FastMCP's structured output does.
+fn parse_tool_text(text: &str) -> serde_json::Result<Value> {
+    let mut json = String::with_capacity(text.len());
+    let (mut rest, mut in_string, mut escaped) = (text, false, false);
+    while let Some(c) = rest.chars().next() {
+        if !in_string
+            && let Some(token) = ["-Infinity", "Infinity", "NaN"]
+                .into_iter()
+                .find(|token| rest.starts_with(token))
+        {
+            json.push_str("null");
+            rest = &rest[token.len()..];
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        }
+        json.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    serde_json::from_str(&json)
+}
+
 async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     let base = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_owned()
@@ -747,4 +780,22 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     )
     .await
     .context("MCP HTTP initialization failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_text_reads_non_finite_floats_as_null() {
+        let value = parse_tool_text(
+            r#"{"ranges": [0.5, Infinity, -Infinity, NaN], "note": "NaN \"Infinity\""}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"ranges": [0.5, null, null, null], "note": "NaN \"Infinity\""})
+        );
+        assert!(parse_tool_text("{\"x\": Inf}").is_err());
+    }
 }
