@@ -43,6 +43,25 @@ def wait_port(process, port):
     raise RuntimeError("test server did not start")
 
 
+class ChannelLimitTest(unittest.TestCase):
+    def limit(self, value):
+        from robonix_api.channel import _channel_limit
+        env = {} if value is None else {"ROBONIX_ATLAS_CHANNEL_LIMIT": value}
+        with mock.patch.dict(os.environ, env, clear=False):
+            if value is None:
+                os.environ.pop("ROBONIX_ATLAS_CHANNEL_LIMIT", None)
+            return _channel_limit()
+
+    def test_default_and_override(self):
+        self.assertEqual(self.limit(None), 1024)
+        self.assertEqual(self.limit(" 64 "), 64)
+
+    def test_invalid_values_fall_back(self):
+        for value in ("", "abc", "2", "-5"):
+            with self.subTest(value=value), self.assertLogs("robonix_api.channel", "WARNING"):
+                self.assertEqual(self.limit(value), 1024)
+
+
 @unittest.skipUnless((ROOT / "target/debug/robonix-atlas").exists(), "build Atlas and codegen first")
 class ChannelTest(unittest.TestCase):
     @classmethod

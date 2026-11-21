@@ -165,7 +165,8 @@ status or close attempt. A lost start response cannot be addressed without a
 confirmed run ID. There is no automatic business-request retry or persistence
 across consumer process restarts.
 
-The client holds at most 1024 allocations, reserving two for companion calls.
+The client holds at most 1024 allocations (`ROBONIX_ATLAS_CHANNEL_LIMIT` overrides
+the limit), reserving two for companion calls.
 Companions can also use unused business slots. Protocol failures without a
 response retain their own allocations; capacity exhaustion is reported.
 Successful close returns the slot.

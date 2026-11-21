@@ -2,13 +2,35 @@
 """Client-side communication and the lifetime of one capability execution."""
 from __future__ import annotations
 
+import logging
+import os
 import threading
 import time
 
 from .atlas_types import Channel, Transport, from_pb_contract
 
+log = logging.getLogger("robonix_api.channel")
+
 _TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CANCELLED", "TIMEOUT"}
 _STATES = _TERMINAL | {"PENDING", "RUNNING", "PAUSED"}
+_DEFAULT_CHANNEL_LIMIT = 1024
+_COMPANION_SLOTS = 2
+
+
+def _channel_limit():
+    """Allocations per Atlas client; ROBONIX_ATLAS_CHANNEL_LIMIT overrides the default."""
+    raw = os.environ.get("ROBONIX_ATLAS_CHANNEL_LIMIT")
+    if raw is None:
+        return _DEFAULT_CHANNEL_LIMIT
+    try:
+        limit = int(raw.strip())
+    except ValueError:
+        limit = 0
+    if limit > _COMPANION_SLOTS:
+        return limit
+    log.warning("ignoring ROBONIX_ATLAS_CHANNEL_LIMIT=%r; expected an integer above %d, using %d",
+                raw, _COMPANION_SLOTS, _DEFAULT_CHANNEL_LIMIT)
+    return _DEFAULT_CHANNEL_LIMIT
 
 
 def _remaining(deadline):
@@ -26,6 +48,7 @@ class _ChannelClient:
         self.channels: dict[str, Channel] = {}
         self.lock = threading.RLock()
         self.connecting = 0
+        self.limit = _channel_limit()
         self.portal = None
         self.portal_cm = None
 
@@ -59,9 +82,10 @@ class _ChannelClient:
             raise ValueError("Specify MCP, GRPC, or ROS2 for connect_channel")
         business = contract_id.rsplit("/", 1)[-1] not in {"status", "cancel"}
         with self.lock:
-            limit = 1022 if business else 1024
+            limit = self.limit - _COMPANION_SLOTS if business else self.limit
             if len(self.channels) + self.connecting >= limit:
-                raise RuntimeError("Atlas client channel capacity exhausted; two slots are reserved for companions")
+                raise RuntimeError("Atlas client channel capacity exhausted; two slots are reserved for companions; "
+                                   "close existing channels or raise ROBONIX_ATLAS_CHANNEL_LIMIT")
             self.connecting += 1
         try:
             return self._connect(consumer_id, provider_id, contract_id, transport,

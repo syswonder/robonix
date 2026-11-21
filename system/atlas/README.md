@@ -120,7 +120,8 @@ any clone of the same client. `is_terminal()` reports confirmed completion and
 `is_closed()` reports release. Dropping a waiter does not abandon the execution,
 and business requests are never automatically retried.
 
-Each client holds at most 1024 allocations, reserving two for companions.
+Each client holds at most 1024 allocations (`ROBONIX_ATLAS_CHANNEL_LIMIT` overrides
+the limit), reserving two for companions.
 Setup failures clean up allocations; failed cleanup remains recoverable by ID.
 Execution records are local to the consumer process and do not survive restart.
 

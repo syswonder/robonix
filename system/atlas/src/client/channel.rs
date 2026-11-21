@@ -169,12 +169,33 @@ pub(super) struct Channels {
     companion_capacity: Arc<Semaphore>,
 }
 
+/// Allocations per Atlas client unless `ROBONIX_ATLAS_CHANNEL_LIMIT` overrides it.
+const DEFAULT_CHANNEL_LIMIT: usize = 1024;
+/// Part of the limit that only status/cancel companions may use.
+const COMPANION_SLOTS: usize = 2;
+
+fn channel_limit() -> usize {
+    let Ok(raw) = std::env::var("ROBONIX_ATLAS_CHANNEL_LIMIT") else {
+        return DEFAULT_CHANNEL_LIMIT;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(limit) if limit > COMPANION_SLOTS => limit,
+        _ => {
+            robonix_scribe::warn!(
+                "[atlas-client] ignoring ROBONIX_ATLAS_CHANNEL_LIMIT={raw:?}; \
+                 expected an integer above {COMPANION_SLOTS}, using {DEFAULT_CHANNEL_LIMIT}"
+            );
+            DEFAULT_CHANNEL_LIMIT
+        }
+    }
+}
+
 impl Default for Channels {
     fn default() -> Self {
         Self {
             live: Mutex::new(HashMap::new()),
-            capacity: Arc::new(Semaphore::new(1022)),
-            companion_capacity: Arc::new(Semaphore::new(2)),
+            capacity: Arc::new(Semaphore::new(channel_limit() - COMPANION_SLOTS)),
+            companion_capacity: Arc::new(Semaphore::new(COMPANION_SLOTS)),
         }
     }
 }
@@ -312,7 +333,7 @@ impl AtlasClient {
             .or_else(|error| if companion {
                 self.channels.companion_capacity.clone().try_acquire_owned()
             } else { Err(error) })
-            .context("Atlas client channel capacity exhausted (two slots reserved for companions); close existing channels")?;
+            .context("Atlas client channel capacity exhausted (two slots reserved for companions); close existing channels or raise ROBONIX_ATLAS_CHANNEL_LIMIT")?;
         let descriptor =
             tokio::time::timeout(Duration::from_secs(30), self.query_contract(&contract))
                 .await
