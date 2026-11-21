@@ -31,7 +31,7 @@ The Webots sim itself stays outside boot — it is a GUI container owned by
    sources all three.
 4. Mapping, nav2, and explore are upstream packages referenced by `url:` in
    the manifest; `rbnx build` / `rbnx boot` keeps them built in the board's
-   `examples/webots/rbnx-boot/cache/`. Scene is built from `system/scene`.
+   `examples/webots-aibox/rbnx-boot/cache/`. Scene is built from `system/scene`.
 
 ## Bring up
 
