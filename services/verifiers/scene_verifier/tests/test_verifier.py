@@ -2,10 +2,11 @@
 import asyncio
 import json
 import math
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from scene_verifier.config import VerifierConfig, parse_config
 from scene_verifier.core import (
@@ -13,7 +14,7 @@ from scene_verifier.core import (
     parse_goal, parse_robot_context, shortest_angle_error,
     verify_navigation_result,
 )
-from scene_verifier.scene_client import decode_mcp_response
+from scene_verifier.scene_client import SCENE_CONTRACT, fetch_robot_context
 from scene_verifier.service import verify_request
 
 
@@ -145,19 +146,47 @@ class CoreTests(unittest.TestCase):
             goal, context(), VerifierConfig(yaw_tolerance_rad=math.pi))[0])
 
 
-class ResponseTests(unittest.TestCase):
-    def test_structured_and_text(self):
-        raw = vars(context()).copy()
-        structured = SimpleNamespace(isError=False, structuredContent=raw, content=[])
-        text = SimpleNamespace(isError=False, structuredContent=None, content=[
-            SimpleNamespace(type="text", text=json.dumps(raw))])
-        self.assertEqual(decode_mcp_response(structured), raw)
-        self.assertEqual(decode_mcp_response(text), raw)
+class SceneClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_uses_channel_off_event_loop(self):
+        atlas = MagicMock()
+        channel = atlas.connect_channel.return_value.__enter__.return_value
+        threads = []
 
-    def test_tool_error(self):
-        result = SimpleNamespace(isError=True, structuredContent={}, content=[])
-        with self.assertRaises(RuntimeError):
-            decode_mcp_response(result)
+        def call(*args, **kwargs):
+            threads.append(threading.get_ident())
+            channel.raw_response = vars(context()).copy()
+
+        channel.call.side_effect = call
+        api = SimpleNamespace(ATLAS=atlas, Transport=SimpleNamespace(MCP="mcp"))
+        with patch.dict("sys.modules", {"robonix_api": api}):
+            result = await fetch_robot_context("verifier", "scene", 0.5)
+
+        self.assertEqual(result, context())
+        self.assertEqual(len(threads), 1)
+        self.assertNotEqual(threads[0], threading.get_ident())
+        atlas.connect_channel.assert_called_once_with(
+            consumer_id="verifier", provider_id="scene",
+            contract_id=SCENE_CONTRACT, transport="mcp",
+        )
+        channel.call.assert_called_once_with({}, timeout=0.5)
+        atlas.connect_channel.return_value.__exit__.assert_called_once()
+
+    async def test_call_and_cleanup_failures_propagate(self):
+        for stage in ("call", "close"):
+            with self.subTest(stage=stage):
+                manager = MagicMock()
+                channel = manager.__enter__.return_value
+                channel.raw_response = vars(context()).copy()
+                if stage == "call":
+                    channel.call.side_effect = RuntimeError("MCP offline")
+                else:
+                    manager.__exit__.side_effect = RuntimeError("channel retained")
+                atlas = SimpleNamespace(connect_channel=lambda **kwargs: manager)
+                api = SimpleNamespace(ATLAS=atlas, Transport=SimpleNamespace(MCP="mcp"))
+                with patch.dict("sys.modules", {"robonix_api": api}):
+                    with self.assertRaisesRegex(RuntimeError, "MCP offline|channel retained"):
+                        await fetch_robot_context("verifier", "scene", 0.5)
+                manager.__exit__.assert_called_once()
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):

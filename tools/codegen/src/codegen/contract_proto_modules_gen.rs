@@ -3,7 +3,7 @@
 // `robonix_contracts.proto` closure. Module order follows proto `import` dependencies (deps first).
 
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -87,8 +87,8 @@ fn dfs_postorder(
     Ok(())
 }
 
-/// After `robonix_contracts.proto` is written, emit sibling `contract_proto_modules.rs`.
-pub fn write(out_dir: &Path, verbose: bool) -> Result<()> {
+/// Emit protobuf modules and Channel bindings in `contract_proto_modules.rs`.
+pub fn write(out_dir: &Path, verbose: bool, bindings: &BTreeMap<String, String>) -> Result<()> {
     let root = "robonix_contracts.proto";
     let contracts_path = out_dir.join(root);
     if !contracts_path.is_file() {
@@ -129,6 +129,9 @@ pub fn write(out_dir: &Path, verbose: bool) -> Result<()> {
         let rust_mod = package_to_rust_module(&dot_pkg);
         writeln!(&mut out, "pub mod {rust_mod} {{")?;
         writeln!(&mut out, "    tonic::include_proto!(\"{dot_pkg}\");")?;
+        if let Some(binding) = bindings.get(&rust_mod) {
+            out.push_str(binding);
+        }
         writeln!(&mut out, "}}")?;
         writeln!(&mut out)?;
     }

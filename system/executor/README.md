@@ -96,6 +96,13 @@ identifies subsequent status/cancel requests; without it, the provider must
 resolve the current or latest run. Calls without either sub-contract complete
 when their initial response returns.
 
+MCP sessions, companion discovery, and execution ownership are handled by the
+Atlas client library. The main channel stays allocated until termination is
+confirmed. Cancellation waits for terminal status; a timeout or status error
+reports the channel ID and retains the execution independently of the RTDL
+plan. `control_plan.completed` does not claim that a retained execution stopped.
+Verifier deadlines also retain calls whose termination is unconfirmed.
+
 Verification is optional. Configure it in the deployment manifest:
 
 ```yaml
@@ -179,10 +186,13 @@ Control execution writes `[executor/rtdl]` info records for its limit, condition
 cargo test -p robonix-executor --all-targets
 cargo build -p robonix-atlas -p robonix-executor -p robonix-pilot
 python3 scripts/test_execute_stream.py
+PYTHONPATH=pylib/robonix-api python3 -m unittest discover -s pylib/robonix-api/tests -p test_channel.py
 ```
 
 The cross-process test uses a local fake VLM, requires `grpcio` and
 `grpcio-tools`, and retains logs under `/tmp`.
+The channel tests also require the Python MCP SDK and a built `robonix-codegen`;
+they cover real provider calls, cancellation during startup, and invalid status retention.
 
 ## Large capability outputs
 

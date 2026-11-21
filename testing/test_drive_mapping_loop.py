@@ -3,7 +3,7 @@
 import math
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from drive_mapping_loop import drive_square, main, mapping_square
 
@@ -13,6 +13,14 @@ def grid(size=60):
             for y in range(size) for x in range(size)]
     return SimpleNamespace(info=SimpleNamespace(width=size, height=size, resolution=.05,
         origin=SimpleNamespace(position=SimpleNamespace(x=-1., y=-1.))), data=data)
+
+
+def channel(end="SUCCEEDED"):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.call.return_value.to_dict.return_value = {"accepted": True}
+    connection.status.return_value.to_dict.return_value = {"state": end}
+    return connection
 
 
 class MappingLoopTests(unittest.TestCase):
@@ -40,80 +48,78 @@ class MappingLoopTests(unittest.TestCase):
                 point = tuple(a[i] + (b[i] - a[i]) * step / 30 for i in (0, 1))
                 self.assertGreaterEqual(math.dist(point, obstacle), .2)
 
-    def test_failed_navigation_is_cancelled_and_stops_the_loop(self):
-        calls = []
-        def nav(tool, **args):
-            calls.append(tool)
-            return {"accepted": True, "run_id": "run"}
+    def test_navigation_timeout_exits_channel_and_stops_the_loop(self):
+        connection = channel()
+        connect = Mock(return_value=connection)
         world = SimpleNamespace(count=0, collisions=[])
         with patch("drive_mapping_loop.wait_terminal", return_value={"state": "TIMEOUT_LOCAL"}):
             with self.assertRaisesRegex(RuntimeError, "waypoint 0 failed"):
-                drive_square(world, nav, mapping_square(grid()))
-        self.assertEqual(calls, ["navigate", "cancel"])
+                drive_square(world, connect, mapping_square(grid()))
+        connect.assert_called_once()
+        connection.__exit__.assert_called_once()
 
     def test_collision_fails_even_when_navigation_reports_success(self):
         world = SimpleNamespace(count=0, collisions=[])
-        def nav(tool, **args):
-            world.count += 1
-            return {"accepted": True, "run_id": "run"}
-        with patch("drive_mapping_loop.wait_terminal", return_value={"state": "SUCCEEDED"}), \
-                patch("drive_mapping_loop.read_collision_count", side_effect=lambda _: world.count, create=True):
+        with patch("drive_mapping_loop.read_collision_count", return_value=1):
             with self.assertRaisesRegex(RuntimeError, "collision"):
-                drive_square(world, nav, mapping_square(grid()))
+                drive_square(world, channel, mapping_square(grid()))
 
     def test_final_collision_is_detected_while_old_subscriber_is_stale(self):
         world = SimpleNamespace(count=0, collisions=[])
-        def nav(tool, **args):
-            return {"accepted": True, "run_id": "run"}
-        with patch("drive_mapping_loop.wait_terminal", return_value={"state": "SUCCEEDED"}), \
-                patch("drive_mapping_loop.read_collision_count", side_effect=[0, 0, 0, 0, 1], create=True):
+        with patch("drive_mapping_loop.read_collision_count", side_effect=[0, 0, 0, 0, 1]):
             with self.assertRaisesRegex(RuntimeError, "collision.*4"):
-                drive_square(world, nav, mapping_square(grid()))
+                drive_square(world, channel, mapping_square(grid()))
         self.assertEqual(world.count, 0)
 
     def test_preparation_requires_clear_space_and_no_collision(self):
         for outcome in ("expanded", "budget", "uncleared", "collision", "timeout", "failure"):
             with self.subTest(outcome=outcome):
                 world = SimpleNamespace(costmap=grid(30), count=0, collisions=[], close=Mock())
-                preparation, navigation = [], []
-                def explore(tool, **args):
-                    preparation.append((tool, args))
-                    if tool == "explore":
-                        return {"accepted": True, "run_id": "prepare"}
-                    if tool == "status":
-                        if outcome in ("expanded", "budget", "collision", "failure"):
-                            world.costmap = grid()
-                        if outcome == "collision":
-                            world.count = 1
-                    return {"state": "TIMEOUT" if outcome == "budget" else "FAILED" if outcome == "failure" else "SUCCEEDED"}
-                def nav(tool, **args):
-                    if tool == "navigate":
-                        navigation.append(args["goal"])
-                        return {"accepted": True, "run_id": "navigate"}
-                    return {"state": "SUCCEEDED"}
-                def terminal(status, run_id, timeout_s):
-                    if outcome == "timeout" and run_id == "prepare":
-                        return {"state": "TIMEOUT_LOCAL"}
-                    return status(run_id=run_id)
-                with patch("drive_mapping_loop.World", return_value=world), \
+                explore = channel()
+                navigation = []
+
+                def connect(*, contract_id, **kwargs):
+                    if "/explore/" in contract_id:
+                        return explore
+                    connection = channel()
+                    navigation.append(connection)
+                    return connection
+
+                def terminal(connection, timeout_s):
+                    if connection is not explore:
+                        return {"state": "SUCCEEDED"}
+                    if outcome in ("expanded", "budget", "collision", "failure"):
+                        world.costmap = grid()
+                    if outcome == "collision":
+                        world.count = 1
+                    states = {"budget": "TIMEOUT", "timeout": "TIMEOUT_LOCAL", "failure": "FAILED"}
+                    return {"state": states.get(outcome, "SUCCEEDED")}
+
+                atlas = Mock()
+                atlas.find_unique_capability.side_effect = lambda *, contract_id, transport: SimpleNamespace(
+                    provider_id="provider", contract_id=contract_id,
+                )
+                atlas.connect_channel.side_effect = connect
+                with patch.dict("sys.modules", {"robonix_api": SimpleNamespace(ATLAS=atlas)}), \
+                        patch("drive_mapping_loop.World", return_value=world), \
                         patch("drive_mapping_loop.signal.signal"), \
-                        patch("drive_mapping_loop.endpoint", side_effect=lambda contract, _: ("provider", contract)), \
                         patch("drive_mapping_loop.activate"), \
-                        patch("drive_mapping_loop.Tools", side_effect=lambda url: explore if "/explore/" in url else nav), \
                         patch("drive_mapping_loop.read_collision_count", side_effect=lambda _: world.count), \
                         patch("drive_mapping_loop.wait_terminal", side_effect=terminal):
                     if outcome in ("expanded", "budget"):
                         main()
                         self.assertEqual(len(navigation), 5)
-                        self.assertEqual(navigation[0], navigation[-1])
+                        for connection in navigation:
+                            connection.call.assert_called_once()
+                            connection.__exit__.assert_called_once()
+                        self.assertEqual(navigation[0].call.call_args, navigation[-1].call.call_args)
                     else:
                         with self.assertRaises(RuntimeError):
                             main()
                         self.assertEqual(navigation, [])
-                self.assertTrue(preparation)
-                self.assertEqual(preparation[0][1]["timeout_s"], 120.)
-                if outcome == "timeout":
-                    self.assertEqual(preparation[-1][0], "cancel")
+                explore.call.assert_called_once()
+                self.assertEqual(explore.call.call_args.args[0]["timeout_s"], 120.)
+                explore.__exit__.assert_called_once()
                 world.close.assert_called_once()
 
 

@@ -7,6 +7,7 @@ slotted to keep the runtime cost negligible.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
@@ -133,9 +134,11 @@ class ContractDescriptor:
 
 @dataclass
 class Channel:
-    """Open consumer->provider edge returned by `ATLAS.connect_capability`.
-    Context-manager — `__exit__` calls `close()` (which fires
-    `DisconnectCapability` on atlas, idempotent)."""
+    """Atlas allocation with optional execution ownership from `connect_channel`.
+
+    `connect_capability` preserves endpoint-only behavior. Execution-owning
+    channels confirm termination before releasing their allocation.
+    """
 
     provider_id: str
     contract_id: str
@@ -146,6 +149,39 @@ class Channel:
     time_descriptor: CapabilityTimeDescriptor | None = None
     _closer: Any = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
+    _execution: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def run_id(self) -> str | None:
+        return self._execution.run_id if self._execution else None
+
+    @property
+    def raw_response(self) -> dict | None:
+        """Decoded business response; protobuf responses include scalar defaults."""
+        if self._execution is None:
+            return None
+        with self._execution.lock:
+            return deepcopy(self._execution.raw_response)
+
+    def call(self, request, *, timeout: float | None = None):
+        return self._managed().call(request, timeout=timeout)
+
+    def publish(self, message) -> None:
+        self._managed().publish(message)
+
+    def subscribe(self, callback) -> None:
+        self._managed().subscribe(callback)
+
+    def status(self, *, timeout: float = 30.0):
+        return self._managed().companion("status", timeout=timeout)
+
+    def cancel(self, *, timeout: float = 30.0):
+        return self._managed().companion("cancel", timeout=timeout)
+
+    def _managed(self):
+        if self._execution is None:
+            raise RuntimeError("Use connect_channel() for capability execution")
+        return self._execution
 
     def __enter__(self) -> "Channel":
         return self
@@ -153,8 +189,12 @@ class Channel:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def close(self) -> None:
+    def close(self, *, timeout: float = 5.0) -> None:
         if self._closed:
+            return
+        if self._execution is not None:
+            self._execution.close(timeout=timeout)
+            self._closed = True
             return
         object.__setattr__(self, "_closed", True)
         if self._closer is not None:

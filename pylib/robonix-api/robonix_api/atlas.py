@@ -90,6 +90,8 @@ class _Atlas:
         # race the first declare_capability otherwise (double channel +
         # leaked grpc.aio polling threads). Double-checked under the lock.
         self._stub_lock = threading.Lock()
+        from .channel import _ChannelClient
+        self._channel_client = _ChannelClient(self)
 
     # -- lazy stub bootstrap -------------------------------------------------
 
@@ -497,6 +499,19 @@ class _Atlas:
 
     # -- channels -----------------------------------------------------------
 
+    def connect_channel(
+        self, *, consumer_id: str, provider_id: str, contract_id: str,
+        transport: Transport | str | int,
+    ) -> Channel:
+        """Prepare communication for one execution; retain uncertain work."""
+        return self._channel_client.connect(
+            consumer_id=consumer_id, provider_id=provider_id,
+            contract_id=contract_id, transport=transport,
+        )
+
+    def get_channel(self, channel_id: str) -> Channel | None:
+        return self._channel_client.get(channel_id)
+
     def connect_capability(
         self,
         *,
@@ -507,12 +522,15 @@ class _Atlas:
     ) -> Channel:
         """Open a consumer->provider edge. Returns a `Channel` context manager
         — `with ATLAS.connect_capability(...) as ch: ...` auto-disconnects."""
+        return self._allocate_channel(consumer_id, provider_id, contract_id, transport)
+
+    def _allocate_channel(self, consumer_id, provider_id, contract_id, transport, *, timeout=None):
         resp = self._wire_stub.ConnectCapability(self._wire_pb.ConnectCapabilityRequest(
             consumer_id=consumer_id,
             provider_id=provider_id,
             contract_id=contract_id,
             transport=self._transport_enum(transport),
-        ))
+        ), timeout=timeout)
         t = _resolve_transport(transport)
         params = (
             from_pb_params(t, resp.params)

@@ -19,6 +19,7 @@ walkdir.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
+futures-util = "0.3"
 tonic.workspace = true
 prost.workspace = true
 tonic-prost.workspace = true
@@ -27,12 +28,13 @@ uuid.workspace = true
 # introspection. Atlas only links against the parser submodule (no
 # code generation at runtime).
 robonix-codegen.workspace = true
+rmcp = { workspace = true, features = ["transport-streamable-http-client-reqwest"] }
+reqwest.workspace = true
 
 [build-dependencies]
 protoc-bin-vendored.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
-# NOTE: robonix-codegen build-dependency REMOVED (robonix-codegen RIDL codegen removed from server build)
 
 [dev-dependencies]
 # robonix-sdk dev-dep removed — Node-* wire schema retired and the SDK

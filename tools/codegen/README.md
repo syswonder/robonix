@@ -11,6 +11,7 @@ that packages call from their own `scripts/build.sh`.
 | Output | When | Where |
 | --- | --- | --- |
 | `*.proto` + tonic Rust stubs | Inside each Rust crate's `build.rs` | `OUT_DIR` |
+| `contract_proto_modules.rs` (PB modules and Channel bindings) | Contract proto generation | Proto output directory |
 | `proto_gen/*_pb2.py` + `*_pb2_grpc.py` | Python `rbnx codegen` | `<pkg>/rbnx-build/codegen/proto_gen/` |
 | `robonix_mcp_types/<pkg>_mcp.py` | `rbnx codegen --mcp` | `<pkg>/rbnx-build/codegen/robonix_mcp_types/` |
 
@@ -21,6 +22,12 @@ use via `rbnx codegen` (which wraps this binary).
 Contract reference generation also records `[contract].llm_callable` as
 whether Pilot may show implementations to its planning model. The field
 defaults to `true` and does not alter generated transport stubs.
+
+Each generated MCP module includes `_SRV_TYPES`, mapping its IDL service names
+to the generated request and response classes. The Python Atlas client uses
+this table with `ContractDescriptor.io_srv_type` for `connect_channel` calls.
+Existing message classes and their serialization methods keep their names.
+Regenerate with `rbnx codegen -p <package> --mcp` when adopting the new entry point.
 
 ## Build
 

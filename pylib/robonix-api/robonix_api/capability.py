@@ -428,6 +428,21 @@ class _ProviderBase:
         self._channels.append(ch)
         return ch
 
+    def connect_channel(
+        self,
+        provider: CapabilityProvider | Capability,
+        contract_id: str,
+        transport: Transport | str | int,
+    ) -> Channel:
+        ch = ATLAS.connect_channel(
+            consumer_id=self.id,
+            provider_id=provider.id if isinstance(provider, CapabilityProvider) else provider.provider_id,
+            contract_id=contract_id,
+            transport=transport,
+        )
+        self._channels.append(ch)
+        return ch
+
     # -- Layer 1: subprocess + ROS sentinel --------------------------------
 
     def spawn(
@@ -649,7 +664,8 @@ class _ProviderBase:
 
     @property
     def mcp_endpoint(self) -> str:
-        return f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
+        path = self._mcp_app.settings.streamable_http_path if self._mcp_app is not None else "/mcp"
+        return f"http://{self._advertise_host()}:{self._mcp_port}{path}"
 
     # -- Layer 2: provides_grpc decorator + attach_grpc_servicer -----------
 
@@ -907,7 +923,7 @@ class _ProviderBase:
         log.info("MCP HTTP serving on %s:%d", self._bind_host, self._mcp_port)
 
     def _declare_mcp_handlers(self) -> None:
-        endpoint = f"http://{self._advertise_host()}:{self._mcp_port}/mcp/"
+        endpoint = self.mcp_endpoint
         for fn in self._mcp_handlers:
             cid = getattr(fn, "_robonix_contract_id", None)
             if cid is None:
@@ -940,9 +956,14 @@ class _ProviderBase:
             self._stopping.set()
 
     def _teardown(self) -> None:
+        retained = []
         for ch in self._channels:
-            ch.close()
-        self._channels.clear()
+            try:
+                ch.close()
+            except Exception:
+                log.exception("Channel %s could not close", ch.channel_id)
+                retained.append(ch)
+        self._channels = retained
         self._spawn.shutdown_all()
         if self._driver_server is not None:
             try:

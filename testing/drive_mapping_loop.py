@@ -8,9 +8,10 @@ import math
 import signal
 import threading
 import time
+from functools import partial
 from types import SimpleNamespace
 
-from nav_stress import TERMINAL, Tools, World, activate, candidates, endpoint, goal_pose, wait_terminal
+from nav_stress import CONSUMER, World, activate, candidates, goal_pose, wait_terminal
 
 
 def mapping_square(grid, side_m: float = 1.5) -> list[tuple[float, float, float]]:
@@ -64,31 +65,27 @@ def read_collision_count(world) -> int:
         world.node.destroy_subscription(subscription)
 
 
-def drive_square(world, nav, waypoints) -> None:
+def drive_square(world, connect_navigation, waypoints) -> None:
     if world.count is None:
         raise RuntimeError("simulator collision counter is unavailable")
     before = world.count
     events_before = len(world.collisions)
     for index, (x, y, yaw) in enumerate(waypoints):
-        result = nav("navigate", goal=goal_pose(x, y, yaw))
-        if not result.get("accepted") or not result.get("run_id"):
-            raise RuntimeError(f"mapping waypoint {index} rejected: {result}")
-        run_id = result["run_id"]
-        completed = False
-        try:
-            end = wait_terminal(lambda **args: nav("status", **args), run_id, 150.)
-            completed = end.get("state") == "SUCCEEDED"
-            if not completed:
+        with connect_navigation() as channel:
+            result = channel.call({"goal": goal_pose(x, y, yaw)}, timeout=30).to_dict()
+            if not result.get("accepted"):
+                raise RuntimeError(f"mapping waypoint {index} rejected: {result}")
+            end = wait_terminal(channel, 150.)
+            if end.get("state") != "SUCCEEDED":
                 raise RuntimeError(f"mapping waypoint {index} failed: {end}")
-        finally:
-            if not completed:
-                nav("cancel", run_id=run_id)
         if read_collision_count(world) != before or len(world.collisions) != events_before:
             raise RuntimeError(f"simulator reported a collision during mapping waypoint {index}")
         print(f"mapping waypoint {index}/4 reached ({x:.3f}, {y:.3f}) without collision", flush=True)
 
 
 def main() -> None:
+    from robonix_api import ATLAS
+
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     world = World()
     try:
@@ -103,29 +100,33 @@ def main() -> None:
             # A partial scan can expose too little known space to close the square.
             before = read_collision_count(world)
             events_before = len(world.collisions)
-            provider, url = endpoint("robonix/skill/explore/explore", "mcp")
-            activate(provider)
-            explore = Tools(url)
-            result = explore("explore", area_hint="", timeout_s=120., max_speed_m_s=0.)
-            if not result.get("accepted") or not result.get("run_id"):
-                raise RuntimeError(f"mapping preparation rejected: {result}")
-            completed = False
-            try:
-                end = wait_terminal(lambda **args: explore("status", **args), result["run_id"], 180.)
-                completed = end.get("state") in TERMINAL
-                if not completed:
-                    raise RuntimeError(f"mapping preparation did not terminate: {end}")
+            explore = ATLAS.find_unique_capability(
+                contract_id="robonix/skill/explore/explore", transport="mcp",
+            )
+            activate(explore.provider_id)
+            with ATLAS.connect_channel(
+                consumer_id=CONSUMER, provider_id=explore.provider_id,
+                contract_id=explore.contract_id, transport="mcp",
+            ) as channel:
+                result = channel.call({
+                    "area_hint": "", "timeout_s": 120., "max_speed_m_s": 0.,
+                }, timeout=30).to_dict()
+                if not result.get("accepted"):
+                    raise RuntimeError(f"mapping preparation rejected: {result}")
+                end = wait_terminal(channel, 180.)
                 if end.get("state") not in ("SUCCEEDED", "TIMEOUT"):
                     raise RuntimeError(f"mapping preparation failed: {end}")
                 print(f"mapping preparation ended: {end.get('state')} {str(end.get('detail', ''))[:200]}", flush=True)
-            finally:
-                if not completed:
-                    explore("cancel", run_id=result["run_id"])
             if read_collision_count(world) != before or len(world.collisions) != events_before:
                 raise RuntimeError("simulator reported a collision during mapping preparation")
             waypoints = mapping_square(world.costmap)
-        _, url = endpoint("robonix/service/navigation/navigate", "mcp")
-        drive_square(world, Tools(url), waypoints)
+        nav = ATLAS.find_unique_capability(
+            contract_id="robonix/service/navigation/navigate", transport="mcp",
+        )
+        drive_square(world, partial(
+            ATLAS.connect_channel, consumer_id=CONSUMER, provider_id=nav.provider_id,
+            contract_id=nav.contract_id, transport="mcp",
+        ), waypoints)
     finally:
         atexit.unregister(world.close)
         world.close()

@@ -23,7 +23,7 @@ serde_yaml.workspace = true
 robonix-scribe.workspace = true
 robonix-llm-metrics.workspace = true
 uuid.workspace = true
-rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 async-openai = { workspace = true, features = ["chat-completion"] }
 reqwest.workspace = true
 futures-util = "0.3"

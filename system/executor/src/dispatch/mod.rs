@@ -1,71 +1,31 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// dispatch/mod.rs — route a CapabilityCall to its provider.
-//
-// Two paths:
-//   1. provider_id == executor's own provider_id → run an in-process builtin
-//      (file ops / shell). The contract_id leaf names the operation.
-//   2. else → ConnectCapability(provider_id, contract_id, MCP) on atlas →
-//      MCP call to the returned endpoint → DisconnectCapability.
-//
-// Skills sit at INACTIVE after `rbnx boot`. Right before dispatching
-// to one, the executor sends Driver(CMD_ACTIVATE) on its `*/driver`
-// capability to flip it to ACTIVE — that's where the skill actually
-// allocates its hot resources (frontier loop / nav subscribers / VLA
-// worker / …). We track which skill provider_ids we've already activated in
-// this executor process; subsequent calls skip the CMD_ACTIVATE RPC to
-// keep latency flat (sticky policy). A future eviction algorithm
-// (EXECUTOR_EVICTION_POLICY=deactivate) will drive CMD_DEACTIVATE.
-//
-// The grpc dispatch helper exists for future non-MCP contracts but is not
-// on the LLM-callable path today.
+//! Route capabilities to in-process builtins or client-owned MCP execution.
 
 pub mod async_poll;
-pub mod async_registry;
 pub mod builtin;
 pub mod grpc;
-pub mod mcp;
 
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use tonic::Request;
-use tonic::transport::Endpoint;
-
-use crate::pb::lifecycle::{DriverRequest, DriverResponse};
+use crate::pb::lifecycle::{DriverRequest, LifecycleDriver};
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::plan_runtime::PlanRuntime;
+use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
+use robonix_atlas::client::channel::{Channel, ChannelContract, Mcp};
 use robonix_atlas::pb as atlas_pb;
-use robonix_scribe::{debug, info};
 
 const CMD_ACTIVATE: u32 = 1;
 const DRIVER_ACTIVATE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEPLOY_CONSUMER_ID: &str = "com.robonix.executor.skill_activate";
 
-static ACTIVATED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-
-fn mark_activated(provider_id: &str) -> bool {
-    let mut g = ACTIVATED.lock().expect("ACTIVATED poisoned");
-    let set = g.get_or_insert_with(HashSet::new);
-    set.insert(provider_id.to_string())
-}
-
-fn already_activated(provider_id: &str) -> bool {
-    let g = ACTIVATED.lock().expect("ACTIVATED poisoned");
-    g.as_ref().is_some_and(|s| s.contains(provider_id))
-}
-
-fn is_skill_namespace(ns: &str) -> bool {
-    let mut parts = ns.split('/').filter(|p| !p.is_empty());
-    let first = parts.next();
-    let second = parts.next();
-    matches!(first, Some("robonix")) && matches!(second, Some("skill"))
-        || matches!(first, Some("skill"))
-}
+type ActivationSlot = Arc<tokio::sync::Mutex<Option<(String, Channel<LifecycleDriver>)>>>;
+static ACTIVATIONS: LazyLock<Mutex<HashMap<String, ActivationSlot>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Dispatch a single CapabilityCall and return its result.
 ///
@@ -83,9 +43,7 @@ pub async fn dispatch(
     dispatch_with_timeout(call, self_provider_id, atlas, runtime, plan_id, None).await
 }
 
-/// Dispatch one call with an optional MCP deadline while always releasing its
-/// Atlas channel. Verification uses this to bound a verifier that stops
-/// responding without leaking the ConnectCapability record.
+/// Bound verifier waiting without releasing an execution that may still be active.
 pub async fn dispatch_with_timeout(
     call: &CapabilityCall,
     self_provider_id: &str,
@@ -95,194 +53,180 @@ pub async fn dispatch_with_timeout(
     timeout: Option<Duration>,
 ) -> CapabilityCallResult {
     if call.provider_id == self_provider_id {
-        return builtin::execute(call, runtime, self_provider_id, atlas, plan_id).await;
+        return builtin::execute(call, runtime, atlas, plan_id).await;
     }
 
-    if let Err(e) = ensure_skill_active(atlas, &call.provider_id).await {
-        return error_result(call, format!("Driver(CMD_ACTIVATE) failed: {e:#}"));
+    let channel = match connect_channel(call, self_provider_id, atlas).await {
+        Ok(channel) => channel,
+        Err(error) => return error_result(call, format!("{error:#}")),
+    };
+    let execute = async {
+        let output = channel.call(serde_json::from_str(&call.args_json)?).await?;
+        channel.close().await?;
+        Ok::<_, anyhow::Error>(output.to_string())
+    };
+    let outcome = match timeout {
+        Some(duration) => tokio::time::timeout(duration, execute)
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r),
+        None => execute.await,
+    };
+    match outcome {
+        Ok(output) => CapabilityCallResult {
+            call_id: call.call_id.clone(),
+            provider_id: call.provider_id.clone(),
+            contract_id: call.contract_id.clone(),
+            success: true,
+            output,
+            error: String::new(),
+        },
+        Err(error) => {
+            let cleanup = if channel.is_terminal() {
+                channel.close().await.err()
+            } else {
+                None
+            };
+            error_result(
+                call,
+                format!(
+                    "{error:#}; execution channel {}; cleanup: {cleanup:?}",
+                    channel.channel_id
+                ),
+            )
+        }
     }
+}
 
-    let (channel_id, endpoint, _params) = match atlas
-        .connect_capability(
-            self_provider_id,
+pub async fn connect_channel(
+    call: &CapabilityCall,
+    consumer_id: &str,
+    atlas: &mut AtlasClient,
+) -> Result<robonix_atlas::client::channel::Channel> {
+    anyhow::ensure!(
+        serde_json::from_str::<serde_json::Value>(&call.args_json)?.is_object(),
+        "MCP request must be a JSON object"
+    );
+    ensure_skill_active(atlas, &call.provider_id)
+        .await
+        .context("Driver(CMD_ACTIVATE) failed")?;
+    atlas
+        .connect_channel::<Mcp>(
+            consumer_id,
             &call.provider_id,
             &call.contract_id,
             atlas_pb::Transport::Mcp,
         )
         .await
-    {
-        Ok(triple) => triple,
-        Err(e) => {
-            return error_result(call, format!("ConnectCapability failed: {e:#}"));
-        }
-    };
-
-    let result = match timeout {
-        Some(duration) => match tokio::time::timeout(duration, mcp::execute(call, &endpoint)).await
-        {
-            Ok(result) => result,
-            Err(_) => error_result(
-                call,
-                format!("MCP call timed out after {}s", duration.as_secs()),
-            ),
-        },
-        None => mcp::execute(call, &endpoint).await,
-    };
-
-    let _ = atlas.disconnect_capability(&channel_id).await;
-    result
 }
 
-/// If `provider_id` is a skill that hasn't been activated in this process
-/// yet, resolve its `*/driver` capability and send Driver(CMD_ACTIVATE).
-/// No-op for primitives, services, system providers, skills already in
-/// ACTIVE (per atlas), and skills already activated in this executor
-/// process (sticky cache).
+/// Serialize skill activation and retain failed or uncertain Driver calls.
 async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
-    if already_activated(provider_id) {
-        debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");
-        return Ok(());
-    }
     let providers = atlas
         .query_capabilities(provider_id, "", atlas_pb::Transport::Unspecified)
-        .await
-        .with_context(|| format!("query_capabilities({provider_id})"))?;
-    let Some(provider) = providers.into_iter().next() else {
-        info!(
-            "[skill-activate] {provider_id}: not in atlas, letting connect_capability surface the error"
-        );
+        .await?;
+    let Some(provider) = providers.first() else {
         return Ok(());
     };
-    if !is_skill_namespace(&provider.namespace) {
-        debug!(
-            "[skill-activate] {provider_id} (ns={}): not a skill, no CMD_ACTIVATE",
-            provider.namespace
-        );
+    if provider.kind != atlas_pb::Kind::Skill as i32 {
         return Ok(());
     }
+    let slot = {
+        let mut slots = ACTIVATIONS.lock().unwrap();
+        // Keep slots used by callers, including those waiting for the activation lock.
+        slots.retain(|_, slot| {
+            Arc::strong_count(slot) > 1
+                || slot.try_lock().map_or(true, |previous| previous.is_some())
+        });
+        if provider.state == atlas_pb::LifecycleState::StateActive as i32
+            && !slots.contains_key(provider_id)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            slots.contains_key(provider_id) || slots.len() < 1024,
+            "skill activation capacity exhausted"
+        );
+        slots.entry(provider_id.to_owned()).or_default().clone()
+    };
+    let mut previous = slot.lock().await;
+    // The preceding activation may have completed while this caller was waiting.
+    let providers = atlas
+        .query_capabilities(provider_id, "", atlas_pb::Transport::Unspecified)
+        .await?;
+    let provider = providers
+        .first()
+        .context("skill disappeared before activation")?;
     if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
-        info!("[skill-activate] {provider_id}: already ACTIVE per atlas, marking sticky");
-        mark_activated(provider_id);
+        if let Some((_, channel)) = previous.as_ref()
+            && channel.is_terminal()
+        {
+            channel.close().await?;
+        }
+        *previous = None;
         return Ok(());
     }
-    if provider.state != atlas_pb::LifecycleState::StateInactive as i32 {
-        let state = lifecycle_state_label(provider.state);
+    anyhow::ensure!(
+        provider.state == atlas_pb::LifecycleState::StateInactive as i32,
+        "skill {provider_id} is {}; automatic activation requires INACTIVE",
+        atlas_pb::LifecycleState::try_from(provider.state)
+            .unwrap_or(atlas_pb::LifecycleState::StateUnspecified)
+            .as_str_name()
+            .trim_start_matches("STATE_")
+    );
+    if let Some((registration, channel)) = previous.as_ref()
+        && registration == &provider.registration_id
+    {
         anyhow::bail!(
-            "skill {} is {}; automatic activation is only valid from INACTIVE. The executor \
-             will not repeat CMD_ACTIVATE after an activation error; recover or restart the \
-             provider lifecycle first",
-            provider_id,
-            state
+            "previous skill activation did not confirm ACTIVE; channel {}; recover the lifecycle before retrying",
+            channel.channel_id
         );
     }
-    info!(
-        "[skill-activate] {provider_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
-        provider.namespace, provider.state
-    );
-    let driver_contract = provider
+    let mut drivers = provider
         .capabilities
         .iter()
-        .find(|c| c.contract_id.ends_with("/driver"))
-        .map(|c| c.contract_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("skill {provider_id} has no */driver capability"))?;
-    let svc_name = contract_id_to_service_name(&driver_contract);
-    let (channel_id, endpoint, _) = atlas
-        .connect_capability(
+        .filter(|c| c.transport == atlas_pb::Transport::Grpc as i32);
+    let legacy_driver = format!("{}/driver", provider.namespace);
+    let driver = drivers
+        .clone()
+        .find(|c| c.contract_id == LifecycleDriver::ID)
+        .or_else(|| drivers.find(|c| c.contract_id == legacy_driver))
+        .context("skill must declare a gRPC Driver")?;
+    let channel = atlas
+        .connect_channel::<LifecycleDriver>(
             DEPLOY_CONSUMER_ID,
             provider_id,
-            &driver_contract,
+            &driver.contract_id,
             atlas_pb::Transport::Grpc,
         )
-        .await
-        .with_context(|| format!("ConnectCapability({driver_contract})"))?;
-    let normalized = if endpoint.starts_with("http") {
-        endpoint
-    } else {
-        format!("http://{endpoint}")
-    };
-    let result = async {
-        let channel = Endpoint::new(normalized.clone())
-            .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
-            .connect()
-            .await
-            .with_context(|| format!("dial driver at '{normalized}'"))?;
-        let path: tonic::codegen::http::uri::PathAndQuery =
-            format!("/robonix.contracts.{svc_name}/Driver")
-                .parse()
-                .with_context(|| format!("build gRPC path for '{driver_contract}'"))?;
-        let mut grpc = tonic::client::Grpc::new(channel);
-        grpc.ready().await.with_context(|| "gRPC ready")?;
-        let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
-        let resp = tokio::time::timeout(
-            DRIVER_ACTIVATE_TIMEOUT,
-            grpc.unary(
-                Request::new(DriverRequest {
-                    command: CMD_ACTIVATE,
-                    config_json: String::new(),
-                }),
-                path,
-                codec,
-            ),
+        .await?;
+    *previous = Some((provider.registration_id.clone(), channel.clone()));
+    let response = tokio::time::timeout(
+        DRIVER_ACTIVATE_TIMEOUT,
+        channel.call(DriverRequest {
+            command: CMD_ACTIVATE,
+            config_json: String::new(),
+        }),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Driver activation timed out; channel {} retained",
+            channel.channel_id
         )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("Driver(CMD_ACTIVATE) timed out after {DRIVER_ACTIVATE_TIMEOUT:?}")
-        })?
-        .with_context(|| "Driver(CMD_ACTIVATE) RPC failed")?;
-        Ok::<_, anyhow::Error>(resp.into_inner())
-    }
-    .await;
-    let _ = atlas.disconnect_capability(&channel_id).await;
-    let r = result?;
-    if !r.ok {
-        anyhow::bail!(
-            "Driver(CMD_ACTIVATE) returned ok=false (state={}, error={})",
-            r.state,
-            r.error
-        );
-    }
-    mark_activated(provider_id);
-    Ok(())
-}
-
-fn lifecycle_state_label(state: i32) -> &'static str {
-    if state == atlas_pb::LifecycleState::StateRegistered as i32 {
-        "REGISTERED"
-    } else if state == atlas_pb::LifecycleState::StateInactive as i32 {
-        "INACTIVE"
-    } else if state == atlas_pb::LifecycleState::StateActive as i32 {
-        "ACTIVE"
-    } else if state == atlas_pb::LifecycleState::StateError as i32 {
-        "ERROR"
-    } else if state == atlas_pb::LifecycleState::StateTerminated as i32 {
-        "TERMINATED"
+    })?;
+    let cleanup = if channel.is_terminal() {
+        channel.close().await
     } else {
-        "UNSPECIFIED"
-    }
-}
-
-/// Mirrors robonix_codegen::contract_gen::contract_id_to_service_name.
-/// `robonix/skill/explore/driver` → `RobonixSkillExploreDriver`. Uniform
-/// PascalCase per `/`-segment, no prefix stripping.
-fn contract_id_to_service_name(id: &str) -> String {
-    id.split('/')
-        .filter(|x| !x.is_empty())
-        .map(|seg| {
-            seg.split('_')
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        Some(f) => f
-                            .to_uppercase()
-                            .chain(c.flat_map(char::to_lowercase))
-                            .collect::<String>(),
-                        None => String::new(),
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect()
+        Ok(())
+    };
+    let response = response?;
+    cleanup?;
+    anyhow::ensure!(
+        response.ok && response.state.eq_ignore_ascii_case("active"),
+        "Driver(CMD_ACTIVATE) failed: {response:?}"
+    );
+    Ok(())
 }
 
 pub(crate) fn error_result(call: &CapabilityCall, msg: String) -> CapabilityCallResult {
@@ -298,22 +242,163 @@ pub(crate) fn error_result(call: &CapabilityCall, msg: String) -> CapabilityCall
 
 #[cfg(test)]
 mod tests {
-    use super::lifecycle_state_label;
-    use robonix_atlas::pb::LifecycleState;
+    #[tokio::test]
+    #[ignore = "requires test_channel.py's live Atlas and gRPC fixtures"]
+    async fn skill_activation() -> anyhow::Result<()> {
+        use super::ensure_skill_active;
+        use robonix_atlas::client::{AtlasClient, grpc_params};
+        use robonix_atlas::pb::{LifecycleState, Transport};
+        use std::time::Duration;
+        let mut atlas = AtlasClient::connect(std::env::var("ROBONIX_TEST_ATLAS")?).await?;
+        let endpoint = std::env::var("ROBONIX_TEST_GRPC")?;
+        let control = std::env::var("ROBONIX_TEST_CONTROL")?;
+        let provider = "executor-skill-test";
+        async fn register(
+            atlas: &mut AtlasClient,
+            provider: &str,
+            endpoint: &str,
+            legacy: bool,
+        ) -> anyhow::Result<()> {
+            atlas
+                .register_skill(provider, "robonix/skill/channel_test", "")
+                .await?;
+            let (contract, service) = if legacy {
+                (
+                    "robonix/skill/channel_test/driver",
+                    "robonix.contracts.RobonixSkillChannelTestDriver",
+                )
+            } else {
+                (
+                    "robonix/lifecycle/driver",
+                    "robonix.contracts.RobonixLifecycleDriver",
+                )
+            };
+            atlas
+                .declare_capability(
+                    provider,
+                    contract,
+                    Transport::Grpc,
+                    endpoint,
+                    grpc_params(
+                        "robonix_contracts.proto",
+                        service,
+                        format!("/{service}/Driver"),
+                    ),
+                )
+                .await?;
+            atlas
+                .set_lifecycle_state(provider, LifecycleState::StateInactive, "")
+                .await?;
+            Ok(())
+        }
+        let configure = |provider: &str, delay: f64, reject: bool| -> anyhow::Result<()> {
+            std::fs::write(
+                &control,
+                serde_json::json!({"delay": delay, "driver_reject": reject,
+                "driver_provider": provider})
+                .to_string(),
+            )?;
+            Ok(())
+        };
+        let activations = || -> usize {
+            std::fs::read_to_string(std::path::Path::new(&control).with_extension("grpc-trace"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("\"Driver\""))
+                .count()
+        };
+        register(&mut atlas, provider, &endpoint, false).await?;
+        configure("", 0., false)?;
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        atlas
+            .set_lifecycle_state(provider, LifecycleState::StateActive, "")
+            .await?;
+        ensure_skill_active(&mut atlas, provider).await?;
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, false).await?;
+        configure(provider, 0.1, false)?;
+        let before = activations();
+        let mut other = atlas.clone();
+        let (a, b) = tokio::join!(
+            ensure_skill_active(&mut atlas, provider),
+            ensure_skill_active(&mut other, provider)
+        );
+        a?;
+        b?;
+        assert_eq!(activations(), before + 1);
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert_eq!(activations(), before + 1);
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, false).await?;
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert_eq!(activations(), before + 2);
 
-    #[test]
-    fn lifecycle_state_labels_are_actionable() {
-        assert_eq!(
-            lifecycle_state_label(LifecycleState::StateInactive as i32),
-            "INACTIVE"
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, false).await?;
+        configure(provider, 0.2, false)?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                ensure_skill_active(&mut atlas, provider)
+            )
+            .await
+            .is_err()
         );
-        assert_eq!(
-            lifecycle_state_label(LifecycleState::StateError as i32),
-            "ERROR"
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert_eq!(activations(), before + 3);
+
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, false).await?;
+        configure(provider, 0., true)?;
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        assert_eq!(activations(), before + 4);
+        atlas
+            .set_lifecycle_state(provider, LifecycleState::StateInactive, "")
+            .await?;
+        configure(provider, 0., false)?;
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        assert_eq!(activations(), before + 4);
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, true).await?;
+        configure(provider, 0., false)?;
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert_eq!(activations(), before + 5);
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, true).await?;
+        configure(provider, 0.2, false)?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                ensure_skill_active(&mut atlas, provider)
+            )
+            .await
+            .is_err()
         );
-        assert_eq!(
-            lifecycle_state_label(LifecycleState::StateTerminated as i32),
-            "TERMINATED"
-        );
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ensure_skill_active(&mut atlas, provider).await?;
+        assert_eq!(activations(), before + 6);
+        atlas.unregister(provider).await?;
+        register(&mut atlas, provider, &endpoint, true).await?;
+        configure(provider, 0., true)?;
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        assert!(ensure_skill_active(&mut atlas, provider).await.is_err());
+        assert_eq!(activations(), before + 7);
+        atlas.unregister(provider).await?;
+        for index in 0..1025 {
+            let provider = format!("executor-skill-churn-{index}");
+            register(&mut atlas, &provider, &endpoint, false).await?;
+            configure(&provider, 0., false)?;
+            ensure_skill_active(&mut atlas, &provider).await?;
+            ensure_skill_active(&mut atlas, &provider).await?;
+            atlas.unregister(&provider).await?;
+        }
+        assert_eq!(activations(), before + 7 + 1025);
+        std::fs::write(&control, "{}")?;
+        Ok(())
     }
 }
