@@ -3347,8 +3347,10 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "base64",
  "clap",
  "futures-util",
+ "png",
  "prost",
  "protoc-bin-vendored",
  "reqwest 0.13.4",

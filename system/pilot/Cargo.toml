@@ -28,6 +28,8 @@ rmcp = { workspace = true, features = ["client", "transport-streamable-http-clie
 async-openai = { workspace = true, features = ["chat-completion"] }
 reqwest.workspace = true
 futures-util = "0.3"
+base64 = "0.22"
+png = "0.18"
 robonix-atlas = { path = "../atlas" }
 robonix-llm-catalog = { path = "../llm-catalog" }
 

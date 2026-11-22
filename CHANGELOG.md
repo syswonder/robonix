@@ -68,7 +68,6 @@ Pre-release for the invite-only beta of [Robonix Hub](https://hub.robonix.ai), t
 - **Executor:** Add a VERIFYING state and overlapping verification rules. [#251](https://github.com/syswonder/robonix/pull/251)
 - **Capability Contracts and Code Generation:** Add `llm_callable` metadata to control which contracts the planner sees. [#242](https://github.com/syswonder/robonix/pull/242)
 - **Pilot:** Archive each session to a transcript and restore it after a restart. [#250](https://github.com/syswonder/robonix/pull/250)
-- **Pilot:** Hand the planner a current camera frame each round. [#250](https://github.com/syswonder/robonix/pull/250)
 - **Pilot:** Resolve namespaced provider model profiles and require verified model context budgets. [#250](https://github.com/syswonder/robonix/pull/250)
 - **Pilot:** Keep the stream alive while a reasoning model thinks. [#250](https://github.com/syswonder/robonix/pull/250)
 - **Liaison:** Let a client end voice capture and submit early. [#232](https://github.com/syswonder/robonix/pull/232)
