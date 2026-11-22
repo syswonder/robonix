@@ -259,6 +259,40 @@ def test_world_frame_change_discards_old_tracks_before_transform_recovers(monkey
         loop.close()
 
 
+def test_a_dropped_track_keeps_its_object_until_the_spot_is_seen_empty():
+    import numpy as np
+
+    def door(uid, x=0.0):
+        pcd = _Pcd(0)
+        pcd.points = [(x + dx, dy, 2.0) for dx in (-0.1, 0.0, 0.1) for dy in (-0.1, 0.0, 0.1)]
+        return {"id": uid, "class_name": "door", "pcd": pcd}
+
+    d = _detector()
+    d._uuid_to_oid = {"door": "scene.object.0002"}
+    K = types.SimpleNamespace(fx=10.0, fy=10.0, cx=5.0, cy=5.0)
+    blocked, empty = np.full((10, 10), 1.0, np.float32), np.full((10, 10), 5.0, np.float32)
+    assert d._keep_dropped({"door"}, [door("door")], [door("door")], blocked, K, np.eye(4)) == {}
+    # DualMap drops the track while something stands in front of the door.
+    assert d._keep_dropped(set(), [], [], blocked, K, np.eye(4)) == {}
+    assert set(d._dropped) == {"door"}
+    # Seen through, it goes after visibility_miss_ticks keyframes.
+    assert d._keep_dropped(set(), [], [], empty, K, np.eye(4)) == {}
+    assert d._keep_dropped(set(), [], [], empty, K, np.eye(4)) == {}
+    assert d._keep_dropped(set(), [], [], empty, K, np.eye(4)) == {"door": "seen absent"}
+    assert not d._dropped
+
+    # A new unbound track of the class at the spot takes the record over.
+    d._last_entries = {"door": door("door")}
+    d._keep_dropped(set(), [], [], blocked, K, np.eye(4))
+    near = door("door-2", x=0.3)
+    assert d._keep_dropped({"door-2"}, [near], [near], blocked, K, np.eye(4)) == {"door": "seen again"}
+    # A track nobody registered is not held.
+    d._uuid_to_oid = {}
+    d._last_entries = {"stray": door("stray")}
+    d._keep_dropped(set(), [], [], blocked, K, np.eye(4))
+    assert not d._dropped
+
+
 def test_merged_objects_keep_the_dominant_uid():
     d = _detector()
     a = types.SimpleNamespace(uid="A", observations=[object(), object(), object()], is_merged=False)
