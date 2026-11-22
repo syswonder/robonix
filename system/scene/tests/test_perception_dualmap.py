@@ -593,7 +593,6 @@ def test_replica_write_error_is_reported_instead_of_succeeding(tmp_path, monkeyp
 
 def test_npu_keeps_its_detector_and_needs_only_bundle_weights(tmp_path, monkeypatch):
     from contextlib import nullcontext
-    import hydra
     from scene_service.ingest import perception_models
 
     root = tmp_path / 'npu-dualmap'
@@ -618,11 +617,15 @@ def test_npu_keeps_its_detector_and_needs_only_bundle_weights(tmp_path, monkeypa
             captured['inference'] = inference
             self.obj_classes = classes
 
-    monkeypatch.setattr(hydra, 'initialize_config_dir', lambda **_: nullcontext())
-    monkeypatch.setattr(hydra, 'compose', lambda **kwargs: kwargs['overrides'])
     monkeypatch.setattr(perception_models, 'load_perception',
                         lambda *a, **kw: (_ for _ in ()).throw(AssertionError('keep NPU inference')))
     modules = {
+        'hydra': {'initialize_config_dir': lambda **_: nullcontext(),
+                  'compose': lambda **kwargs: kwargs['overrides']},
+        'hydra.core': {},
+        'hydra.core.global_hydra': {'GlobalHydra': types.SimpleNamespace(
+            instance=lambda: types.SimpleNamespace(clear=lambda: None))},
+        'torch': {'cuda': types.SimpleNamespace(is_available=lambda: False)},
         'utils.global_map_manager': {'GlobalMapManager': lambda cfg: object()},
         'utils.local_map_manager': {'LocalMapManager': lambda cfg: object()},
         'utils.object_detector': {'Detector': Detector},
@@ -634,6 +637,7 @@ def test_npu_keeps_its_detector_and_needs_only_bundle_weights(tmp_path, monkeypa
         module = types.ModuleType(name)
         module.__dict__.update(fields)
         monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.syspath_prepend(str(root))
     detector = _detector(device='cpu')
     detector._dm_root = str(root)
     assert detector._load_dualmap()
