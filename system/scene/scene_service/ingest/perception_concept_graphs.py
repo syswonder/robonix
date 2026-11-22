@@ -2070,10 +2070,13 @@ class ConceptGraphsDetector:
                         self._uuid_to_oid[u] = obj.object_id
                     adopted_oids.add(obj.object_id)
 
-            # Evict registry records whose source uuid is gone.
+            # Evict registry records whose source uuid is gone. A record that
+            # absorbed a duplicate also answers to the duplicate's uuid.
+            answering = {self._registry.resolve_id(o)[0] for o in
+                         (self._uuid_to_oid.get(u) for u in live_uuids) if o}
             doomed = []
             for oid, obj in list(self._registry._objects.items()):
-                if oid in adopted_oids:
+                if oid in adopted_oids or oid in answering:
                     continue
                 if obj.attributes.get("is_robot"):
                     continue

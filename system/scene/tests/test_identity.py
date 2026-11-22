@@ -232,6 +232,25 @@ def test_apply_snapshot_follows_a_registry_merge():
     assert [o.object_id for o in reg.all_objects() if o.label == "chair"] == [kept]
 
 
+def test_a_merged_record_lives_while_any_of_its_tracks_does():
+    """The survivor of a merge answers to both tracks: losing the one it was
+    first bound to must not evict it while the other is still held."""
+    reg = ObjectRegistry()
+    det = _make_detector(reg)
+    run = asyncio.new_event_loop().run_until_complete
+
+    run(det._apply_snapshot([_snap("u1", "chair", (1.0, 0.0, 0.4)),
+                             _snap("u2", "chair", (1.1, 0.0, 0.4))]))
+    assert len(reg.merge_duplicates(time.time(), xy_m=0.35)) == 1
+    (chair,) = [o for o in reg.all_objects() if o.label == "chair"]
+    other = "u2" if chair.attributes["cg_uuid"] == "u1" else "u1"
+
+    run(det._apply_snapshot([], frozenset({other})))
+    assert not chair.missing
+    run(det._apply_snapshot([]))
+    assert chair.missing
+
+
 def test_the_map_gate_admits_but_never_evicts():
     """An object on ground the map has not observed is not registered; but a
     registered object whose next snapshot the gate rejects stays as it was,
