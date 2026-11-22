@@ -129,11 +129,14 @@ one JSON line per model request (see `robonix_api.llm`); boot exports it as
 ## Built-in system components
 
 `rbnx boot` launches each declared built-in component in dependency order:
-Atlas, Executor, Soma, Vitals, Pilot, then Liaison. Their `system.<name>`
-manifest blocks are translated into CLI flags and also passed intact through
-`--config-json`. Components not present in the manifest are not started, except
-that Soma is added automatically when the deployment contains primitives or
-skills.
+Atlas, Chronos, Executor, Soma, Vitals, Pilot, then Liaison. Their
+`system.<name>` manifest blocks are translated into CLI flags and also passed
+through `--config-json`, without rbnx's own `status` key. Components not
+present in the manifest are not started, except that Soma is added
+automatically when the deployment contains primitives or skills.
+
+Chronos registers `robonix/system/chronos/get_wall_time`. Pilot lists it like
+any other capability, so the model can read the current date and time.
 
 The optional `system.pilot.vlm.reasoning_effort` manifest setting is forwarded
 to Pilot's OpenAI-compatible request.

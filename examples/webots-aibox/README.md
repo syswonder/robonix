@@ -3,7 +3,7 @@
 One `rbnx boot` on the AIBOX board brings up the whole stack for the TIAGo
 Webots simulation:
 
-- **AIBOX board**: Atlas, soma, executor, pilot, liaison, vitals, mapping,
+- **AIBOX board**: Atlas, Chronos, soma, executor, pilot, liaison, vitals, mapping,
   nav2, and Scene (native), plus explore (docker).
 - **Ubuntu sim host**: the four TIAGo primitives, started through SSH
   wrappers (`primitives/*` forward their `build`/`start`/`stop` over

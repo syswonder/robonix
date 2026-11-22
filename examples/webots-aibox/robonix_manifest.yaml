@@ -21,6 +21,8 @@ system:
   # registry
   atlas:
     listen: 0.0.0.0:50051
+  # wall time for Pilot (robonix/system/chronos/get_wall_time)
+  chronos: {}
   soma:
     listen: 0.0.0.0:50091
     robot_yaml: /root/robonix/examples/webots/soma.full.yaml

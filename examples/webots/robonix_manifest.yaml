@@ -30,6 +30,8 @@ system:
       - bash
       - -lc
       - source /opt/ros/humble/setup.bash && exec python3 -u /robonix_runtime/soma/soma_runtime_ros.py /robonix_runtime/soma/soma_runtime_sources.json
+  # wall time for Pilot (robonix/system/chronos/get_wall_time)
+  chronos: {}
   # soma+scene layer
   scene: {}
   # execution layer
