@@ -652,6 +652,7 @@ jobs:
               $((27000 + candidate_suffix))
               $((28000 + candidate_suffix))
               $((29000 + candidate_suffix))
+              $((30000 + candidate_suffix))
             )
 
             busy=0
@@ -689,18 +690,21 @@ jobs:
           scene_web_port=$((27000 + suffix))
           soma_port=$((28000 + suffix))
           audio_port=$((29000 + suffix))
+          chronos_port=$((30000 + suffix))
           ros_domain_id=$((90 + (suffix % 100)))
           runtime_dir="$RUNNER_TEMP/robonix-ci-${RUN_KEY}"
           rm -rf "$runtime_dir"
           mkdir -p "$runtime_dir"
 
-          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port},${audio_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
+          echo "run isolation slot: suffix=${suffix} xdisplay=:${xdisplay} ports=${fake_vlm_port},${atlas_port},${executor_port},${pilot_port},${liaison_port},${stream_port},${viewer_port},${mapping_port},${nav2_port},${scene_web_port},${soma_port},${audio_port},${chronos_port} ros_domain_id=${ros_domain_id} runtime_dir=${runtime_dir}"
 
           {
             echo "ATLAS_PORT=$atlas_port"
             echo "EXECUTOR_PORT=$executor_port"
             echo "PILOT_PORT=$pilot_port"
             echo "LIAISON_PORT=$liaison_port"
+            # Chronos defaults to 50094, which another run on the host may hold.
+            echo "CHRONOS_PORT=$chronos_port"
             echo "SOMA_PORT=$soma_port"
             # The audio bridge defaults to 60002, which other tenants of a
             # shared runner may hold.
@@ -1036,6 +1040,8 @@ jobs:
               "api_format": "openai",
           })
           system.setdefault("liaison", {})["listen"] = f"127.0.0.1:{os.environ['LIAISON_PORT']}"
+          if "chronos" in system:
+              system["chronos"] = {**(system["chronos"] or {}), "listen": f"127.0.0.1:{os.environ['CHRONOS_PORT']}"}
           Path("robonix_manifest.ci.generated.yaml").write_text(
               yaml.safe_dump(manifest, sort_keys=False)
           )
@@ -1618,7 +1624,7 @@ jobs:
           rbnx shutdown --server "$ROBONIX_CI_ATLAS" 2>/dev/null || true
           [ -n "${RBNX_BOOT_PID:-}" ] && kill "${RBNX_BOOT_PID}" 2>/dev/null || true
           [ -n "${FAKE_VLM_PID:-}" ] && kill "${FAKE_VLM_PID}" 2>/dev/null || true
-          for port in "${ATLAS_PORT:-}" "${EXECUTOR_PORT:-}" "${SOMA_PORT:-}" "${PILOT_PORT:-}" "${LIAISON_PORT:-}" "${FAKE_VLM_PORT:-}" "${ROBONIX_SIM_STREAM_PORT:-}" "${ROBONIX_SIM_VIEWER_PORT:-}" "${MAPPING_GRPC_PORT:-}" "${NAV2_DRIVER_PORT:-}" "${SCENE_WEB_PORT:-}"; do
+          for port in "${ATLAS_PORT:-}" "${EXECUTOR_PORT:-}" "${SOMA_PORT:-}" "${PILOT_PORT:-}" "${LIAISON_PORT:-}" "${CHRONOS_PORT:-}" "${FAKE_VLM_PORT:-}" "${ROBONIX_SIM_STREAM_PORT:-}" "${ROBONIX_SIM_VIEWER_PORT:-}" "${MAPPING_GRPC_PORT:-}" "${NAV2_DRIVER_PORT:-}" "${SCENE_WEB_PORT:-}"; do
             [ -z "$port" ] && continue
             pids=$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$0 ~ p { while (match($0, /pid=[0-9]+/)) { print substr($0, RSTART+4, RLENGTH-4); $0=substr($0, RSTART+RLENGTH) } }' | sort -u)
             [ -n "$pids" ] && kill $pids 2>/dev/null || true
