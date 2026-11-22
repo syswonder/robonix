@@ -1392,6 +1392,11 @@ jobs:
           scene_url="http://127.0.0.1:${SCENE_WEB_PORT}/api/state"
           state_file="$RUNNER_TEMP/sim-logs/scene-state-post-restart.json"
           scene_ready=0
+          # One poll is not enough. After a restart DualMap can list a weakly
+          # observed object for a few seconds and then drop it, and
+          # object_navigation, which runs next, then has nothing to approach.
+          # Some object has to stay listed for 30 s.
+          held_since=""
           collect_scene_diagnostics() {
             phase="$1"
             out="$RUNNER_TEMP/sim-logs/scene-diagnostic"
@@ -1431,10 +1436,17 @@ jobs:
           sys.exit(1)
           SCENE_READY_PY
               then
-                echo "post-restart scene object readiness confirmed"
-                scene_ready=1
-                break
+                held_since="${held_since:-$SECONDS}"
+                if [ $((SECONDS - held_since)) -ge 30 ]; then
+                  echo "post-restart scene object readiness confirmed"
+                  scene_ready=1
+                  break
+                fi
+              else
+                held_since=""
               fi
+            else
+              held_since=""
             fi
             if [ "$i" -eq 30 ]; then
               collect_scene_diagnostics pre-turn
