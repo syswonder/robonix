@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
-        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None);
+        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None).unwrap();
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let joint = vitals
             .components
@@ -930,7 +930,7 @@ mod tests {
 
     #[test]
     fn body_health_groups_root_children() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None).unwrap();
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         assert_eq!(vitals.bodies.len(), 3);
 
@@ -990,7 +990,7 @@ rules:
 "#,
         )
         .unwrap();
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None).unwrap();
         let vitals = snapshot_to_vitals(&snapshot, &rules, 123);
         let joint = vitals
             .components
@@ -1016,7 +1016,7 @@ rules:
                 attributes: vec![],
                 vendor_raw_json: String::new(),
             }],
-            ..generate_snapshot(MockScenario::Normal, 1, None)
+            ..generate_snapshot(MockScenario::Normal, 1, None).unwrap()
         };
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let fault = vitals
@@ -1033,7 +1033,7 @@ rules:
     /// A non-actuator component retains its vendor code in the body projection.
     #[test]
     fn component_fault_supplies_body_error_code() {
-        let mut snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let mut snapshot = generate_snapshot(MockScenario::Normal, 1, None).unwrap();
         snapshot.components.push(ComponentStatus {
             id: "body/arm/gripper".to_string(),
             parent_id: "body/arm".to_string(),

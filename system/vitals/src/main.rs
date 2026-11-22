@@ -14,6 +14,7 @@
 // Vitals requires Soma.  Use --mock-soma to run an embedded mock, or point
 // --soma-endpoint at a real Soma instance.
 
+mod clock;
 mod config;
 mod mock_soma;
 pub mod module_health;
@@ -40,7 +41,6 @@ use robonix_atlas::pb as atlas_pb;
 use service::VitalsServiceImpl;
 use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 pub(crate) const SHARED_DRIVER_CONTRACT: &str = "robonix/lifecycle/driver";
@@ -296,12 +296,12 @@ async fn main() -> Result<()> {
     info!("declared ModuleHealthSnapshot at {advertised}");
 
     // Build the shared service state.
-    let svc = VitalsServiceImpl::new();
+    let svc = VitalsServiceImpl::new()?;
     svc.update_self_module_health(&cfg.id)
         .await
         .context("initialize Vitals self module health")?;
     svc.apply_expected_module_config(&cfg.expected_modules)
-        .await;
+        .await?;
 
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
@@ -421,11 +421,15 @@ async fn main() -> Result<()> {
                 loop {
                     match stream.message().await {
                         Ok(Some(snapshot)) => {
-                            let vitals = soma_ingest::snapshot_to_vitals(
-                                &snapshot,
-                                &rules_for_stream,
-                                monotonic_ns(),
-                            );
+                            let now = match monotonic_ns() {
+                                Ok(now) => now,
+                                Err(error) => {
+                                    log::error!("[vitals] time read failed: {error}");
+                                    continue;
+                                }
+                            };
+                            let vitals =
+                                soma_ingest::snapshot_to_vitals(&snapshot, &rules_for_stream, now);
                             svc_for_stream.update_snapshot(vitals).await;
                         }
                         Ok(None) => {
@@ -479,9 +483,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn monotonic_ns() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+fn monotonic_ns() -> std::io::Result<u64> {
+    static START: OnceLock<u64> = OnceLock::new();
+    clock::monotonic_ns(&START)
 }
 
 #[cfg(test)]

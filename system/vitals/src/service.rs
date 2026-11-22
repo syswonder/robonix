@@ -8,8 +8,7 @@
 
 use crate::config::{ExpectedModuleConfig, ExpectedModulePolicy};
 use crate::module_health::{
-    HEALTH_ERROR, HEALTH_OK, HEALTH_WARN, MODULE_HEALTH_SCHEMA_VERSION, ModuleHealthError,
-    ModuleHealthStore,
+    HEALTH_ERROR, HEALTH_OK, HEALTH_WARN, MODULE_HEALTH_SCHEMA_VERSION, ModuleHealthStore,
 };
 use crate::pb::contracts::robonix_system_vitals_get_server::RobonixSystemVitalsGet;
 use crate::pb::contracts::robonix_system_vitals_modules_get_server::RobonixSystemVitalsModulesGet;
@@ -68,10 +67,10 @@ pub struct VitalsServiceImpl {
 
 impl VitalsServiceImpl {
     /// Create a new Vitals service with empty state and no subscribers.
-    pub fn new() -> Self {
+    pub fn new() -> std::io::Result<Self> {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(64);
-        let now_ns = monotonic_ns();
-        Self {
+        let now_ns = monotonic_ns()?;
+        Ok(Self {
             state: Arc::new(RwLock::new(VitalsState {
                 latest: VitalsSnapshot {
                     ts_ns: now_ns,
@@ -94,7 +93,7 @@ impl VitalsServiceImpl {
             })),
             module_health: Arc::new(RwLock::new(ModuleHealthStore::new())),
             start_time: Instant::now(),
-        }
+        })
     }
 
     /// Update the cached snapshot. Broadcasts to StreamVitals subscribers only
@@ -346,33 +345,38 @@ impl VitalsServiceImpl {
     pub async fn ingest_module_health_report(
         &self,
         report: ModuleHealthReport,
-    ) -> Result<Option<ModuleHealthEvent>, ModuleHealthError> {
+    ) -> anyhow::Result<Option<ModuleHealthEvent>> {
         self.module_health
             .write()
             .await
-            .ingest_report(report, monotonic_ns())
+            .ingest_report(report, monotonic_ns()?)
+            .map_err(Into::into)
     }
 
     /// Publish Vitals' own module health into the aggregate module snapshot.
     pub async fn update_self_module_health(
         &self,
         provider_id: &str,
-    ) -> Result<Option<ModuleHealthEvent>, ModuleHealthError> {
+    ) -> anyhow::Result<Option<ModuleHealthEvent>> {
         self.ingest_module_health_report(vitals_self_health_report(provider_id))
             .await
     }
 
     /// Publish disabled expected modules into the aggregate module snapshot.
-    pub async fn apply_expected_module_config(&self, modules: &[ExpectedModuleConfig]) {
+    pub async fn apply_expected_module_config(
+        &self,
+        modules: &[ExpectedModuleConfig],
+    ) -> std::io::Result<()> {
         for module in modules {
             if module.policy == ExpectedModulePolicy::Disabled {
                 self.module_health.write().await.synthesize_config_disabled(
                     &module.module_id,
                     module.provider_id_or_empty(),
-                    monotonic_ns(),
+                    monotonic_ns()?,
                 );
             }
         }
+        Ok(())
     }
 
     /// Mark a known module as stale if its last self-reported frame exceeded ttl_ms.
@@ -380,23 +384,25 @@ impl VitalsServiceImpl {
         &self,
         module_key: &str,
         policy: ExpectedModulePolicy,
-    ) -> Option<ModuleHealthEvent> {
-        self.module_health
+    ) -> std::io::Result<Option<ModuleHealthEvent>> {
+        Ok(self
+            .module_health
             .write()
             .await
-            .synthesize_stale_if_expired(module_key, stale_health_for(policy), monotonic_ns())
+            .synthesize_stale_if_expired(module_key, stale_health_for(policy), monotonic_ns()?))
     }
 
     /// Mark an expected module as unavailable before it has ever reported health.
     pub async fn synthesize_expected_module_unavailable(
         &self,
         module: &ExpectedModuleConfig,
-    ) -> Option<ModuleHealthEvent> {
+    ) -> std::io::Result<Option<ModuleHealthEvent>> {
         if module.policy == ExpectedModulePolicy::Disabled {
-            return None;
+            return Ok(None);
         }
 
-        self.module_health
+        Ok(self
+            .module_health
             .write()
             .await
             .synthesize_expected_unavailable(
@@ -404,8 +410,8 @@ impl VitalsServiceImpl {
                 module.provider_id_or_empty(),
                 stale_health_for(module.policy),
                 module.ttl_ms,
-                monotonic_ns(),
-            )
+                monotonic_ns()?,
+            ))
     }
 
     /// Return the latest module health aggregate snapshot.
@@ -484,9 +490,9 @@ fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
         .unwrap_or("unknown")
 }
 
-fn monotonic_ns() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+fn monotonic_ns() -> std::io::Result<u64> {
+    static START: OnceLock<u64> = OnceLock::new();
+    crate::clock::monotonic_ns(&START)
 }
 
 #[tonic::async_trait]
@@ -508,7 +514,11 @@ impl RobonixSystemVitalsModulesGet for VitalsServiceImpl {
         &self,
         _request: Request<GetModuleHealthSnapshotRequest>,
     ) -> Result<Response<GetModuleHealthSnapshotResponse>, Status> {
-        let snapshot = self.module_health_snapshot(monotonic_ns()).await;
+        let snapshot = self
+            .module_health_snapshot(monotonic_ns().map_err(|error| {
+                Status::unavailable(format!("Chronos time read failed: {error}"))
+            })?)
+            .await;
         Ok(Response::new(GetModuleHealthSnapshotResponse {
             snapshot: Some(snapshot),
         }))
@@ -560,9 +570,62 @@ impl RobonixSystemVitalsStream for VitalsServiceImpl {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_clock_reads_preserve_health_and_snapshot_sequence() {
+        use crate::clock::test_support::{mode, run_case};
+        run_case(
+            "service::tests::failed_clock_reads_preserve_health_and_snapshot_sequence",
+            || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    mode(16);
+                    assert!(VitalsServiceImpl::new().is_err());
+                    let svc = VitalsServiceImpl::new().unwrap();
+                    svc.update_self_module_health("vitals").await.unwrap();
+                    let before = svc.module_health_snapshot(0).await;
+                    mode(16);
+                    let error = svc.update_self_module_health("vitals").await.unwrap_err();
+                    assert!(error.downcast_ref::<std::io::Error>().is_some());
+                    mode(16);
+                    assert!(
+                        svc.synthesize_stale_module_if_expired(
+                            "vitals",
+                            ExpectedModulePolicy::Required
+                        )
+                        .await
+                        .is_err()
+                    );
+                    mode(16);
+                    let error = svc
+                        .get_module_health_snapshot(Request::new(GetModuleHealthSnapshotRequest {}))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(error.code(), tonic::Code::Unavailable);
+                    assert!(
+                        svc.get_vitals(Request::new(GetVitalsRequest {}))
+                            .await
+                            .is_ok()
+                    );
+                    let after = svc.module_health_snapshot(0).await;
+                    assert_eq!(after.modules, before.modules);
+                    assert_eq!(after.seq, before.seq + 1);
+                    assert!(
+                        svc.update_self_module_health("vitals")
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                });
+            },
+        );
+    }
+
     #[tokio::test]
     async fn modules_get_returns_empty_snapshot_initially() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         let response = svc
             .get_module_health_snapshot(Request::new(GetModuleHealthSnapshotRequest {}))
             .await
@@ -577,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn modules_get_returns_ingested_reports() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         svc.ingest_module_health_report(ModuleHealthReport {
             schema_version: MODULE_HEALTH_SCHEMA_VERSION,
             module: Some(ModuleHealth {
@@ -602,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn self_module_health_enters_snapshot() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         let event = svc
             .update_self_module_health("vitals")
             .await
@@ -624,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_synthesis_updates_module_snapshot() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         svc.ingest_module_health_report(ModuleHealthReport {
             schema_version: MODULE_HEALTH_SCHEMA_VERSION,
             module: Some(ModuleHealth {
@@ -645,6 +708,7 @@ mod tests {
         let event = svc
             .synthesize_stale_module_if_expired("pilot", ExpectedModulePolicy::Required)
             .await
+            .expect("time read")
             .expect("stale event");
         assert_eq!(event.previous_health, HEALTH_OK);
         assert_eq!(event.current_health, crate::module_health::HEALTH_ERROR);
@@ -663,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_expected_module_enters_snapshot() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         svc.apply_expected_module_config(&[ExpectedModuleConfig {
             module_id: "speech".to_string(),
             provider_id: None,
@@ -671,7 +735,8 @@ mod tests {
             policy: ExpectedModulePolicy::Disabled,
             ttl_ms: 0,
         }])
-        .await;
+        .await
+        .unwrap();
 
         let snapshot = svc.module_health_snapshot(1000).await;
         assert_eq!(snapshot.modules.len(), 1);
@@ -687,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn required_expected_module_can_be_marked_unavailable() {
-        let svc = VitalsServiceImpl::new();
+        let svc = VitalsServiceImpl::new().unwrap();
         let event = svc
             .synthesize_expected_module_unavailable(&ExpectedModuleConfig {
                 module_id: "executor".to_string(),
@@ -697,6 +762,7 @@ mod tests {
                 ttl_ms: 5000,
             })
             .await
+            .expect("time read")
             .expect("missing event");
 
         assert_eq!(event.previous_health, HEALTH_OK);

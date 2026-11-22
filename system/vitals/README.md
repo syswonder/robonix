@@ -6,6 +6,14 @@ Vitals consumes the unified health stream (`SomaHealthSnapshot`) from Soma
 (real or mock). If Soma is not ready yet, Vitals keeps serving and retries the
 stream connection in the background.
 
+Time reads use the in-process `robonix-chronos-clock` library and need no Chronos
+daemon. Snapshot publication, module health, and mock Soma retain separate
+origins at their first read and publish elapsed monotonic nanoseconds. Module
+TTL rules and Tokio timers keep their existing behavior. A failed time read
+returns an error or is logged while skipping the affected update or stale check;
+cached health remains available. Mock Soma streams end with an error if a time
+read fails.
+
 ## Architecture
 
 Two parallel data paths coexist:
