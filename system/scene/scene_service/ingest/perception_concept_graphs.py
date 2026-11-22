@@ -2100,7 +2100,10 @@ class ConceptGraphsDetector:
             # so a re-detection within SCENE_OBJECT_TTL_SEC can re-bind the
             # same id + observation_count via find_rebindable — fixing the
             # cull→ re-detect obs reset.
+            reasons = getattr(self, "_drop_reasons", {})
             for obj in doomed:
+                log.info("[scene] %s %s is missing: %s", obj.object_id, obj.label,
+                         reasons.get(obj.attributes.get("cg_uuid"), "gone from the tracker"))
                 self._registry.soft_evict(obj)
             # The same gate re-adoption uses, so a forwarding address is
             # never guessed on looser evidence than a merge would need.

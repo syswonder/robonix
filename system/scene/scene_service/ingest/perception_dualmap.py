@@ -411,9 +411,15 @@ class DualMapDetector(ConceptGraphsDetector):
         tracks = list(getattr(self._lm, "local_map", []) or [])
         if self._gm is not None:
             tracks += list(getattr(self._gm, "global_map", []) or [])
+        # Why each live track is not offered this tick, so an object that goes
+        # missing can say which filter took it (see _apply_snapshot).
+        reasons: dict[str, str] = {}
         for o in tracks:
+            before = dict(dropped)
             d = self._to_map_object(o, dropped)
             if d is None:
+                reasons[str(getattr(o, "uid", ""))] = next(
+                    (k for k in dropped if dropped[k] != before[k]), "no cloud")
                 continue
             all_objects.append(d)
             if known is not None and not self._on_known_ground(d, known):
@@ -422,15 +428,21 @@ class DualMapDetector(ConceptGraphsDetector):
                 continue
             if d["num_detections"] < self._min_observations:
                 dropped["observations"] += 1
+                reasons[d["id"]] = "observations"
                 continue
             if self._stable_only and not d["stable"]:
                 dropped["unstable"] += 1
+                reasons[d["id"]] = "unstable"
                 continue
             objects.append(d)
         # Floor slabs go first: they carry the most points and would win any ranking.
-        objects = self._drop_ground_slabs(objects, dropped)
-        objects = self._drop_class_outliers(objects, dropped)
-        objects = self._absorb_overlapping(objects, dropped)
+        for reason, step in (("ground_slab", self._drop_ground_slabs),
+                             ("class_outlier", self._drop_class_outliers),
+                             ("overlapping", self._absorb_overlapping)):
+            ids = {d["id"] for d in objects}
+            objects = step(objects, dropped)
+            reasons.update(dict.fromkeys(ids - {d["id"] for d in objects}, reason))
+        self._drop_reasons = reasons
         self._map_objects = objects
         self._all_objects = all_objects
         self._held_uuids = held
