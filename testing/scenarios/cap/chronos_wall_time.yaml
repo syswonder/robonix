@@ -1,0 +1,25 @@
+# Pilot reads the current date and time from Chronos.
+name: chronos_wall_time
+task: "ci-test: what is the date and time now?"
+steps:
+  - content: Reading the current time.
+    rtdl_description: chronos wall time
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: chronos_wall_time_step
+      children:
+        - op: do
+          id: chronos_wall_time
+          cap: chronos.get_wall_time
+          args: {}
+          description: read the current date and time
+          expect:
+            contract: robonix/system/chronos/get_wall_time
+            success: true
+            output:
+              checks:
+                - select: $.datetime
+                  assert: {op: regex, value: "^\\d+-\\d+-\\d+T\\d+:\\d+"}
+  - content: Read the current time.
+    status: done
