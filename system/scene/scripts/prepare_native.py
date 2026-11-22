@@ -342,7 +342,8 @@ def setup(host: dict) -> None:
                inference=inference_backend(), key=key, generation=directory.name,
                base_python=sys.executable, torch_source=torch.pop('source', 'existing'),
                torch=torch, cuda_paths=cuda_library_paths(torch['cuda']) if torch['cuda'] else [])
-    if os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() == 'dualmap':
+    if (os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() == 'dualmap'
+            and not os.environ.get('SCENE_DUALMAP_NPU_DIR', '').strip()):
         from scripts.prepare_dualmap import prepare
 
         env['dualmap_root'] = str(prepare())

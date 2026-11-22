@@ -589,3 +589,69 @@ def test_replica_write_error_is_reported_instead_of_succeeding(tmp_path, monkeyp
     monkeypatch.setattr(perception_dualmap, 'export_map_objects', Mock(side_effect=PermissionError('read only')))
     with pytest.raises(PermissionError, match='read only'):
         detector._export()
+
+
+def test_npu_keeps_its_detector_and_needs_only_bundle_weights(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    import hydra
+    from scene_service.ingest import perception_models
+
+    root = tmp_path / 'npu-dualmap'
+    (root / 'config').mkdir(parents=True)
+    bundle = tmp_path / 'models'
+    bundle.mkdir()
+    for name in ('npu_meta.json', 'yoloworld.rknn', 'yoloworld.weight',
+                 'mobilesam.rknn', 'mobilesam.weight', 'mobilesam_decoder.rknn',
+                 'mobilesam_decoder.weight', 'clip_image.rknn', 'clip_image.weight'):
+        (bundle / name).touch()
+    clip = tmp_path / 'clip.pt'
+    clip.touch()
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'torch')
+    monkeypatch.setenv('SCENE_DUALMAP_NPU_DIR', str(bundle))
+    monkeypatch.setenv('SCENE_DUALMAP_CLIP_WEIGHTS', str(clip))
+    captured = {}
+    classes = types.SimpleNamespace(get_classes_arr=lambda: ['chair'])
+
+    class Detector:
+        def __init__(self, cfg, inference=None):
+            captured['cfg'] = cfg
+            captured['inference'] = inference
+            self.obj_classes = classes
+
+    monkeypatch.setattr(hydra, 'initialize_config_dir', lambda **_: nullcontext())
+    monkeypatch.setattr(hydra, 'compose', lambda **kwargs: kwargs['overrides'])
+    monkeypatch.setattr(perception_models, 'load_perception',
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError('keep NPU inference')))
+    modules = {
+        'utils.global_map_manager': {'GlobalMapManager': lambda cfg: object()},
+        'utils.local_map_manager': {'LocalMapManager': lambda cfg: object()},
+        'utils.object_detector': {'Detector': Detector},
+        'utils.types': {'DataInput': object},
+        'utils.visualizer': {'ReRunVisualizer': lambda cfg: types.SimpleNamespace(
+            obj_classes=classes, set_use_rerun=lambda value: None)},
+    }
+    for name, fields in modules.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(fields)
+        monkeypatch.setitem(sys.modules, name, module)
+    detector = _detector(device='cpu')
+    detector._dm_root = str(root)
+    assert detector._load_dualmap()
+    assert captured['inference'] is None
+    assert 'use_npu=true' in captured['cfg']
+    assert f'npu_model_dir={bundle}' in captured['cfg']
+    assert 'clip.model_name=ViT-B-32' in captured['cfg']
+    assert f'clip.pretrained={clip}' in captured['cfg']
+    assert detector._engines is None
+
+
+def test_tensorrt_rejects_an_npu_bundle_before_loading_models(tmp_path, monkeypatch):
+    import pytest
+    root = tmp_path / 'dualmap'
+    (root / 'config').mkdir(parents=True)
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setenv('SCENE_DUALMAP_NPU_DIR', str(tmp_path / 'npu'))
+    detector = _detector()
+    detector._dm_root = str(root)
+    with pytest.raises(ValueError, match='either DualMap NPU models or TensorRT'):
+        detector._load_dualmap()

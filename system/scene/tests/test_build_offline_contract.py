@@ -71,7 +71,7 @@ class OfflineBuildContractTests(unittest.TestCase):
             )
             calls = (root / "calls").read_text().splitlines()
             self.assertTrue(any("prepare_models.py --check" in call for call in calls))
-            self.assertIn("-m scene_service.service", calls)
+            self.assertIn("-m robonix_api.llm scene_service.service", calls)
             self.assertTrue(any(call.endswith("--check") for call in calls))
             (root / "calls").unlink()
             env["NATIVE_PREFLIGHT_FAIL"] = "1"
@@ -81,7 +81,7 @@ class OfflineBuildContractTests(unittest.TestCase):
                 env=env, capture_output=True, text=True,
             )
             self.assertNotEqual(failed.returncode, 0)
-            self.assertNotIn("-m scene_service.service", (root / "calls").read_text().splitlines())
+            self.assertNotIn("-m robonix_api.llm scene_service.service", (root / "calls").read_text().splitlines())
 
     def _fixture(self, root: Path, *, include_clip: bool) -> tuple[Path, dict[str, str]]:
         scene = root / "system" / "scene"
@@ -418,7 +418,7 @@ def test_native_start_selects_prepared_python_and_stops_on_stale_environment(tmp
     calls = (tmp_path / 'calls').read_text().splitlines()
     assert calls[0].endswith('/prepare_native.py --check')
     assert calls[1].endswith('/prepare_models.py --check')
-    assert calls[2] == '-m scene_service.service'
+    assert calls[2] == '-m robonix_api.llm scene_service.service'
     (tmp_path / 'calls').unlink()
     env['STALE_ENV'] = '1'
     result = subprocess.run(command, env=env, capture_output=True, text=True)
