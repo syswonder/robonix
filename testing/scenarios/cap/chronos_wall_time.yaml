@@ -11,7 +11,7 @@ steps:
       children:
         - op: do
           id: chronos_wall_time
-          cap: chronos.get_wall_time
+          cap: chronos.chronos_get_wall_time
           args: {}
           description: read the current date and time
           expect:
