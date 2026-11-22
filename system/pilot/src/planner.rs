@@ -2690,6 +2690,8 @@ mod tests {
                                 upstream: "http://127.0.0.1:1/v1".into(),
                                 api_key: String::new(),
                                 model: "unused".into(),
+                                reasoning_effort: None,
+                                catalog_id: None,
                                 context_window_tokens: None,
                                 api_format: "openai".into(),
                             });
