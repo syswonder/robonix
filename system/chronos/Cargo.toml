@@ -6,5 +6,7 @@ license.workspace = true
 description = "Robonix Chronos clock-domain models"
 
 [dependencies]
+serde_yaml.workspace = true
+robonix-chronos-clock = { workspace = true, features = ["serde"] }
 serde.workspace = true
 thiserror.workspace = true
