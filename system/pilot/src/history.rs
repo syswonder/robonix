@@ -51,10 +51,12 @@ pub fn image_media_type(image_base64: &str) -> Option<&'static str> {
     }
 }
 
-/// Re-encode raw `sensor_msgs/Image` pixels as base64 PNG. Depth (16UC1 in mm,
-/// 32FC1 in m) becomes grayscale over its valid range, nearer is brighter.
-/// `None` for compressed data, unknown encodings or a short buffer.
-fn raw_image_to_png(v: &serde_json::Value, encoding: &str) -> Option<String> {
+/// Re-encode raw `sensor_msgs/Image` pixels as a base64 image the model can
+/// read: colour as JPEG (quality 90, small like camera snapshots), grayscale
+/// and depth as lossless PNG. Depth (16UC1 in mm, 32FC1 in m) is scaled over
+/// its valid range, nearer is brighter. `None` for compressed data, unknown
+/// encodings or a short buffer.
+fn raw_image_for_model(v: &serde_json::Value, encoding: &str) -> Option<String> {
     use base64::Engine;
     let codec = base64::engine::general_purpose::STANDARD;
     let width = u32::try_from(v.get("width")?.as_u64()?).ok()?;
@@ -80,22 +82,27 @@ fn raw_image_to_png(v: &serde_json::Value, encoding: &str) -> Option<String> {
         .flat_map(|r| &data[r * step..r * step + row])
         .copied()
         .collect();
-    let (color, pixels) = match encoding {
-        "mono8" | "8UC1" => (png::ColorType::Grayscale, pixels),
-        "rgb8" => (png::ColorType::Rgb, pixels),
-        "rgba8" => (png::ColorType::Rgba, pixels),
-        "bgr8" | "bgra8" => {
-            let mut pixels = pixels;
-            pixels
-                .chunks_exact_mut(bytes_per_pixel)
-                .for_each(|p| p.swap(0, 2));
-            let color = if encoding == "bgr8" {
-                png::ColorType::Rgb
-            } else {
-                png::ColorType::Rgba
-            };
-            (color, pixels)
-        }
+    let colour = match encoding {
+        "rgb8" => Some(jpeg_encoder::ColorType::Rgb),
+        "bgr8" => Some(jpeg_encoder::ColorType::Bgr),
+        "rgba8" => Some(jpeg_encoder::ColorType::Rgba),
+        "bgra8" => Some(jpeg_encoder::ColorType::Bgra),
+        _ => None,
+    };
+    if let Some(colour) = colour {
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 90)
+            .encode(
+                &pixels,
+                u16::try_from(width).ok()?,
+                u16::try_from(height).ok()?,
+                colour,
+            )
+            .ok()?;
+        return Some(codec.encode(out));
+    }
+    let gray: Vec<u8> = match encoding {
+        "mono8" | "8UC1" => pixels,
         _ => {
             let depth: Vec<f32> = pixels
                 .chunks_exact(bytes_per_pixel)
@@ -112,7 +119,7 @@ fn raw_image_to_png(v: &serde_json::Value, encoding: &str) -> Option<String> {
                 .filter(|d| valid(d))
                 .fold((f32::MAX, f32::MIN), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
             let span = (far - near).max(f32::EPSILON);
-            let gray = depth
+            depth
                 .iter()
                 .map(|d| {
                     if valid(d) {
@@ -121,20 +128,15 @@ fn raw_image_to_png(v: &serde_json::Value, encoding: &str) -> Option<String> {
                         0
                     }
                 })
-                .collect();
-            (png::ColorType::Grayscale, gray)
+                .collect()
         }
     };
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(color);
+        encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .write_header()
-            .ok()?
-            .write_image_data(&pixels)
-            .ok()?;
+        encoder.write_header().ok()?.write_image_data(&gray).ok()?;
     }
     Some(codec.encode(out))
 }
@@ -192,8 +194,8 @@ pub fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory
     if is_image_value(&v) && img_encoding.is_some() {
         let enc = img_encoding.unwrap_or("jpeg");
         let label = format!("sensor_msgs/Image encoding={enc}");
-        if let Some(png) = raw_image_to_png(&v, enc) {
-            return image_result(call_id, &format!("{label}, converted to PNG"), &png);
+        if let Some(image) = raw_image_for_model(&v, enc) {
+            return image_result(call_id, &format!("{label}, re-encoded"), &image);
         }
         let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
         return image_result(call_id, &label, b64);
@@ -352,21 +354,34 @@ mod tests {
         );
         assert_eq!(result.followup_messages.len(), 1);
 
-        // Raw colour and depth pixels are re-encoded as PNG for the model.
-        for raw in [
-            r#"{"width":2,"height":1,"step":6,"encoding":"bgr8","data":"AAD/AP8A"}"#,
-            r#"{"width":2,"height":1,"encoding":"16UC1","data":"6APQBw=="}"#,
-            r#"{"width":2,"height":1,"encoding":"32FC1","data":"AADAfwAAgD8="}"#,
+        // Raw colour pixels become JPEG; grayscale and depth become PNG.
+        for (raw, media_type) in [
+            (
+                r#"{"width":2,"height":1,"step":6,"encoding":"bgr8","data":"AAD/AP8A"}"#,
+                "image/jpeg",
+            ),
+            (
+                r#"{"width":1,"height":1,"encoding":"mono8","data":"gA=="}"#,
+                "image/png",
+            ),
+            (
+                r#"{"width":2,"height":1,"encoding":"16UC1","data":"6APQBw=="}"#,
+                "image/png",
+            ),
+            (
+                r#"{"width":2,"height":1,"encoding":"32FC1","data":"AADAfwAAgD8="}"#,
+                "image/png",
+            ),
         ] {
             let result = tool_result_to_messages("c2", raw);
             let image = result.followup_messages[0].image_base64.as_deref().unwrap();
-            assert_eq!(super::image_media_type(image), Some("image/png"), "{raw}");
+            assert_eq!(super::image_media_type(image), Some(media_type), "{raw}");
             assert!(
                 result.tool_messages[0]
                     .content
                     .as_deref()
                     .unwrap()
-                    .contains("converted to PNG")
+                    .contains("re-encoded")
             );
         }
 
