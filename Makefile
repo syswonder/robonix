@@ -7,7 +7,7 @@
 # managed by uv from this same root.
 
 .PHONY: help build release install clean fmt check pyrightconfig \
-        build-atlas build-pilot build-executor build-liaison build-soma build-vitals
+        build-atlas build-chronos build-pilot build-executor build-liaison build-soma build-vitals
 .DEFAULT_GOAL := help
 
 BUILD_MODE ?= debug
@@ -20,6 +20,7 @@ help:
 	@echo "    make build           - Build all Cargo workspace crates (debug)"
 	@echo "    make release         - Build all Cargo workspace crates (release)"
 	@echo "    make build-atlas     - Install robonix-atlas to ~/.cargo/bin"
+	@echo "    make build-chronos   - Install robonix-chronos to ~/.cargo/bin"
 	@echo "    make build-pilot     - Install robonix-pilot to ~/.cargo/bin"
 	@echo "    make build-executor  - Install robonix-executor to ~/.cargo/bin"
 	@echo "    make build-liaison   - Install robonix-liaison to ~/.cargo/bin"
@@ -44,6 +45,9 @@ release:
 
 build-atlas:
 	cargo install --force --path system/atlas    --bin robonix-atlas    $(CARGO_FLAGS)
+
+build-chronos:
+	cargo install --force --path system/chronos  --bin robonix-chronos  $(CARGO_FLAGS)
 
 build-pilot:
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
@@ -70,6 +74,7 @@ check:
 install:
 	cargo install --force --path tools/codegen   --bin robonix-codegen  $(CARGO_FLAGS)
 	cargo install --force --path system/atlas    --bin robonix-atlas    $(CARGO_FLAGS)
+	cargo install --force --path system/chronos  --bin robonix-chronos  $(CARGO_FLAGS)
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)

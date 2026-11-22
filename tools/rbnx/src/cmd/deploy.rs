@@ -392,6 +392,30 @@ stop: "true"
         }
     }
 
+    /// Chronos rejects unknown config keys, so rbnx's own `status` switch stays out.
+    #[test]
+    fn chronos_receives_config_without_status_and_default_atlas() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("status: enabled\nlisten: 127.0.0.1:50094\n").unwrap();
+        let args = system_cli_args("chronos", Some(&cfg), Some("0.0.0.0:50051"));
+        assert_eq!(
+            args,
+            [
+                "--config-json",
+                r#"{"listen":"127.0.0.1:50094"}"#,
+                "--listen",
+                "127.0.0.1:50094",
+                "--atlas",
+                "0.0.0.0:50051"
+            ]
+        );
+
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("atlas_endpoint: 10.0.0.2:50051\n").unwrap();
+        let args = system_cli_args("chronos", Some(&cfg), Some("0.0.0.0:50051"));
+        assert!(!args.iter().any(|arg| arg == "--atlas"), "{args:?}");
+    }
+
     #[test]
     fn vitals_receives_typed_manifest_fields() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
@@ -2001,6 +2025,7 @@ pub async fn execute(
             };
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
+                ("chronos", "robonix-chronos"),
                 ("executor", "robonix-executor"),
                 ("soma", "robonix-soma"),
                 ("vitals", "robonix-vitals"),
@@ -2686,7 +2711,15 @@ fn system_cli_args(
     // robonix_scribe::init_from_config), so new manifest keys flow through
     // without per-key plumbing here. The typed flags below remain for the
     // fields binaries still read individually.
-    if let Some(v) = cfg
+    // `status` is rbnx's own switch; components never see it.
+    let component_cfg = cfg.map(|v| {
+        let mut v = v.clone();
+        if let Some(m) = v.as_mapping_mut() {
+            m.remove("status");
+        }
+        v
+    });
+    if let Some(v) = component_cfg.as_ref()
         && let Ok(json) = serde_json::to_string(v)
     {
         out.push("--config-json".into());
@@ -2798,6 +2831,13 @@ fn system_cli_args(
             push_pair(&mut out, "--deployment-manifest", s("deployment_manifest"));
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--log", s("log"));
+        }
+        "chronos" => {
+            // provider_id and log reach Chronos through --config-json.
+            push_pair(&mut out, "--listen", s("listen"));
+            if s("atlas_endpoint").is_none() {
+                push_pair(&mut out, "--atlas", atlas_listen.map(str::to_string));
+            }
         }
         "vitals" => {
             push_pair(&mut out, "--listen", s("listen"));
