@@ -46,7 +46,8 @@ system:
 | --- | --- |
 | `service[].name` | Provider ID used by `verifier_provider_id`. |
 | `service[].path` | Package directory containing `package_manifest.yaml`. |
-| `config.vlm.base_url` | OpenAI-compatible API base URL, normally ending in `/v1`. The service appends `/chat/completions`. |
+| `config.vlm.base_url` | API base URL for the selected mode. |
+| `config.vlm.mode` | Defaults to `vlm`. Use `jev` in a complete explicit block to run Jev. |
 | `config.vlm.api_key` | API credential. Required; sent as a Bearer token. |
 | `config.vlm.model` | Model ID supporting image_url data URIs. Required; no model default. |
 | `target_contract_id` | Completed capability to verify. Required. |
@@ -77,6 +78,20 @@ through lifecycle initialization; it does not read `.env` or Pilot config itself
 Independent environment variable names may be used in the manifest if the
 verifier should use a different model or account.
 
+To use Jev for visual verification, put this block under the service's config:
+
+```yaml
+vlm:
+  mode: jev
+  base_url: ${JEV_URL}
+  api_key: ${JEV_API_KEY}
+  model: ${JEV_MODEL}
+```
+
+Export JEV_URL, JEV_MODEL, and JEV_API_KEY before launching Robonix.
+For OpenRouter, use https://openrouter.ai/api/alpha as the base URL and
+typesafe/jev-1.14 as the model. The verifier appends /decisions.
+
 Deleting a verification rule disables verification for that target. Merely
 starting the service does not enable verification. The current Ranger arm-grasp
 profile enables only `pick`, not `put_down`.
@@ -99,13 +114,14 @@ profile enables only `pick`, not `put_down`.
    deadline, converts each image into JPEG, and saves the exact JPEG with private file
    permissions under `$SCRIBE_LOG_DIR/vlm_verifier-frames/`, and sends those
    saved before and after images as separate images labelled by camera provider
-   and execution phase, with the action context, to the configured
-   `<base_url>/chat/completions` endpoint.
-6. The model must return exactly `observable` (boolean), `passed` (boolean),
+   and execution phase, with the action context, to the configured model endpoint.
+6. In VLM mode the model must return exactly `observable` (boolean), `passed` (boolean),
    and a nonempty `detail`. A result with `observable=true` becomes the existing
    two-field Verify response. `observable=false` requires `passed=false` and
    raises a verifier error with the fixed reason `insufficient visual evidence`.
-   The raw model explanation is not included in this error.
+   The raw model explanation is not included in this error. In Jev mode,
+   `success` passes, `failure` rejects with empty detail, and `uncertain`
+   produces the same insufficient-evidence error.
 
 The existing `overlap` controls only the after request. When enabled, later
 actions may affect the cached image read by after and can execute before a
@@ -144,10 +160,12 @@ stability.
 
 | Outcome | Executor result |
 | --- | --- |
-| `passed=true` | Success, preserving the original capability output. |
-| `passed=false` | Failure with `result verification failed: <detail>`. |
-| Model reports `observable=false` | Failure with `result verification unavailable: ... insufficient visual evidence ...`, preserving the original output. |
-| Camera, network, timeout, or model-format error | Failure with `result verification unavailable: ...`. |
+| `passed=true` | Success with the original capability output. |
+| `passed=false` | Failure. The error states that the provider reported success and verification rejected the result. |
+| Verification unavailable after dispatch | Failure. The error states that the provider reported success and gives the reason verification was unavailable. |
+| Before-image capture fails | Failure. The error states that the capability was not dispatched. |
+
+After-dispatch rejection and unavailability preserve the original provider output.
 
 Concurrent requests share the latest image cached for their selected camera.
 ROS subscriptions and Atlas channels remain open until service shutdown. Logs
@@ -267,9 +285,9 @@ VLM_TEST_EXECUTOR_BIN="$PWD/../../../target/debug/robonix-executor" \
   rbnx-build/venv/bin/python tests/smoke_mcp.py
 ```
 
-The smoke tests use a synthetic ROS camera, real MCP HTTP, and a simulated VLM
-HTTP endpoint. The Executor checks cover single and multiple cameras, synchronous
-and overlap verification, pass, rejection, insufficient evidence, malformed model
+The smoke tests use a synthetic ROS camera, real MCP HTTP, and a simulated model
+endpoint. Set `VLM_TEST_DECISIONS=1` to exercise Jev mode. The Executor checks cover
+single and multiple cameras, synchronous and overlap verification, pass, rejection, insufficient evidence, malformed model
 results, and missing cameras. They assert one terminal state and preserved
 original output. Test processes are cleaned up;
 these tests do not control the physical arm.

@@ -125,7 +125,9 @@ pub(crate) async fn execute_call(
     )
     .await;
     let external_channel = match before {
-        Err(error) => Err(format!("result verification unavailable: {error}")),
+        Err(error) => Err(format!(
+            "result verification unavailable: capability was not dispatched. {error}"
+        )),
         Ok(()) if runtime.is_cancelled(&node.plan_id).await => Err("plan canceled".to_string()),
         Ok(()) if call.provider_id == provider_id => Ok(None),
         Ok(()) => dispatch::connect_channel(call, &provider_id, &mut atlas)

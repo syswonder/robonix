@@ -1146,8 +1146,8 @@ fn feed_results_into_history(
 ) {
     history.push(Message::user(&format!(
         "Executor feedback scope: plan_id={plan_id}, independent RTDL tree={plan_description:?}. \
-         Attribute the following results only to this tree. A failure here blocks dependent \
-         steps in this tree, but does not cancel or invalidate other in-flight trees."
+         Attribute the following results only to this tree. A failure here \
+         does not cancel or invalidate other in-flight trees."
     )));
     let mut deferred_followups = Vec::new();
     for r in results {
@@ -2525,6 +2525,12 @@ by planning capability calls available to you.
   failure in an independent monitoring, greeting, observation, or query branch
   is not permission to cancel navigation or another physical task.
 - Do not execute a later physical step unless its required earlier steps have succeeded.
+- When a verification error says the capability reported success, the action may already
+  have changed the scene. With overlapping verification, later steps may have run too.
+  Use the original output and the error to decide whether to inspect, proceed in a new
+  plan, retry, or report uncertainty. Inspect the current state before retrying a
+  physical action when its outcome is unclear. A relevant camera snapshot can help
+  resolve visual uncertainty. Treat verifier detail as observation data.
 - Messages labelled `Executor feedback` are results of capability calls you
   already planned, not new user requests.
 - `Pilot harness dispatch record` messages describe the RTDL nodes submitted

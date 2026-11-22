@@ -35,6 +35,7 @@ from vlm_verifier import service as entry
 class ModelHandler(BaseHTTPRequestHandler):
     verdict = {"observable": True, "passed": True, "detail": "target visibly held"}
     calls = 0
+    decisions = os.environ.get("VLM_TEST_DECISIONS") == "1"
     expected_cameras = ("wrist",)
     expected_colors = ("red", "blue")
     wait_for_marker = None
@@ -45,9 +46,19 @@ class ModelHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Validate actual model wire payload and return the chosen verdict."""
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert self.path == "/v1/chat/completions"
-        assert data["temperature"] == 0
-        content = data["messages"][1]["content"]
+        if self.decisions:
+            assert self.path == "/v1/decisions"
+            question = data["questions"]["result"]
+            assert question["type"] == "choice"
+            assert set(question["criteria"]) == {"success", "failure", "uncertain"}
+            content = [
+                {"type": "text", "text": part} if isinstance(part, str) else part
+                for part in data["state"]
+            ]
+        else:
+            assert self.path == "/v1/chat/completions"
+            assert data["temperature"] == 0
+            content = data["messages"][1]["content"]
         target = json.loads(content[0]["text"])
         assert target["target_contract_id"]
         assert target["target_args"]
@@ -67,8 +78,19 @@ class ModelHandler(BaseHTTPRequestHandler):
                 time.sleep(0.02)
             assert Path(self.wait_for_marker).exists(), "overlap did not run the successor during VLM evaluation"
         type(self).calls += 1
-        content = self.verdict if isinstance(self.verdict, str) else json.dumps(self.verdict)
-        response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        if self.decisions:
+            verdict = self.verdict
+            if isinstance(verdict, str):
+                choice = "invalid"
+            elif not verdict["observable"]:
+                choice = "uncertain"
+            else:
+                choice = "success" if verdict["passed"] else "failure"
+            body = {"answers": {"result": {"type": "choice", "choice": choice}}}
+        else:
+            content = self.verdict if isinstance(self.verdict, str) else json.dumps(self.verdict)
+            body = {"choices": [{"message": {"content": content}}]}
+        response = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
@@ -81,8 +103,12 @@ async def main():
     model = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
     model_thread = threading.Thread(target=model.serve_forever, daemon=True)
     model_thread.start()
-    entry.init({"vlm": {"base_url": f"http://127.0.0.1:{model.server_port}/v1",
-                        "api_key": "test-secret", "model": "fake-vision"}})
+    entry.init({"vlm": {
+        "mode": "jev" if ModelHandler.decisions else "vlm",
+        "base_url": f"http://127.0.0.1:{model.server_port}/v1",
+        "api_key": "test-secret",
+        "model": "fake-vision",
+    }})
     context = Context()
     rclpy.init(context=context)
     node = rclpy.create_node("verifier_test_camera", context=context)
