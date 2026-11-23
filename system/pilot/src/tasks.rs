@@ -78,8 +78,11 @@ impl UserMessage {
     /// How the message enters history: once, with its id and task.
     pub(crate) fn line(&self) -> String {
         format!(
-            "User message {} (filed under {}): {}",
-            self.id, self.task, self.text
+            "{}{} (filed under {}): {}",
+            crate::corrections::USER_MESSAGE_PREFIX,
+            self.id,
+            self.task,
+            self.text
         )
     }
 }

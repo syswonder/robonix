@@ -46,6 +46,7 @@ def main() -> None:
     ap.add_argument("--out", help="default .deploy, or .deploy-N for a slot")
     ap.add_argument("--slot", type=int, default=0, help="runs side by side need their own ports: slot N adds N*100")
     ap.add_argument("--venv", default=str(HERE.parent / ".venv"))
+    ap.add_argument("--corrections-dir", help="directory of Pilot correction rules (system.pilot.corrections_dir); written to the manifest as an absolute path")
     a = ap.parse_args()
     out = Path(a.out or HERE.parent / (f".deploy-{a.slot}" if a.slot else ".deploy")).resolve()
     ports = {k: v + 100 * a.slot for k, v in PORTS.items()}
@@ -88,6 +89,7 @@ def main() -> None:
             "pilot": {
                 "listen": f"127.0.0.1:{ports['pilot']}",
                 "vlm": {"upstream": f"http://127.0.0.1:{ports['proxy']}/v1", "api_key": "bench", "model": "bench"},
+                **({"corrections_dir": str(Path(a.corrections_dir).resolve())} if a.corrections_dir else {}),
             },
         },
         **sections,

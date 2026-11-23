@@ -836,6 +836,27 @@ soma_endpoint: 127.0.0.1:50091
             assert!(!detail.contains(value));
         }
     }
+
+    fn pilot_args(yaml: &str) -> Vec<String> {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        system_cli_args("pilot", Some(&cfg), None)
+    }
+
+    #[test]
+    fn pilot_corrections_dir_reaches_the_command_line() {
+        let args = pilot_args(
+            "listen: 127.0.0.1:50071\nvlm: {upstream: u, api_key: k, model: m}\ncorrections_dir: rules\n",
+        );
+        let at = args.iter().position(|a| a == "--corrections-dir").unwrap();
+        assert_eq!(args[at + 1], "rules");
+    }
+
+    #[test]
+    fn pilot_without_corrections_dir_gets_no_flag() {
+        let args =
+            pilot_args("listen: 127.0.0.1:50071\nvlm: {upstream: u, api_key: k, model: m}\n");
+        assert!(!args.iter().any(|a| a == "--corrections-dir"));
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -2798,6 +2819,9 @@ fn system_cli_args(
                 "--vlm-context-window-tokens",
                 nested_tokens("vlm", "context_window_tokens"),
             );
+            // Directory of correction rules; Pilot reads it at startup. A
+            // relative path resolves against the directory `rbnx boot` runs in.
+            push_pair(&mut out, "--corrections-dir", s("corrections_dir"));
         }
         "liaison" => {
             push_pair(&mut out, "--listen", s("listen"));

@@ -19,6 +19,7 @@
 //   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
 
+mod corrections;
 mod discovery;
 // Pilot shares Executor's expression grammar for admission.
 #[allow(dead_code)]
@@ -262,6 +263,21 @@ async fn main() -> Result<()> {
         );
     }
 
+    // A bad corrections directory is a deployment error: fail now, not mid-task.
+    let corrections = match &cfg.corrections_dir {
+        Some(dir) => {
+            let set = corrections::CorrectionSet::load(dir)?;
+            info!(
+                "[pilot/correction] loaded {} rule(s) from {}: [{}]",
+                set.ids().len(),
+                dir.display(),
+                set.ids().join(", ")
+            );
+            std::sync::Arc::new(set)
+        }
+        None => std::sync::Arc::new(corrections::CorrectionSet::default()),
+    };
+
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
@@ -323,7 +339,13 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared RobonixSystemPilotGetHealth gRPC at {advertised}");
 
-    let svc = PilotServiceImpl::new(atlas.clone(), cfg.id.clone(), vlm, history_budget);
+    let svc = PilotServiceImpl::new(
+        atlas.clone(),
+        cfg.id.clone(),
+        vlm,
+        history_budget,
+        corrections,
+    );
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
     let mut server_task = tokio::spawn(async move {

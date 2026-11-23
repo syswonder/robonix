@@ -35,6 +35,9 @@ pub struct PilotConfig {
     pub listen: String,
     pub id: String,
     pub vlm: VlmConfig,
+    /// Directory of correction rules (see `corrections.rs`). `None` turns the
+    /// feature off and leaves every request exactly as it was.
+    pub corrections_dir: Option<PathBuf>,
 }
 
 /// Connection settings used by Pilot's model client.
@@ -119,6 +122,11 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VLM_FORMAT")]
     pub vlm_format: Option<String>,
 
+    /// Directory of correction rules. Each `*.yaml` is one rule; a matching
+    /// rule adds a hint to the next planning request. Unset = feature off.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTIONS_DIR")]
+    pub corrections_dir: Option<PathBuf>,
+
     /// YAML config file (rbnx writes this; CLI/env still override individual fields).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -149,6 +157,8 @@ struct FileConfig {
     id: Option<String>,
     #[serde(default)]
     vlm: Option<FileVlmConfig>,
+    #[serde(default)]
+    corrections_dir: Option<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -212,6 +222,10 @@ impl PilotConfig {
             .or(file_vlm.api_key)
             .filter(|value| !value.trim().is_empty());
         let explicit_context = args
+        let corrections_dir = args
+            .corrections_dir
+            .or(file_cfg.corrections_dir)
+            .filter(|dir| !dir.as_os_str().is_empty());
             .vlm_context_window_tokens
             .or(file_vlm.context_window_tokens)
             .filter(|tokens| *tokens > 0);
@@ -275,6 +289,7 @@ impl PilotConfig {
             listen,
             id,
             vlm,
+            corrections_dir,
         })
     }
 }

@@ -1,0 +1,42 @@
+# Pilot 修正规则示例。格式说明见 ../pilot_corrections_plan.md 第 2 节。
+#
+# 解决的问题：goal_near 报告物体旁没有可停靠位置后，模型仍然改用
+# goal_region、自己算的坐标或“最近安全点”去导航。
+# model bench 证据：honest.goal_fails 及其孪生在 F2/S0/N0 上 6/6 失败。
+
+apiVersion: robonix.pilot/correction/v1
+id: goal_near_unreachable
+description: goal_near 说物体旁没有空位时，不再为这个物体导航，直接告诉用户。
+enabled: true
+
+# 只看最近一条用户消息之后的执行反馈；用户发来新消息后，旧的失败不再触发。
+scope: current_message
+
+when:
+  any:
+    # 形态 1：叶子调用失败（model bench 的 mock 世界、provider 直接报错）。
+    # 例：error = "mcp tool error: Error executing tool goal_near: no free cell within 1.5 m of scene.object.0002"
+    - leaf:
+        contract: robonix/system/scene/goal_near
+        success: false
+        error:
+          regex: 'no free cell within [\d.]+ m of (?P<object_id>[\w.]+)'
+    # 形态 2：叶子调用成功，但返回 reachable=false（真实 Scene 服务的返回方式，
+    # 见 system/scene/scene_service/mcp_tools.py 的 goal_near）。
+    - leaf:
+        contract: robonix/system/scene/goal_near
+        success: true
+        output:
+          regex: 'no footprint-safe approach cell for ''(?P<object_id>[^'']+)'''
+
+# 从第一次匹配到的那一轮开始，连续生效的规划轮数；null = 一直生效到 scope 结束。
+window:
+  max_rounds: null
+
+actions:
+  - kind: inject_message
+    template: |
+      Correction (Pilot rule goal_near_unreachable): goal_near reported no free spot near {{object_id}}, so you cannot reach it.
+      Do not navigate for it: no goal_region, no coordinates of your own, no "nearest safe point".
+      Tell the user you could not get next to it and why.
+      If the user already said what to do in this case, do that instead.

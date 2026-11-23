@@ -13,7 +13,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
     ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
-    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat,
 };
 use futures_util::stream::{Stream, StreamExt};
 use robonix_llm_metrics::{Call, Status, Usage};
@@ -576,18 +576,12 @@ fn add_claude_cache_breakpoints(model: &str, body: &mut Value) {
 /// themselves mention JSON, so attaching it to a summarisation prompt turns
 /// every such request into a 400.
 fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
-    match shape {
-        ReplyShape::Text => None,
-        ReplyShape::RtdlEnvelope => Some(ResponseFormat::JsonSchema {
-            json_schema: ResponseFormatJsonSchema {
-                description: None,
-                name: "rtdl_envelope".to_string(),
-                schema: Some(rtdl_envelope_schema()),
-                strict: Some(false),
-            },
-        }),
-        ReplyShape::RtdlJsonObject => Some(ResponseFormat::JsonObject),
-    }
+    // Forced response_format disabled: the upstream rejects or mishandles the
+    // json_schema envelope (the bench chain always sent --drop-response-format;
+    // without a proxy the same must hold for direct connections). The RTDL
+    // reply is parsed and corrected regardless, so no schema is attached.
+    let _ = shape;
+    None
 }
 
 impl VlmClient {

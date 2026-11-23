@@ -180,6 +180,8 @@ pub struct PilotServiceImpl {
     provider_id: String,
     vlm: VlmClient,
     history_budget: HistoryBudget,
+    /// Operator-written hints added to a request when their condition holds.
+    corrections: Arc<crate::corrections::CorrectionSet>,
     histories: Histories,
     /// The tasks of each session (see `tasks`). They survive a transport turn
     /// that pauses for user input.
@@ -209,12 +211,14 @@ impl PilotServiceImpl {
         provider_id: String,
         vlm: VlmClient,
         history_budget: HistoryBudget,
+        corrections: Arc<crate::corrections::CorrectionSet>,
     ) -> Self {
         Self {
             atlas,
             provider_id,
             vlm,
             history_budget,
+            corrections,
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
             forests: Arc::new(Mutex::new(HashMap::new())),
@@ -516,6 +520,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
         let history_budget = self.history_budget.clone();
+        let corrections = Arc::clone(&self.corrections);
         let session_id = task.session_id.clone();
         let term_signals = Arc::clone(&self.term_signals);
         let steers = Arc::clone(&self.steers);
@@ -574,6 +579,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 steer_rx,
                 plan_seq,
                 &history_budget,
+                &corrections,
                 &mut transcript,
             )
             .await;

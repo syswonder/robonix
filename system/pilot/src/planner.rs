@@ -1287,6 +1287,7 @@ pub async fn run_turn(
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
     history_budget: &HistoryBudget,
+    corrections: &crate::corrections::CorrectionSet,
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
@@ -1383,6 +1384,8 @@ pub async fn run_turn(
 
     // 2. Take in the user's message: Pilot files it under a task and puts it in
     // history once, with its id. Compaction keeps the open tasks' messages.
+    // Where this turn's additions to the history begin (for rules scoped to a turn).
+    let turn_start = history.len();
     receive_user_message(task, history, tasks);
     if !memory_prompt.is_empty() {
         history.push(Message::user(&memory_prompt));
@@ -1423,6 +1426,7 @@ pub async fn run_turn(
     let mut requests = 0usize;
     let mut output_retries = 0usize;
     let mut reply_shape = ReplyShape::RtdlEnvelope;
+    let mut correction_state = crate::corrections::CorrectionState::default();
 
     'supervisor: loop {
         while let Ok(event) = forest.interrupt_rx.try_recv() {
@@ -1630,6 +1634,12 @@ pub async fn run_turn(
         let board = tasks.board();
         if !board.is_empty() {
             request_history.push(Message::user(&board));
+        }
+        // Operator-written hints for this step. They join this request only; `history`
+        // is untouched, so a hint ends with the condition that caused it.
+        if let Some(injection) = corrections.evaluate(history, turn_start, &mut correction_state) {
+            log_corrections(&session_id, round, &injection);
+            request_history.push(injection.message);
         }
         let messages = assemble_planning_messages(
             round,
@@ -2324,6 +2334,31 @@ fn format_plan_summary(plan: &Plan) -> Vec<String> {
 }
 
 /// Emit the compact plan-start log block for one expanded RTDL plan.
+/// One info line per request a rule changed, to check from the log which rule
+/// fired in which round.
+fn log_corrections(session_id: &str, round: u32, injection: &crate::corrections::Injection) {
+    let rules: Vec<serde_json::Value> = injection
+        .fired
+        .iter()
+        .map(|rule| {
+            serde_json::json!({
+                "id": rule.id,
+                "window_round": rule.window_round,
+                "vars": rule.vars,
+            })
+        })
+        .collect();
+    info!(
+        "[pilot/correction] {}",
+        serde_json::json!({
+            "session": session_id,
+            "round": round,
+            "rules": rules,
+            "bytes": injection.message.content.as_deref().map_or(0, str::len),
+        })
+    );
+}
+
 fn log_plan_start(plan: &Plan, description: &str, round: u32, calls: usize) {
     info!(
         "[pilot/rtdl] -- plan start plan_id={} round={} calls={} --",
@@ -2454,7 +2489,8 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
                 }
             });
             Message::user(&format!(
-                "Executor feedback for the current RTDL leaf (not a new user request): {}",
+                "{}{}",
+                crate::corrections::LEAF_FEEDBACK_PREFIX,
                 feedback
             ))
         })
@@ -2464,6 +2500,14 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
         tool_messages,
         followup_messages: mapped.followup_messages,
     }
+}
+
+/// The history message a leaf result becomes, for tests of readers of that format.
+#[cfg(test)]
+pub(crate) fn rtdl_result_to_messages_for_test(
+    r: &CapabilityCallResult,
+) -> history::ToolResultHistory {
+    rtdl_result_to_messages(r)
 }
 
 // ── System prompt + SOUL ──────────────────────────────────────────────────────
@@ -3363,6 +3407,8 @@ mod tests {
         output: std::sync::Arc<tokio::sync::Mutex<Option<ExecutorEventSender>>>,
         /// Exact plan admitted by the incremental input stream.
         plan_id: std::sync::Arc<tokio::sync::Mutex<String>>,
+        /// Error text of a failed leaf; empty keeps the default file error.
+        fail_error: String,
     }
 
     #[tonic::async_trait]
@@ -3389,7 +3435,7 @@ mod tests {
                                 leaf_result: Some(CapabilityCallResult {
                                     call_id: call.call_id, contract_id: call.contract_id,
                                     success: !failed, output: if failed { "" } else { "completed action" }.into(),
-                                    error: if failed { "No such file or directory" } else { "" }.into(),
+                                    error: if !failed { String::new() } else if state.fail_error.is_empty() { "No such file or directory".into() } else { state.fail_error.clone() },
                                     ..Default::default()
                                 }), ..Default::default()
                             }), ..Default::default()
@@ -3546,6 +3592,7 @@ mod tests {
                 steer,
                 std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 &HistoryBudget::new(None, "test"),
+                &crate::corrections::CorrectionSet::default(),
                 &mut transcript,
             ),
         )
@@ -3578,6 +3625,234 @@ mod tests {
             });
         }
         assert!(failed_leaf, "client retains exact failed leaf feedback");
+    }
+
+    /// Runs one real `run_turn` against a fake Atlas, Executor and model. The first
+    /// model reply plans a leaf that fails with `fail_error`; the second ends the
+    /// task. Returns the request bodies the model received, in order.
+    async fn model_requests_after_a_failed_leaf(
+        fail_error: &str,
+        rules: &crate::corrections::CorrectionSet,
+        user_text: &str,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let registry = std::sync::Arc::new(robonix_atlas::service::AtlasRegistry::default());
+        registry
+            .register(
+                "executor",
+                atlas_pb::Kind::Service,
+                "robonix/system/executor",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "executor",
+                "robonix/system/executor/builtin/read_file",
+                atlas_pb::Transport::Mcp,
+                "http://127.0.0.1:1/mcp",
+                atlas_pb::TransportParams {
+                    kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                        input_schema_json:
+                            r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+                    })),
+                },
+                "Read a file",
+            )
+            .await
+            .unwrap();
+        let execution = FastLeafExecutor {
+            fail_error: fail_error.into(),
+            ..Default::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async {
+            let stream = listener.accept().await.map(|(stream, _)| stream);
+            Some((stream, listener))
+        });
+        let grpc = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(atlas_pb::atlas_server::AtlasServer::new(robonix_atlas::service::AtlasService::new(registry)))
+            .add_service(crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer::new(execution.clone()))
+            .add_service(crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer::new(execution.clone()))
+            .serve_with_incoming(incoming));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let received = requests.clone();
+        let http = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let received = received.clone();
+                handlers.spawn(async move {
+                    let mut raw = Vec::new(); let mut bytes = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut bytes).await.unwrap(); assert!(count > 0);
+                        raw.extend_from_slice(&bytes[..count]);
+                        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                            let headers = std::str::from_utf8(&raw[..end]).unwrap();
+                            let length: usize = headers.lines().find_map(|line| {
+                                let (name,value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                            }).unwrap();
+                            if raw.len() >= end + 4 + length { received.lock().await.push(String::from_utf8(raw[end+4..].to_vec()).unwrap()); break; }
+                        }
+                    }
+                    let content = if index == 0 {
+                        r#"{"content":"","rtdl_description":"read it","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"sequence","description":"read it","children":[{"op":"do","cap":"executor.builtin_read_file","args":{"path":"missing"}}"#.to_string()
+                    } else {
+                        json!({"content":"told the user", "rtdl_description":"done", "rtdl":{"op":"sequence","children":[]},"message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[{"task_id":"T1","status":"done"}]}).to_string()
+                    };
+                    let event = format!("data: {}\n\n", json!({"choices":[{"delta":{"content":content}}]}));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                    socket.write_all(format!("{:x}\r\n{}\r\n",event.len(),event).as_bytes()).await.unwrap();
+                    if index == 0 { std::future::pending::<()>().await; }
+                    let end = "data: [DONE]\n\n";
+                    socket.write_all(format!("{:x}\r\n{}\r\n0\r\n\r\n",end.len(),end).as_bytes()).await.unwrap();
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut executor = super::ExecutorConn {
+            streaming: super::RobonixSystemExecutorExecuteStreamClient::new(channel.clone()),
+            graph: super::RobonixSystemExecutorExecuteClient::new(channel.clone()),
+            control: super::RobonixSystemExecutorControlPlanClient::new(channel.clone()),
+            active: super::RobonixSystemExecutorListActivePlansClient::new(channel),
+        };
+        let vlm = crate::vlm::VlmClient::new(&crate::config::VlmConfig {
+            upstream: format!("http://{model_address}"),
+            api_key: String::new(),
+            model: "test".into(),
+            context_window_tokens: None,
+            api_format: "openai".into(),
+        });
+        let task = Task {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            text: user_text.into(),
+            ..Default::default()
+        };
+        let mut history = Vec::new();
+        let mut tasks = TaskTable::default();
+        let mut forest = super::SessionForest::default();
+        let mut transcript = crate::transcript::Transcript::new(&task.session_id, &history, &tasks);
+        let (_term, term) = tokio::sync::watch::channel(false);
+        let (_steer, steer) = tokio::sync::mpsc::channel(4);
+        let (tx, _events) = tokio::sync::mpsc::channel(128);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::run_turn(
+                &task,
+                &mut history,
+                &mut tasks,
+                &mut forest,
+                &vlm,
+                &mut executor,
+                &mut robonix_atlas::client::AtlasClient::connect(format!("http://{address}"))
+                    .await
+                    .unwrap(),
+                "pilot",
+                &tx,
+                term,
+                steer,
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                &HistoryBudget::new(None, "test"),
+                rules,
+                &mut transcript,
+            ),
+        )
+        .await;
+        http.abort();
+        grpc.abort();
+        result
+            .expect("turn must finish within its test bound")
+            .expect("turn must succeed");
+        // A correction joins one request; it is never stored in the session history.
+        assert!(
+            history.iter().all(|m| !m
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("Pilot corrections")),
+            "a correction must not be written to the session history"
+        );
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        requests.clone()
+    }
+
+    const READ_FILE_RULE: &str = r#"
+apiVersion: robonix.pilot/correction/v1
+id: read_file_denied
+when:
+  any:
+    - leaf:
+        contract: robonix/system/executor/builtin/read_file
+        success: false
+        error: {regex: 'permission denied for (?P<path>\w+)'}
+actions:
+  - kind: inject_message
+    template: "Do not retry reading {{path}}; tell the user it is not readable."
+"#;
+
+    fn rules_from(text: &str) -> crate::corrections::CorrectionSet {
+        let dir = std::env::temp_dir().join(format!("pilot-corrections-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rule.yaml"), text).unwrap();
+        let set = crate::corrections::CorrectionSet::load(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        set
+    }
+
+    #[tokio::test]
+    async fn a_matching_rule_adds_its_hint_to_the_request_after_the_failure() {
+        let rules = rules_from(READ_FILE_RULE);
+        let requests = model_requests_after_a_failed_leaf(
+            "permission denied for missing",
+            &rules,
+            "read the missing file",
+        )
+        .await;
+        assert!(
+            !requests[0].contains("Pilot corrections"),
+            "nothing has failed yet, so the first request carries no hint"
+        );
+        assert!(
+            requests[1].contains("Pilot corrections for this step"),
+            "the request after the failure carries the hint: {}",
+            requests[1]
+        );
+        assert!(requests[1].contains("Do not retry reading missing"));
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_does_not_match_leaves_every_request_unchanged() {
+        let rules = rules_from(READ_FILE_RULE);
+        // The same failing leaf, but with an error the rule does not describe.
+        let with_rule =
+            model_requests_after_a_failed_leaf("disk on fire", &rules, "read the missing file")
+                .await;
+        let without_rule = model_requests_after_a_failed_leaf(
+            "disk on fire",
+            &crate::corrections::CorrectionSet::default(),
+            "read the missing file",
+        )
+        .await;
+        for request in &with_rule {
+            assert!(!request.contains("Pilot corrections"));
+        }
+        // With or without the rule the model is sent the same number of messages.
+        assert_eq!(
+            with_rule[1].matches("\"role\"").count(),
+            without_rule[1].matches("\"role\"").count()
+        );
     }
 
     #[tokio::test]

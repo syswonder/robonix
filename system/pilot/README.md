@@ -113,9 +113,44 @@ On every planning round the model sees, in this order:
 - the session history, which only grows (see Tasks below);
 - the live sections of the round (catalog changes, in-flight trees, Executor snapshot, embodiment and environment);
 - the task status board, the request's tail, rebuilt every round and never written into history;
+- correction hints, when a rule in `corrections_dir` matches (see Correction rules below), after the status board and likewise never written into history;
 - the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`, sent as the request's `response_format`.
 
 `assemble_planning_messages` in `src/prompt.rs` puts them in order; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering. There is no other prompt text: no protocol file is sent.
+
+## Correction rules
+
+A correction rule is a short hint that Pilot adds to a planning request only while a condition on the conversation holds. Use it for a known mistake a model keeps making, so the advice costs tokens only in the rounds where it applies instead of sitting in the standing prompt.
+
+Set `system.pilot.corrections_dir` in the manifest (or `--corrections-dir` / `ROBONIX_PILOT_CORRECTIONS_DIR`). Pilot reads every `*.yaml` / `*.yml` in that directory once at startup; restart Pilot to pick up a change. With the option unset nothing changes: no rule is loaded and every request is sent exactly as before. A missing directory or a repeated rule `id` stops Pilot at startup; a file that cannot be parsed is skipped with a warning.
+
+```yaml
+apiVersion: robonix.pilot/correction/v1
+id: goal_near_unreachable          # [a-z0-9_], unique in the directory
+enabled: true                      # optional, default true
+scope: current_message             # current_message (default) | turn | session
+when:
+  any:                             # or `all`
+    - leaf:                        # a capability result Pilot has recorded
+        contract: robonix/system/scene/goal_near
+        success: false             # optional
+        error:                     # optional; a string means "contains"
+          regex: 'no free cell within [\d.]+ m of (?P<object_id>[\w.]+)'
+window:
+  max_rounds: null                 # rounds, from the first match; null = while the condition holds
+actions:
+  - kind: inject_message
+    template: |
+      goal_near found no free spot near {{object_id}}; do not navigate for it.
+```
+
+- `scope` limits which history the condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
+- Named groups in a `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
+- The hint is sent as a final user message headed `Pilot corrections for this step:`, after the task status board. Several matching rules are joined under one header in file-name order. It is never stored in the session history, so it leaves the request as soon as the condition stops holding.
+- A rule's text is limited to 1200 bytes. Actions of a kind this version does not know are skipped with a warning, so a rule written for a later version still loads.
+- Each request a rule changed logs one `[pilot/correction]` line with the rules, their round in the window and the captured variables.
+
+`corrections/examples/` holds an example rule.
 
 ## Tasks
 
