@@ -1781,7 +1781,9 @@ fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionReque
                             ChatCompletionRequestMessageContentPartText { text },
                         ));
                     }
-                    let url = format!("data:image/jpeg;base64,{image}");
+                    let media_type =
+                        crate::history::image_media_type(image).unwrap_or("image/jpeg");
+                    let url = format!("data:{media_type};base64,{image}");
                     parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                         ChatCompletionRequestMessageContentPartImage {
                             image_url: ImageUrl {
