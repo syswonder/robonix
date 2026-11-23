@@ -3,17 +3,11 @@
 // User-feedback correction learning — phase 1 of the plan in
 // docs/agent_fix/pilot_self_correction_skill_plan.md.
 //
-// When the user explicitly says the robot's execution was wrong, Pilot
-// snapshots the evidence from history and asks the model — through a side
-// channel that cannot reach the Executor — to draft a correction rule in the
-// operator's format. The draft is strictly validated and stored as a
-// disabled candidate under the learning root; nothing is auto-enabled. A
-// human reviews the candidate and moves it into the active corrections
-// directory at a maintenance restart.
+// Pilot sends user messages and bounded history to a model through a side
+// channel that cannot reach the Executor. Validated drafts remain disabled
+// until an operator reviews and enables them.
 //
-// This module deliberately holds no Executor connection and no locks: the
-// diagnosis runs on a detached task so the normal turn (including stop and
-// steer handling) is never delayed by it.
+// Diagnosis runs separately so it does not delay stop or steer handling.
 
 use crate::config::LearningConfig;
 use crate::corrections::{LEAF_FEEDBACK_PREFIX, USER_MESSAGE_PREFIX, validate_rule_text};
@@ -38,6 +32,7 @@ const MAX_EVIDENCE_CHARS: usize = 6_000;
 /// At most this many diagnoses may be in flight process-wide; a correction
 /// storm must not turn into a model-call storm.
 const MAX_IN_FLIGHT: usize = 2;
+const MAX_PENDING: usize = 32;
 /// One revision attempt when the first draft fails strict validation.
 const MAX_REVISIONS: usize = 1;
 
@@ -46,13 +41,22 @@ const MAX_REVISIONS: usize = 1;
 /// Everything the side channel may use. Built once at startup; the active
 /// rule ids stay accurate because phase 1 has no hot reload.
 pub struct LearningRuntime {
+    /// Locations and model selection for correction learning.
     cfg: LearningConfig,
+    /// Directory read for active correction rules, when configured.
+    corrections_dir: Option<PathBuf>,
+    /// Client for the side-channel model calls.
     client: VlmClient,
     /// The model that answers the reflection call.
     model: String,
     /// Active rule ids, for new-vs-revise decisions and id collisions.
     active_rule_ids: Vec<String>,
+    /// Number of queued and running diagnoses.
     in_flight: AtomicUsize,
+    /// Limits simultaneous side-channel calls.
+    slots: tokio::sync::Semaphore,
+    /// Serializes candidate deduplication and file creation.
+    persist_lock: tokio::sync::Mutex<()>,
 }
 
 impl LearningRuntime {
@@ -60,98 +64,128 @@ impl LearningRuntime {
         cfg: LearningConfig,
         vlm: &crate::config::VlmConfig,
         active_rule_ids: Vec<String>,
+        corrections_dir: Option<PathBuf>,
     ) -> Self {
         let model = cfg
             .reflection_model
             .clone()
             .unwrap_or_else(|| vlm.model.clone());
+        let mut reflection_vlm = vlm.clone();
+        if let Some(upstream) = &cfg.reflection_upstream {
+            reflection_vlm.upstream.clone_from(upstream);
+        }
+        if let Some(api_key) = &cfg.reflection_api_key {
+            reflection_vlm.api_key.clone_from(api_key);
+        }
+        reflection_vlm.model.clone_from(&model);
         Self {
-            client: VlmClient::new(vlm),
+            client: VlmClient::new(&reflection_vlm),
             cfg,
+            corrections_dir,
             model,
             active_rule_ids,
             in_flight: AtomicUsize::new(0),
+            slots: tokio::sync::Semaphore::new(MAX_IN_FLIGHT),
+            persist_lock: tokio::sync::Mutex::new(()),
         }
     }
-}
 
-// ── Trigger classification ───────────────────────────────────────────────────
+    /// Client shared by correction drafting and rule applicability checks.
+    pub(crate) fn client(&self) -> &VlmClient {
+        &self.client
+    }
 
-/// How the user's latest message relates to a mistake the robot made.
-pub(crate) enum FeedbackKind {
-    /// An explicit statement that the execution was wrong, with enough words
-    /// to associate it with a task ("你去错地方了，我说的是…").
-    Explicit,
-    /// A bare "不对"/"错了" with nothing to anchor the correction to. Drafting
-    /// from it would guess; ask the user instead.
-    Ambiguous,
-    /// Everything else: normal requests, hypotheticals, questions.
-    NotCorrection,
-}
+    /// Describe the configured locations without claiming a candidate exists.
+    pub(crate) fn guidance(&self) -> String {
+        let candidates = self.cfg.root_dir.join("candidates");
+        let active = self.corrections_dir.as_ref().map_or_else(
+            || "No active corrections directory is configured. Tell the user to configure corrections_dir and copy the reviewed candidate there before enabling it.".to_string(),
+            |dir| format!("New validated rules are saved disabled directly in {}. Tell the user to review the specified file, set enabled: true in it, and restart Pilot.", dir.display()),
+        );
+        format!(
+            "Candidate records are created asynchronously under {} and rules remain disabled. {} \
+             When the user requests a correction, remind them to review it. The exact rule \
+             file will be reported when available, possibly on the next turn. Do not claim that \
+             a candidate was generated or name a specific file unless its creation is confirmed.",
+            candidates.display(),
+            active
+        )
+    }
 
-const EXPLICIT_MARKERS: &[&str] = &[
-    "做错",
-    "弄错",
-    "搞错",
-    "去错",
-    "走错",
-    "选错",
-    "拿错",
-    "听错",
-    "理解错",
-    "读错",
-    "记错",
-    "报错了",
-    "搞反",
-    "弄反",
-    "不是这个",
-    "不是我要",
-    "不是我说",
-    "我说的不是",
-    "我指的是",
-    "我说的是",
-    "说过了",
-    "又错了",
-    "还是错",
-    "还在错",
-    "wrong",
-    "not what i",
-    "i said",
-    "you went to the wrong",
-    "mistake",
-];
-
-pub(crate) fn classify_feedback(text: &str) -> FeedbackKind {
-    let t = text.trim();
-    if t.is_empty() || t.chars().count() > 1_000 {
-        return FeedbackKind::NotCorrection;
+    /// Return unreported candidates produced for this session.
+    pub(crate) fn pending_notices(&self, session_id: &str) -> Vec<(PathBuf, String)> {
+        let Ok(entries) = std::fs::read_dir(self.cfg.root_dir.join("candidates")) else {
+            return Vec::new();
+        };
+        let mut notices = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let dir = entry.path();
+            let marker = dir.join(".notified");
+            if marker.exists() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(dir.join("metadata.json")) else {
+                continue;
+            };
+            let Ok(metadata) = serde_json::from_slice::<Json>(&bytes) else {
+                continue;
+            };
+            if metadata["status"] != "drafted" || metadata["episode"]["session_id"] != session_id {
+                continue;
+            }
+            let Some(id) = metadata["rule_id"].as_str() else {
+                continue;
+            };
+            let candidate = dir.join("rule.yaml");
+            if !std::fs::symlink_metadata(&candidate).is_ok_and(|meta| meta.file_type().is_file()) {
+                continue;
+            }
+            let active = metadata["active_rule_file"]
+                .as_str()
+                .and_then(|name| {
+                    let valid = name.strip_suffix(".yaml").is_some_and(|stem| {
+                        !stem.is_empty()
+                            && stem
+                                .chars()
+                                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    });
+                    valid
+                        .then(|| self.corrections_dir.as_ref().map(|dir| dir.join(name)))
+                        .flatten()
+                })
+                .filter(|path| {
+                    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+                });
+            let notice = if let Some(active) = active {
+                if self.active_rule_ids.iter().any(|loaded| loaded == id) {
+                    format!(
+                        "Correction {id} was loaded from {} when Pilot started.",
+                        active.display()
+                    )
+                } else {
+                    format!(
+                        "Correction candidate {id}: {}. Review this file, set enabled: true, and restart Pilot for it to take effect.",
+                        active.display()
+                    )
+                }
+            } else {
+                let destination = self.corrections_dir.as_ref().map_or_else(
+                    || "Configure corrections_dir first.".to_string(),
+                    |path| format!("Copy the reviewed file into {}, set enabled: true in the copy, and restart Pilot.", path.display()),
+                );
+                format!(
+                    "Correction candidate {id}: {}. {destination}",
+                    candidate.display()
+                )
+            };
+            notices.push((marker, notice));
+        }
+        notices.sort_by(|a, b| a.0.cmp(&b.0));
+        notices
     }
-    // A hypothetical ("如果执行错了就告诉我") is a standing instruction, not
-    // a report of a mistake that happened.
-    if ["如果", "假如", "假设", "要是", "if ", "when "]
-        .iter()
-        .any(|marker| t.starts_with(marker))
-    {
-        return FeedbackKind::NotCorrection;
-    }
-    // A bare exclamation ("不对", "错了。") carries no anchor to draft from;
-    // anything longer that names a mistake is explicit enough.
-    let bare: String = t
-        .trim_end_matches(['。', '!', '?', '！', '？', '.', ' '])
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    if ["不对", "错了", "不是"].contains(&bare.as_str()) {
-        return FeedbackKind::Ambiguous;
-    }
-    let lowered = t.to_lowercase();
-    if EXPLICIT_MARKERS
-        .iter()
-        .any(|marker| t.contains(marker) || lowered.contains(marker))
-    {
-        return FeedbackKind::Explicit;
-    }
-    FeedbackKind::NotCorrection
 }
 
 // ── Evidence collection ──────────────────────────────────────────────────────
@@ -247,8 +281,7 @@ fn evidence_line(message: &Message) -> Option<String> {
 }
 
 /// Build the episode for a correction that was just pushed to `history` (the
-/// last labelled user message). `None` when no earlier user message exists to
-/// associate the correction with.
+/// last labelled user message). A standing instruction may be the first turn.
 pub(crate) fn build_episode(
     history: &[Message],
     session_id: &str,
@@ -256,13 +289,12 @@ pub(crate) fn build_episode(
     correction_text: &str,
 ) -> Option<Episode> {
     let last = history.iter().rposition(is_user_labelled)?;
-    let previous = history[..last].iter().rposition(is_user_labelled)?;
-    let original_request = history[previous]
-        .content
-        .as_deref()
+    let previous = history[..last].iter().rposition(is_user_labelled);
+    let original_request = previous
+        .and_then(|index| history[index].content.as_deref())
         .and_then(user_body)
         .map(str::to_string);
-    let mut evidence: Vec<String> = history[previous + 1..last]
+    let mut evidence: Vec<String> = history[previous.map_or(0, |index| index + 1)..last]
         .iter()
         .filter_map(evidence_line)
         .collect();
@@ -277,7 +309,7 @@ pub(crate) fn build_episode(
     Some(Episode {
         session_id: session_id.to_string(),
         turn_task_id: task_id.to_string(),
-        correction_text: correction_text.to_string(),
+        correction_text: truncate_chars(correction_text, 4_000),
         original_request,
         evidence,
         captured_at_unix: now_unix(),
@@ -286,8 +318,7 @@ pub(crate) fn build_episode(
 
 // ── Hook (called from the planner) ───────────────────────────────────────────
 
-/// Entry point from the message flow. Never blocks the turn: classification
-/// is local, and the diagnosis runs on a detached task.
+/// Inspect each message on a detached task without delaying the turn.
 pub(crate) fn maybe_start_learning(
     learning: Option<&Arc<LearningRuntime>>,
     history: &[Message],
@@ -296,50 +327,47 @@ pub(crate) fn maybe_start_learning(
     user_text: &str,
 ) {
     let Some(runtime) = learning else { return };
-    match classify_feedback(user_text) {
-        FeedbackKind::NotCorrection => {}
-        FeedbackKind::Ambiguous => {
-            info!(
-                "[pilot/learning] ambiguous correction feedback in session {session_id}; \
-                 ask the user what went wrong instead of drafting"
-            );
-        }
-        FeedbackKind::Explicit => {
-            let Some(episode) = build_episode(history, session_id, task_id, user_text) else {
-                info!(
-                    "[pilot/learning] correction feedback without an earlier request \
-                     in session {session_id}; nothing to associate, no draft"
-                );
-                return;
-            };
-            if runtime.in_flight.load(Ordering::Relaxed) >= MAX_IN_FLIGHT {
-                warn!(
-                    "[pilot/learning] {MAX_IN_FLIGHT} diagnoses already in flight; \
-                     skipping draft for session {session_id}"
-                );
-                return;
-            }
-            runtime.in_flight.fetch_add(1, Ordering::Relaxed);
-            info!(
-                "[pilot/learning] explicit correction feedback in session {session_id}; \
-                 drafting a disabled candidate rule"
-            );
-            let runtime = Arc::clone(runtime);
-            tokio::spawn(async move {
-                let result = run_episode(&runtime, episode).await;
-                runtime.in_flight.fetch_sub(1, Ordering::Relaxed);
-                if let Err(error) = result {
-                    warn!("[pilot/learning] draft failed: {error:#}");
-                }
-            });
-        }
+    if user_text.trim().is_empty() {
+        return;
     }
+    let Some(episode) = build_episode(history, session_id, task_id, user_text) else {
+        return;
+    };
+    if runtime
+        .in_flight
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < MAX_PENDING).then_some(n + 1)
+        })
+        .is_err()
+    {
+        warn!(
+            "[pilot/learning] {MAX_PENDING} messages already pending; skipping message in session {session_id}"
+        );
+        return;
+    }
+    let runtime = Arc::clone(runtime);
+    tokio::spawn(async move {
+        let result = match runtime.slots.acquire().await {
+            Ok(_permit) => tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                run_episode(&runtime, episode),
+            )
+            .await
+            .context("correction learning timed out")
+            .and_then(|result| result),
+            Err(error) => Err(error.into()),
+        };
+        runtime.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if let Err(error) = result {
+            warn!("[pilot/learning] draft failed: {error:#}");
+        }
+    });
 }
 
 // ── Diagnosis (side channel; no Executor access) ─────────────────────────────
 
-const ANALYST_SYSTEM: &str = "You are the Robonix Pilot correction analyst. You receive one user \
-    correction about a robot task execution, the evidence Pilot captured, and the schema of the \
+const ANALYST_SYSTEM: &str = "You are the Robonix Pilot correction analyst. You receive a user \
+    message, the evidence Pilot captured, and the schema of the \
     operator's correction rules. Reply with exactly one JSON object and nothing else. Your output \
     is parsed by a program and is never dispatched to the robot.";
 
@@ -360,32 +388,43 @@ fn build_prompt(episode: &Episode, active_rule_ids: &[String]) -> String {
     };
     format!(
         "## Task\n\
-The user of a robot explicitly says the robot's execution was wrong. Using the evidence below, \
-decide whether a persistent correction rule should be drafted to prevent the same mistake, and \
-if so produce it in the exact rule format.\n\n\
+Determine whether the latest user message reports a mistake or gives a clear instruction for future tasks. \
+Ordinary requests, questions and hypothetical examples need no rule. Use needs_clarification if \
+the user's intended correction is unclear. Use the evidence where relevant, and draft a persistent \
+rule only when the user's intended future behavior is clear. A validated candidate is saved disabled; \
+the application will tell the user the exact candidate file and active directory for review and enabling. \
+Do not invent a file path or claim the rule is already active.\n\n\
 ## Correction rule format (robonix.pilot/correction/v1)\n\
+- apiVersion: robonix.pilot/correction/v1\n\
 - id: [a-z0-9_] only\n\
 - enabled: must be false (drafts are never auto-enabled)\n\
 - scope: current_message | turn | session (prefer current_message)\n\
 - when:\n\
   - latest_user_request (optional): {{regex: \"...\"}} matched against the latest user request \
-text only; it is an additional AND gate and provides no template variables\n\
-  - any: (or all:) a non-empty list of leaf matchers {{contract: \"<exact contract id>\", \
+text only; it can be used alone or as an additional AND gate and provides no template variables\n\
+  - any: (or all:) an optional non-empty list of leaf matchers {{contract: \"<exact contract id>\", \
 success: true|false (optional), error: \"substring\" or {{regex: \"...\"}}, output: same}}; a leaf \
 matcher tests executor feedback already present in the conversation history\n\
 - window: {{max_rounds: N or null}}\n\
 - actions: exactly one {{kind: inject_message, template: \"...\"}}; the template is at most 1200 \
-bytes; {{name}} placeholders must be captured by named groups in EVERY branch of the condition\n\
+bytes; {{name}} placeholders must be captured by named groups in EVERY branch of the condition. \
+For an explicit instruction to require the user's coordinates before navigating to a named place, \
+also add {{kind: require_user_coordinates}}. This blocks navigation unless its goal matches the \
+latest request's x=<number>, y=<number>. It requires a request-only condition. Use \
+latest_user_request regex \"(?s).+\" for this action: a model checks the destination against \
+the template before the coordinate restriction is applied. State the protected destination \
+and the requested behavior clearly in the template.\n\
 - the regex dialect is Rust regex: no lookahead, no lookbehind, no backreferences\n\n\
 ## Hard constraints\n\
-- Trigger on an error signal (a failure or a specific output) whenever possible, not on common \
-successful calls: wide triggers have caused serious side effects in production.\n\
+- For corrections of a past failure, trigger on a specific error signal whenever possible. \
+For clear standing instructions, match relevant future requests before execution and avoid \
+matching unrelated requests.\n\
 - Use only contract ids that appear in the evidence or in the active rule list.\n\
 - Never hardcode object ids, coordinates, counts or passwords from this single incident into a rule.\n\
-- If the mistake needs call ordering, call arguments or anything the format above cannot express, \
+- If the mistake needs call ordering or anything the format above cannot express, \
 answer \"unsupported\" and say what would be needed.\n\
-- If the root cause looks environmental (a missing file, a provider outage) or the user simply \
-changed the requirement, answer \"no_rule\".\n\
+- If the root cause looks environmental (a missing file, a provider outage), answer \"no_rule\" \
+unless the user also gives a clear instruction for future behavior.\n\
 - If the active rules already cover this mistake, prefer \"no_rule\" with a diagnosis that names \
 the covering rule over drafting a near-duplicate.\n\n\
 ## Active rule ids\n{active}\n\n\
@@ -617,7 +656,11 @@ fn append_audit(root: &Path, line: &Json) -> Result<()> {
 
 /// The proposal id of an earlier `drafted` candidate with the same content
 /// key, if one exists.
-fn find_duplicate(candidates_dir: &Path, content_key: &str) -> Option<String> {
+fn find_duplicate(
+    candidates_dir: &Path,
+    content_key: &str,
+    corrections_dir: Option<&Path>,
+) -> Option<String> {
     let entries = std::fs::read_dir(candidates_dir).ok()?;
     for entry in entries.flatten() {
         let Ok(text) = std::fs::read_to_string(entry.path().join("metadata.json")) else {
@@ -629,6 +672,20 @@ fn find_duplicate(candidates_dir: &Path, content_key: &str) -> Option<String> {
         if metadata.get("content_key").and_then(Json::as_str) == Some(content_key)
             && metadata.get("status").and_then(Json::as_str) == Some("drafted")
         {
+            if let Some(active_dir) = corrections_dir {
+                let Some(name) = metadata["active_rule_file"].as_str() else {
+                    continue;
+                };
+                if !name.strip_suffix(".yaml").is_some_and(|stem| {
+                    !stem.is_empty()
+                        && stem
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                }) || !active_dir.join(name).is_file()
+                {
+                    continue;
+                }
+            }
             return metadata
                 .get("proposal_id")
                 .and_then(Json::as_str)
@@ -656,11 +713,96 @@ fn unique_dir(dir: PathBuf) -> PathBuf {
     dir
 }
 
+fn save_disabled_rule(dir: &Path, outcome: &mut DraftOutcome) -> Result<String> {
+    use std::io::Write;
+
+    let yaml = outcome
+        .rule_yaml
+        .as_deref()
+        .context("missing candidate rule")?;
+    let base: String = outcome
+        .rule_id
+        .as_deref()
+        .context("missing rule id")?
+        .chars()
+        .take(96)
+        .collect();
+    let mut ids = std::collections::HashSet::new();
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("read corrections_dir {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| matches!(s, "yaml" | "yml"))
+        {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        if let Ok(id) = validate_rule_text(&text) {
+            ids.insert(id);
+        }
+    }
+    let mut version = 1u32;
+    loop {
+        let id = if version == 1 {
+            base.clone()
+        } else {
+            format!("{base}_v{version}")
+        };
+        let filename = format!("{id}.yaml");
+        let target = dir.join(&filename);
+        if ids.contains(&id) || target.exists() {
+            version = version
+                .checked_add(1)
+                .context("too many rule id collisions")?;
+            continue;
+        }
+        let mut value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).context("read candidate rule")?;
+        value
+            .as_mapping_mut()
+            .context("candidate rule is not a mapping")?
+            .insert("id".into(), id.clone().into());
+        let text = serde_yaml::to_string(&value).context("render candidate rule")?;
+        validate_rule_text(&text)?;
+        let temp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .with_context(|| format!("create {}", temp.display()))?;
+            file.write_all(text.as_bytes())
+                .with_context(|| format!("write {}", temp.display()))?;
+            std::fs::hard_link(&temp, &target)
+                .with_context(|| format!("install {}", target.display()))?;
+            Ok(())
+        })();
+        if let Err(error) = std::fs::remove_file(&temp)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "[pilot/learning] cannot remove temporary file {}: {error}",
+                temp.display()
+            );
+        }
+        result?;
+        outcome.rule_id = Some(id);
+        outcome.rule_yaml = Some(text);
+        return Ok(filename);
+    }
+}
+
 /// Persist one outcome under the learning root. A `drafted` outcome whose
 /// content key matches an earlier drafted candidate is marked `duplicate` and
 /// not written again. Returns the proposal id.
 fn save_outcome(
     root: &Path,
+    corrections_dir: Option<&Path>,
     episode: &Episode,
     model: &str,
     active_rule_ids: &[String],
@@ -675,7 +817,8 @@ fn save_outcome(
             .unwrap_or_else(|| outcome.diagnosis.clone())
     ));
     let candidates_dir = root.join("candidates");
-    if let Some(existing) = find_duplicate(&candidates_dir, &content_key) {
+    let existing = find_duplicate(&candidates_dir, &content_key, corrections_dir);
+    if let Some(existing) = existing {
         outcome.status = "duplicate";
         append_audit(
             root,
@@ -689,8 +832,20 @@ fn save_outcome(
     }
     let proposal_id = format!("p{}-{}", now_unix(), &content_key[..8]);
     let dir = unique_dir(candidates_dir.join(&proposal_id));
+    let proposal_id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("invalid candidate directory name")?
+        .to_string();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create the candidate dir {}", dir.display()))?;
+    let active_rule_file = if outcome.rule_yaml.is_some() {
+        corrections_dir
+            .map(|active| save_disabled_rule(active, outcome))
+            .transpose()?
+    } else {
+        None
+    };
     if let Some(yaml) = &outcome.rule_yaml {
         std::fs::write(dir.join("rule.yaml"), yaml).context("write the candidate rule.yaml")?;
     }
@@ -701,6 +856,7 @@ fn save_outcome(
         "created_unix": now_unix(),
         "model": model,
         "rule_id": outcome.rule_id,
+        "active_rule_file": active_rule_file,
         "content_key": content_key,
         "validation_error": outcome.validation_error,
         "episode": {
@@ -713,8 +869,11 @@ fn save_outcome(
         },
         "diagnosis": outcome.diagnosis,
         "active_rules_at_draft": active_rule_ids,
-        "note": "Disabled draft. Review it, then copy it into the active corrections_dir \
-                 and restart Pilot to enable it. Nothing is auto-enabled.",
+        "note": if active_rule_file.is_some() {
+            "Disabled draft is in corrections_dir. Review it, enable it, and restart Pilot."
+        } else {
+            "Disabled draft requires a configured corrections_dir; review, copy, enable, and restart Pilot."
+        },
     });
     std::fs::write(
         dir.join("metadata.json"),
@@ -781,8 +940,13 @@ async fn run_episode(runtime: &LearningRuntime, episode: Episode) -> Result<()> 
             }
         }
     }
+    if outcome.status == "no_rule" {
+        return Ok(());
+    }
+    let _lock = runtime.persist_lock.lock().await;
     let proposal_id = save_outcome(
         &runtime.cfg.root_dir,
+        runtime.corrections_dir.as_deref(),
         &episode,
         &runtime.model,
         &runtime.active_rule_ids,
@@ -790,11 +954,15 @@ async fn run_episode(runtime: &LearningRuntime, episode: Episode) -> Result<()> 
     )?;
     match outcome.status {
         "drafted" => info!(
-            "[pilot/learning] candidate {} (rule {}) saved disabled under {}; \
-             review it before enabling",
+            "[pilot/learning] candidate {} (rule {}) saved disabled; records under {}, \
+             corrections directory: {}; review it before enabling",
             proposal_id,
             outcome.rule_id.as_deref().unwrap_or("?"),
-            runtime.cfg.root_dir.display()
+            runtime.cfg.root_dir.display(),
+            runtime.corrections_dir.as_ref().map_or_else(
+                || "not configured".to_string(),
+                |path| path.display().to_string()
+            )
         ),
         "duplicate" => info!(
             "[pilot/learning] episode matches existing candidate {proposal_id}; not duplicated"
@@ -811,6 +979,67 @@ async fn run_episode(runtime: &LearningRuntime, episode: Episode) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a configured live model"]
+    async fn live_model_understands_standing_navigation_instruction() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("active")).unwrap();
+        let vlm = crate::config::VlmConfig {
+            upstream: std::env::var("ROBONIX_TEST_VLM_BASE_URL").unwrap(),
+            api_key: std::env::var("ROBONIX_TEST_VLM_API_KEY").unwrap(),
+            model: std::env::var("ROBONIX_TEST_VLM_MODEL").unwrap(),
+            context_window_tokens: None,
+            api_format: "openai".into(),
+        };
+        let runtime = LearningRuntime::new(
+            LearningConfig {
+                root_dir: root.path().into(),
+                reflection_upstream: None,
+                reflection_api_key: None,
+                reflection_model: None,
+            },
+            &vlm,
+            vec![],
+            Some(root.path().join("active")),
+        );
+        let episode = Episode {
+            session_id: "test".into(), turn_task_id: "test".into(),
+            correction_text: "客厅的默认坐标会导致你导航出错，以后我让你去客厅的时候请你拒绝并提醒我给出具体的可达坐标".into(),
+            original_request: Some("去客厅".into()), evidence: vec![], captured_at_unix: 1,
+        };
+        run_episode(&runtime, episode).await.unwrap();
+        let candidates = std::fs::read_dir(root.path().join("candidates"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let rule = std::fs::read_to_string(candidates[0].path().join("rule.yaml")).unwrap();
+        validate_rule_text(&rule).unwrap();
+        assert!(rule.contains("require_user_coordinates"), "{rule}");
+        let notices = runtime.pending_notices("test");
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0]
+                .1
+                .contains(root.path().join("active").to_str().unwrap())
+        );
+        assert!(notices[0].1.contains("restart Pilot"));
+        let client = VlmClient::new(&vlm);
+        let instruction = "When asked to navigate to the living room, request explicit map coordinates; do not use its default destination.";
+        assert!(
+            crate::corrections::coordinate_restriction_applies(&client, "请回客厅", instruction)
+                .await
+        );
+        assert!(
+            !crate::corrections::coordinate_restriction_applies(
+                &client,
+                "我在客厅，请去厨房",
+                instruction
+            )
+            .await
+        );
+    }
 
     fn user_message(n: u32, text: &str) -> Message {
         Message::user(&format!(
@@ -844,42 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn feedback_classification_separates_explicit_ambiguous_and_normal_input() {
-        for text in [
-            "你去错地方了，我说的是离白板最近的椅子",
-            "刚才做错了",
-            "选错对象了",
-            "不对，我说的不是这个",
-            "You went to the wrong chair",
-            "that's not what I asked for",
-        ] {
-            assert!(
-                matches!(classify_feedback(text), FeedbackKind::Explicit),
-                "{text}"
-            );
-        }
-        for text in ["不对", "错了。", "不对！"] {
-            assert!(
-                matches!(classify_feedback(text), FeedbackKind::Ambiguous),
-                "{text}"
-            );
-        }
-        for text in [
-            "去会议桌旁边",
-            "帮我拍张照片",
-            "如果执行错了就告诉我",
-            "假如以后出现错误要提醒我",
-            "这里一共有几把椅子？",
-            "你好",
-        ] {
-            assert!(
-                matches!(classify_feedback(text), FeedbackKind::NotCorrection),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
     fn episode_captures_the_original_request_and_bounded_evidence() {
         let mut history = vec![
             user_message(1, "去那盆植物旁边"),
@@ -901,9 +1094,14 @@ mod tests {
         assert!(episode.evidence[1].contains("no free cell"));
         assert!(episode.evidence[2].contains("navigate success=true"));
 
-        // A correction with no earlier request has nothing to associate with.
+        // A standing instruction can be given before any task.
         history.remove(0);
-        assert!(build_episode(&history, "s1", "t1", "你去错了").is_none());
+        assert!(
+            build_episode(&history, "s1", "t1", "你去错了")
+                .unwrap()
+                .original_request
+                .is_none()
+        );
 
         // Boards and assistant text carry no evidence.
         let history = vec![
@@ -1019,7 +1217,8 @@ mod tests {
             &active,
             &new_rule_reply("plant_no_free_cell", "robonix/system/scene/goal_near"),
         );
-        let first = save_outcome(&root, &episode, "test-model", &active, &mut outcome).unwrap();
+        let first =
+            save_outcome(&root, None, &episode, "test-model", &active, &mut outcome).unwrap();
         let candidate = root.join("candidates").join(&first);
         assert!(candidate.join("rule.yaml").is_file());
         let yaml = std::fs::read_to_string(candidate.join("rule.yaml")).unwrap();
@@ -1039,7 +1238,7 @@ mod tests {
             &new_rule_reply("plant_no_free_cell", "robonix/system/scene/goal_near"),
         );
         assert_eq!(
-            save_outcome(&root, &episode, "test-model", &active, &mut repeat).unwrap(),
+            save_outcome(&root, None, &episode, "test-model", &active, &mut repeat).unwrap(),
             first
         );
         assert_eq!(repeat.status, "duplicate");
@@ -1051,7 +1250,7 @@ mod tests {
             &active,
             r#"{"decision":"no_rule","diagnosis":"file missing"}"#,
         );
-        let second = save_outcome(&root, &episode, "test-model", &active, &mut none).unwrap();
+        let second = save_outcome(&root, None, &episode, "test-model", &active, &mut none).unwrap();
         assert!(
             !root
                 .join("candidates")
@@ -1061,6 +1260,141 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn draft_is_saved_disabled_in_active_directory_without_overwriting_existing_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let active_dir = root.path().join("active");
+        std::fs::create_dir(&active_dir).unwrap();
+        let reply = new_rule_reply("living_room", "robonix/system/scene/goal_near");
+        let existing = draft_outcome(&[], &reply)
+            .rule_yaml
+            .unwrap()
+            .replace("enabled: false", "enabled: true");
+        std::fs::write(active_dir.join("user_rule.yaml"), &existing).unwrap();
+        let episode = Episode {
+            session_id: "s1".into(),
+            turn_task_id: "t1".into(),
+            correction_text: "test".into(),
+            original_request: None,
+            evidence: vec![],
+            captured_at_unix: 1,
+        };
+        let mut outcome = draft_outcome(&[], &reply);
+        let proposal = save_outcome(
+            root.path(),
+            Some(&active_dir),
+            &episode,
+            "test",
+            &[],
+            &mut outcome,
+        )
+        .unwrap();
+        let id = outcome.rule_id.as_deref().unwrap();
+        assert_eq!(id, "living_room_v2");
+        assert_eq!(
+            std::fs::read_to_string(active_dir.join("user_rule.yaml")).unwrap(),
+            existing
+        );
+        let active_file = active_dir.join(format!("{id}.yaml"));
+        let content = std::fs::read_to_string(&active_file).unwrap();
+        assert!(content.contains("enabled: false"));
+        assert_eq!(
+            content,
+            std::fs::read_to_string(
+                root.path()
+                    .join("candidates")
+                    .join(proposal)
+                    .join("rule.yaml")
+            )
+            .unwrap()
+        );
+        let runtime = LearningRuntime::new(
+            LearningConfig {
+                root_dir: root.path().into(),
+                reflection_upstream: None,
+                reflection_api_key: None,
+                reflection_model: None,
+            },
+            &crate::config::VlmConfig {
+                upstream: "http://127.0.0.1:1".into(),
+                api_key: String::new(),
+                model: "test".into(),
+                context_window_tokens: None,
+                api_format: "openai".into(),
+            },
+            vec![],
+            Some(active_dir.clone()),
+        );
+        let notice = &runtime.pending_notices("s1")[0].1;
+        assert!(notice.contains(active_file.to_str().unwrap()));
+        assert!(notice.contains("restart Pilot"));
+        assert!(!notice.contains("Copy"));
+        let loaded = crate::corrections::CorrectionSet::load(&active_dir).unwrap();
+        assert_eq!(loaded.ids(), vec!["living_room"]);
+        std::fs::write(
+            &active_file,
+            content.replace("enabled: false", "enabled: true"),
+        )
+        .unwrap();
+        let reloaded = crate::corrections::CorrectionSet::load(&active_dir).unwrap();
+        assert!(reloaded.ids().contains(&"living_room_v2"));
+        let mut duplicate = draft_outcome(&[], &reply);
+        save_outcome(
+            root.path(),
+            Some(&active_dir),
+            &episode,
+            "test",
+            &[],
+            &mut duplicate,
+        )
+        .unwrap();
+        assert_eq!(duplicate.status, "duplicate");
+        assert_eq!(std::fs::read_dir(&active_dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_legacy_duplicate_without_an_active_file_gets_an_active_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let active_dir = root.path().join("active");
+        std::fs::create_dir(&active_dir).unwrap();
+        let reply = new_rule_reply("legacy", "robonix/system/scene/goal_near");
+        let episode = Episode {
+            session_id: "s".into(),
+            turn_task_id: "t".into(),
+            correction_text: "test".into(),
+            original_request: None,
+            evidence: vec![],
+            captured_at_unix: 1,
+        };
+        let mut old = draft_outcome(&[], &reply);
+        let old_id = save_outcome(root.path(), None, &episode, "test", &[], &mut old).unwrap();
+        let mut fresh = draft_outcome(&[], &reply);
+        let new_id = save_outcome(
+            root.path(),
+            Some(&active_dir),
+            &episode,
+            "test",
+            &[],
+            &mut fresh,
+        )
+        .unwrap();
+        assert_ne!(old_id, new_id);
+        assert!(active_dir.join("legacy.yaml").is_file());
+        let mut again = draft_outcome(&[], &reply);
+        let duplicate = save_outcome(
+            root.path(),
+            Some(&active_dir),
+            &episode,
+            "test",
+            &[],
+            &mut again,
+        )
+        .unwrap();
+        assert_eq!(duplicate, new_id);
+        assert_eq!(again.status, "duplicate");
+        assert_eq!(std::fs::read_dir(&active_dir).unwrap().count(), 1);
     }
 
     #[test]

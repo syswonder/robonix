@@ -423,16 +423,8 @@ pub enum ReplyShape {
     RtdlJsonObject,
 }
 
-/// The RTDL envelope as a JSON schema.
-///
-/// Deliberately not `strict`. Strict structured output requires every object in
-/// the schema to close with `additionalProperties: false`, and an RTDL `do`
-/// node's `args` is open by construction: its keys come from the called
-/// capability's own contract, which differs per capability. Closing it would
-/// mean flattening `args` into a JSON string, which is the opaque-blob shape
-/// that costs a contract its type surface. The schema therefore guides the
-/// model; admission stays with Pilot's own validator, which resolves every call
-/// against the catalog before a plan is dispatched.
+/// The RTDL envelope schema retained for tests while response formats are disabled.
+#[cfg(test)]
 fn rtdl_envelope_schema() -> Value {
     let node = serde_json::json!({
         "type": "object",
@@ -1088,7 +1080,7 @@ mod tests {
     }
 
     use super::{
-        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
+        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
         rejects_optional_request_fields, response_format_for,
@@ -1213,18 +1205,9 @@ mod tests {
     }
 
     #[test]
-    fn a_planning_reply_carries_the_rtdl_schema() {
-        let Some(ResponseFormat::JsonSchema { json_schema }) =
-            response_format_for(ReplyShape::RtdlEnvelope)
-        else {
-            panic!("planning replies must carry a schema");
-        };
-        assert_eq!(json_schema.name, "rtdl_envelope");
-        // Strict would require every object to close, and an RTDL `do` node's
-        // `args` is open by construction: its keys come from the called
-        // capability's contract.
-        assert_eq!(json_schema.strict, Some(false));
-        let schema = json_schema.schema.expect("schema body");
+    fn rtdl_schema_describes_plans_and_control_operations() {
+        assert!(response_format_for(ReplyShape::RtdlEnvelope).is_none());
+        let schema = super::rtdl_envelope_schema();
         let node = &schema["$defs"]["node"];
         assert_eq!(node["properties"]["op"]["enum"][0], "sequence");
         assert_eq!(

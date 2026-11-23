@@ -145,26 +145,31 @@ actions:
 ```
 
 - `scope` limits which history the leaf condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
-- Optional `when.latest_user_request` is an additional AND gate, e.g. `{regex: '几把|how many'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. The gate is independent of leaf scope, still requires `any`/`all` leaf feedback, and provides no template variables. It is a lexical filter, not task semantic validation or an execution guard.
+- `when.latest_user_request` can be used alone or as an additional AND gate, e.g. `{regex: '几把|how many'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. It provides no template variables.
 - Existing rules without the gate behave unchanged. An older Pilot without this field rejects gated files; rebuild this Pilot and restart before using them. `enabled: false` preserves a candidate file without loading or injecting it.
 - Named groups in a leaf `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
 - The hint is sent as a final user message headed `Pilot corrections for this step:`, after the task status board. Several matching rules are joined under one header in file-name order. It is never stored in the session history, so it leaves the request as soon as the condition stops holding.
 - A rule's text is limited to 1200 bytes. Actions of a kind this version does not know are skipped with a warning, so a rule written for a later version still loads.
 - Each request a rule changed logs one `[pilot/correction]` line with the rules, their round in the window and the captured variables.
+- A request-only rule can add `- kind: require_user_coordinates` alongside `inject_message`. Its template must describe the destination and restriction. A model checks the request against the template before planning; a timeout or invalid reply keeps the restriction. When it applies, Pilot rejects a navigation call unless its goal matches `x=<number>, y=<number>` in the latest request. Model classification can still be wrong, so this is not a guarantee for every paraphrase. User coordinates still need to be reachable.
 
 `corrections/examples/` holds an example rule.
 
 ## Correction learning (user feedback, phase 1)
 
-When the user explicitly says an execution was wrong ("你去错地方了，我说的是…"), Pilot can draft a correction rule from that mistake automatically. Off by default; turn it on with `--correction-learning` (`ROBONIX_PILOT_CORRECTION_LEARNING`) plus a root directory `--correction-learning-dir` (`ROBONIX_PILOT_CORRECTION_LEARNING_DIR`), e.g. `<deploy>/rbnx-boot/correction-learning/`. The directory must be separate from `corrections_dir` and is created at startup; `--correction-learning-model` optionally picks a stronger reflection model (default: the planning model).
+Pilot can draft correction rules from feedback and clear standing instructions. Off by default; turn it on with `--correction-learning` (`ROBONIX_PILOT_CORRECTION_LEARNING`) plus a root directory `--correction-learning-dir` (`ROBONIX_PILOT_CORRECTION_LEARNING_DIR`), e.g. `<deploy>/rbnx-boot/correction-learning/`. The directory must be separate from `corrections_dir` and is created at startup; `--correction-learning-model` optionally picks a stronger reflection model (default: the planning model).
 
-What happens on an explicit correction, on a detached task that never delays the turn:
+In a deployment manifest, set `system.pilot.correction_learning: true` and `system.pilot.correction_learning_dir`. `correction_learning_model` is optional.
+
+Correction drafting and rule applicability can use a separate OpenAI-compatible endpoint with `correction_learning_upstream`, `correction_learning_model`, and `correction_learning_api_key`. The corresponding flags are `--correction-learning-upstream`, `--correction-learning-model`, and `--correction-learning-api-key`; their environment variables are `ROBONIX_PILOT_CORRECTION_LEARNING_UPSTREAM`, `ROBONIX_PILOT_CORRECTION_LEARNING_MODEL`, and `ROBONIX_PILOT_CORRECTION_LEARNING_API_KEY`. Unset values fall back to the planning model settings. A different endpoint requires an explicit correction API key so the planning key is not sent to it. Supply keys through environment variables rather than command-line arguments.
+
+For each user message, a detached model call decides whether it contains feedback or a standing instruction. This adds model calls and their cost. The task does not wait for the result:
 
 1. The evidence between the original request and the correction (dispatch records and executor feedback, bounded) is snapshotted.
 2. A side-channel model call — no tools, no RTDL admission, no Executor access — classifies the mistake and drafts a rule in the format above, or answers `no_rule` / `needs_clarification` / `unsupported`.
-3. The draft is strictly validated (`validate_rule_text` in `src/corrections.rs` checks every field even though the draft is disabled), its id is sanitized and de-duplicated against the active rules, and it is stored as `candidates/<proposal_id>/rule.yaml` with `enabled: false`, plus `metadata.json`, `tests.json` and an `audit.jsonl` line. A repeated identical draft is recorded as `duplicate` and not written again.
+3. The draft is strictly validated (`validate_rule_text` in `src/corrections.rs` checks every field even though the draft is disabled), its id is sanitized and de-duplicated, and it is written with `enabled: false` directly into `corrections_dir`. The learning directory retains a copy under `candidates/<proposal_id>/rule.yaml`, plus `metadata.json`, `tests.json` and an `audit.jsonl` line. A repeated identical draft is recorded as `duplicate` and not written again. If `corrections_dir` is not configured, the draft is kept only in the learning directory.
 
-Nothing is auto-enabled: a human reviews the candidate, copies it into the active `corrections_dir` and restarts Pilot. A bare "不对" is logged as ambiguous and drafts nothing; hypotheses ("如果执行错了就告诉我") are ignored; at most 2 diagnoses run at once and each gets one revision attempt. Design and later phases: `docs/agent_fix/pilot_self_correction_skill_plan.md` in the main checkout.
+Nothing is auto-enabled: review the rule in `corrections_dir`, set `enabled: true` and restart Pilot. Pilot reports the exact file and restart requirement if the draft is ready before the reply ends; otherwise it reports them on the next turn in the same session. To revoke a rule, remove it or set `enabled: false` in that directory and restart. Ambiguous feedback needs clarification; ordinary messages produce no candidate. At most two diagnoses run at once, up to 32 messages can be pending, and each invalid draft gets one revision attempt. Design and later phases: `docs/agent_fix/pilot_self_correction_skill_plan.md` in the main checkout.
 
 ## Tasks
 

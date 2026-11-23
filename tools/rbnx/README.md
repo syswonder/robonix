@@ -58,6 +58,8 @@ cargo install --force --path tools/rbnx --bin rbnx
 
 Run `rbnx <cmd> --help` for full flags.
 
+For `system.pilot`, `rbnx boot` forwards `corrections_dir`, `correction_learning`, `correction_learning_dir`, `correction_learning_upstream`, and `correction_learning_model` from the deployment manifest to Pilot. It passes `correction_learning_api_key` through Pilot's environment rather than its command-line arguments.
+
 Each package manifest capability declares `transport: mcp`, `grpc`, or `ros2`,
 or a non-empty list such as `transport: [grpc, ros2]`. `rbnx validate` rejects
 invalid or duplicate transports, repeated contracts, and transports incompatible

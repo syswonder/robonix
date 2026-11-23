@@ -296,17 +296,27 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<_>>();
+            let mut reflection_endpoint = cfg.vlm.clone();
+            if let Some(upstream) = &learning_cfg.reflection_upstream {
+                reflection_endpoint.upstream.clone_from(upstream);
+            }
             info!(
                 "[pilot/learning] correction learning on: drafting disabled candidates under {} \
-                 (reflection model: {})",
+                 (reflection model: {}, endpoint: {})",
                 learning_cfg.root_dir.display(),
                 learning_cfg
                     .reflection_model
                     .as_deref()
-                    .unwrap_or("the planning model")
+                    .unwrap_or("the planning model"),
+                reflection_endpoint.endpoint_for_log()
             );
             Some(std::sync::Arc::new(
-                correction_learning::LearningRuntime::new(learning_cfg, &cfg.vlm, rule_ids),
+                correction_learning::LearningRuntime::new(
+                    learning_cfg,
+                    &cfg.vlm,
+                    rule_ids,
+                    cfg.corrections_dir.clone(),
+                ),
             ))
         }
         None => None,

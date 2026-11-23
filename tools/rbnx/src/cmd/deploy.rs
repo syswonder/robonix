@@ -857,6 +857,52 @@ soma_endpoint: 127.0.0.1:50091
             pilot_args("listen: 127.0.0.1:50071\nvlm: {upstream: u, api_key: k, model: m}\n");
         assert!(!args.iter().any(|a| a == "--corrections-dir"));
     }
+
+    #[test]
+    fn pilot_correction_learning_manifest_reaches_the_command_line() {
+        let args = pilot_args(
+            "correction_learning: true\ncorrection_learning_dir: drafts\ncorrection_learning_upstream: http://127.0.0.1:8888/v1\ncorrection_learning_model: reviewer\ncorrection_learning_api_key: local-test-key\n",
+        );
+        assert!(args.iter().any(|a| a == "--correction-learning"));
+        assert!(
+            args.windows(2)
+                .any(|a| a == ["--correction-learning-dir", "drafts"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|a| a == ["--correction-learning-model", "reviewer"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|a| a == ["--correction-learning-upstream", "http://127.0.0.1:8888/v1"])
+        );
+        assert!(args.iter().all(|a| !a.contains("local-test-key")));
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("correction_learning_api_key: local-test-key").unwrap();
+        assert_eq!(
+            super::correction_learning_api_key(Some(&cfg)),
+            Some("local-test-key")
+        );
+        let blank: serde_yaml::Value = serde_yaml::from_str(
+            "correction_learning_upstream: ''\ncorrection_learning_model: ''\ncorrection_learning_api_key: ''\n",
+        )
+        .unwrap();
+        let blank_args = system_cli_args("pilot", Some(&blank), None);
+        assert!(
+            !blank_args
+                .iter()
+                .any(|arg| arg == "--correction-learning-upstream"
+                    || arg == "--correction-learning-model")
+        );
+        assert!(super::correction_learning_api_key(Some(&blank)).is_none());
+        for yaml in ["{}", "correction_learning: false"] {
+            assert!(
+                !pilot_args(yaml)
+                    .iter()
+                    .any(|a| a == "--correction-learning")
+            );
+        }
+    }
 }
 
 /// Boot-time prerequisites check:
@@ -1337,6 +1383,7 @@ async fn spawn_system_binary(
     bin: &str,
     args: &[String],
     catalog: Option<&CatalogInfo>,
+    config: Option<&serde_yaml::Value>,
 ) -> Result<Spawned> {
     // Run the installed binary directly.  Stdout / stderr are piped
     // through Scribe (tag = binary name, e.g. "executor") so nothing
@@ -1350,6 +1397,11 @@ async fn spawn_system_binary(
         && let Some(catalog) = catalog
     {
         apply_pilot_catalog_env(&mut cmd, catalog);
+    }
+    if name == "pilot"
+        && let Some(key) = correction_learning_api_key(config)
+    {
+        cmd.env("ROBONIX_PILOT_CORRECTION_LEARNING_API_KEY", key);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2115,8 +2167,7 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, catalog.as_ref())
-                        .await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, catalog.as_ref(), deploy.system.get(*name)).await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2737,6 +2788,7 @@ fn system_cli_args(
         let mut v = v.clone();
         if let Some(m) = v.as_mapping_mut() {
             m.remove("status");
+            if name == "pilot" { m.remove("correction_learning_api_key"); }
         }
         v
     });
@@ -2745,6 +2797,7 @@ fn system_cli_args(
     {
         out.push("--config-json".into());
         out.push(json);
+
     }
 
     let s = |k: &str| -> Option<String> {
@@ -2822,6 +2875,28 @@ fn system_cli_args(
             // Directory of correction rules; Pilot reads it at startup. A
             // relative path resolves against the directory `rbnx boot` runs in.
             push_pair(&mut out, "--corrections-dir", s("corrections_dir"));
+            if map
+                .and_then(|m| m.get(serde_yaml::Value::String("correction_learning".into())))
+                .and_then(serde_yaml::Value::as_bool)
+                == Some(true)
+            {
+                out.push("--correction-learning".into());
+            }
+            push_pair(
+                &mut out,
+                "--correction-learning-dir",
+                s("correction_learning_dir"),
+            );
+            push_pair(
+                &mut out,
+                "--correction-learning-upstream",
+                s("correction_learning_upstream").filter(|value| !value.trim().is_empty()),
+            );
+            push_pair(
+                &mut out,
+                "--correction-learning-model",
+                s("correction_learning_model").filter(|value| !value.trim().is_empty()),
+            );
         }
         "liaison" => {
             push_pair(&mut out, "--listen", s("listen"));
@@ -2879,6 +2954,16 @@ fn system_cli_args(
         _ => {}
     }
     out
+}
+
+fn correction_learning_api_key(config: Option<&serde_yaml::Value>) -> Option<&str> {
+    config?
+        .as_mapping()?
+        .get(serde_yaml::Value::String(
+            "correction_learning_api_key".into(),
+        ))?
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Spawn one package and wait for its provider to register with Atlas.

@@ -182,6 +182,59 @@ fn receive_user_message(
     true
 }
 
+async fn send_final_with_correction_candidates(
+    learning: Option<&Arc<crate::correction_learning::LearningRuntime>>,
+    session_id: &str,
+    tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
+    reply: String,
+) {
+    let notices = learning.map_or_else(Vec::new, |runtime| runtime.pending_notices(session_id));
+    let text = if notices.is_empty() {
+        reply
+    } else {
+        let details = notices
+            .iter()
+            .map(|(_, notice)| notice.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!("{}\n\n{details}", reply.trim_end());
+        // Some clients display only chunks once any chunk has arrived.
+        if tx
+            .send(Ok(service::pack(
+                session_id,
+                PilotStreamBody::TextChunk(text.clone()),
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        text
+    };
+    if tx
+        .send(Ok(service::pack(
+            session_id,
+            PilotStreamBody::FinalText(text),
+        )))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    for (marker, _) in notices {
+        if let Err(error) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            warn!(
+                "[pilot/learning] cannot record candidate notice {}: {error}",
+                marker.display()
+            );
+        }
+    }
+}
+
 /// The client's view of the tasks: the latest user message's task in the
 /// fields older clients read, and every task.
 fn task_state_event(tasks: &TaskTable) -> TaskStateEvent {
@@ -1379,7 +1432,12 @@ pub async fn run_turn(
     // Build deployment-independent system instructions once per turn.
     // Provider-specific semantics belong to the discovered capability catalog
     // and lazily loaded provider documentation, not Pilot's standing prefix.
-    let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
+    let mut standing_prompt = build_system_prompt(load_agent_soul().as_deref());
+    if let Some(learning) = learning {
+        standing_prompt.push_str("\nCorrection learning runs in the background. Its candidates are disabled until a person reviews and enables them. Saving a memory does not activate a correction. When a user gives unclear correction feedback, ask what should change. Never claim a correction was saved or enabled unless its status is known.");
+        standing_prompt.push('\n');
+        standing_prompt.push_str(&learning.guidance());
+    }
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
     // name: the latter is just the contract_id leaf and a provider could
     // rename it freely. contract_id is the stable identity.
@@ -1419,6 +1477,7 @@ pub async fn run_turn(
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
+    let mut coordinate_restriction_cache: Option<(String, bool)> = None;
 
     // Pilot-assigned plan ids come from one process-global atomic counter.
     // They are reserved only for normal RTDL trees, never for meta operations,
@@ -1471,12 +1530,13 @@ pub async fn run_turn(
             // for the user.
             if !waits_on_trees(forest, tasks) {
                 if !tasks.any_open() {
-                    let _ = tx
-                        .send(Ok(service::pack(
-                            &session_id,
-                            PilotStreamBody::FinalText(last_content.clone()),
-                        )))
-                        .await;
+                    send_final_with_correction_candidates(
+                        learning,
+                        &session_id,
+                        tx,
+                        last_content.clone(),
+                    )
+                    .await;
                     break;
                 }
                 // An open task with no running plan and no planning event is
@@ -1634,11 +1694,7 @@ pub async fn run_turn(
         let runtime_context = render_context_sections(&live_sections);
         if requests >= max_rounds {
             warn!("[pilot] hit max planning requests ({max_rounds}), stopping turn");
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::FinalText(last_content.clone()),
-                )))
+            send_final_with_correction_candidates(learning, &session_id, tx, last_content.clone())
                 .await;
             break;
         }
@@ -1662,9 +1718,46 @@ pub async fn run_turn(
         }
         // Operator-written hints for this step. They join this request only; `history`
         // is untouched, so a hint ends with the condition that caused it.
+        let mut require_user_coordinates = false;
         if let Some(injection) = corrections.evaluate(history, turn_start, &mut correction_state) {
-            log_corrections(&session_id, round, &injection);
-            request_history.push(injection.message);
+            let applies = if let Some(instruction) = injection.guarded_message.as_deref() {
+                let request = crate::corrections::latest_user_request(history)
+                    .unwrap_or("")
+                    .to_string();
+                let key = format!("{request}\n{instruction}");
+                if let Some((cached, applies)) = &coordinate_restriction_cache
+                    && *cached == key
+                {
+                    *applies
+                } else {
+                    let applies = tokio::select! {
+                        biased;
+                        _ = term_signal.changed() => return_interrupted!(&forest.trees),
+                        steer = steer_rx.recv(), if !steer_rx.is_closed() => {
+                            if let Some(task) = steer {
+                                append_steer(task, history, tasks, learning);
+                                drain_steers(&mut steer_rx, history, tasks, learning);
+                            }
+                            should_plan = true;
+                            continue 'supervisor;
+                        }
+                        applies = crate::corrections::coordinate_restriction_applies(
+                            learning.map_or(vlm, |runtime| runtime.client()), &request, instruction
+                        ) => applies,
+                    };
+                    coordinate_restriction_cache = Some((key, applies));
+                    applies
+                }
+            } else {
+                injection.require_user_coordinates
+            };
+            require_user_coordinates = injection.require_user_coordinates && applies;
+            if applies || !injection.require_user_coordinates {
+                log_corrections(&session_id, round, &injection);
+                request_history.push(injection.message);
+            } else if let Some(message) = injection.unguarded_message {
+                request_history.push(message);
+            }
         }
         let messages = assemble_planning_messages(
             round,
@@ -1765,6 +1858,7 @@ pub async fn run_turn(
                             let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
                                 client: &mut executor.streaming, forbidden: &forbidden,
                                 revision: &forest.revision, expected_revision: planning_revision,
+                                require_user_coordinates, history,
                             }).await;
                             if streamed_task.is_none() && !live.plan.nodes.is_empty() {
                                 let mut fields = parser.task_fields.clone();
@@ -1779,6 +1873,15 @@ pub async fn run_turn(
                                 Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
                                     execution_failed = true; break;
+                                }
+                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Blocked)) => {
+                                    drop(stream);
+                                    let cleanup = live.cancel(&mut executor.control).await;
+                                    publish_stream(live, forest, history, tx, &session_id).await;
+                                    cleanup?;
+                                    history.push(Message::user("Pilot blocked navigation because the goal did not match explicit map coordinates in the latest user request. Ask the user for coordinates as x=<number>, y=<number>; do not retry navigation without them."));
+                                    should_plan = true;
+                                    continue 'supervisor;
                                 }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
@@ -2014,12 +2117,7 @@ pub async fn run_turn(
                 } else {
                     assistant_content
                 };
-                let _ = tx
-                    .send(Ok(service::pack(
-                        &session_id,
-                        PilotStreamBody::FinalText(reply),
-                    )))
-                    .await;
+                send_final_with_correction_candidates(learning, &session_id, tx, reply).await;
                 break;
             }
             // A completed interaction may close while unrelated long-running
@@ -2027,12 +2125,22 @@ pub async fn run_turn(
             // stream open: surface the model text as progress and wait for the
             // relevant plan result before producing FinalText.
             if !assistant_content.trim().is_empty() {
-                let body = if task_done {
-                    PilotStreamBody::FinalText(assistant_content.clone())
+                if task_done {
+                    send_final_with_correction_candidates(
+                        learning,
+                        &session_id,
+                        tx,
+                        assistant_content.clone(),
+                    )
+                    .await;
                 } else {
-                    PilotStreamBody::TextChunk(assistant_content.clone())
-                };
-                let _ = tx.send(Ok(service::pack(&session_id, body))).await;
+                    let _ = tx
+                        .send(Ok(service::pack(
+                            &session_id,
+                            PilotStreamBody::TextChunk(assistant_content.clone()),
+                        )))
+                        .await;
+                }
                 if !task_done {
                     // Status is the narration boundary consumed by Liaison:
                     // display/TTS the complete progress text now without
@@ -2073,11 +2181,7 @@ pub async fn run_turn(
             // The tree keeps running under the session's forest; the caller
             // still gets a final answer.
             warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::FinalText(last_content.clone()),
-                )))
+            send_final_with_correction_candidates(learning, &session_id, tx, last_content.clone())
                 .await;
             break;
         }
@@ -4858,5 +4962,65 @@ actions:
                 assert_eq!(messages[1].content, history[0].content);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn candidate_notice_is_session_scoped_and_reported_once() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("candidates/p1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rule.yaml"), "enabled: false\n").unwrap();
+        std::fs::write(
+            dir.join("metadata.json"),
+            serde_json::json!({
+                "status": "drafted", "rule_id": "living_room", "episode": {"session_id": "s1"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let active = root.path().join("active");
+        let runtime = std::sync::Arc::new(crate::correction_learning::LearningRuntime::new(
+            crate::config::LearningConfig {
+                root_dir: root.path().into(),
+                reflection_upstream: None,
+                reflection_api_key: None,
+                reflection_model: None,
+            },
+            &crate::config::VlmConfig {
+                upstream: "http://127.0.0.1:1".into(),
+                api_key: String::new(),
+                model: "test".into(),
+                context_window_tokens: None,
+                api_format: "openai".into(),
+            },
+            vec![],
+            Some(active.clone()),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        super::send_final_with_correction_candidates(Some(&runtime), "other", &tx, "answer".into())
+            .await;
+        assert_eq!(rx.try_recv().unwrap().unwrap().final_text, "answer");
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        let event = rx.try_recv().unwrap().unwrap();
+        assert!(event.text_chunk.contains("answer"));
+        assert!(event.text_chunk.contains("living_room"));
+        assert!(
+            event
+                .text_chunk
+                .contains(dir.join("rule.yaml").to_str().unwrap())
+        );
+        assert!(event.text_chunk.contains(active.to_str().unwrap()));
+        assert!(event.text_chunk.contains("restart Pilot"));
+        let final_event = rx.try_recv().unwrap().unwrap();
+        assert_eq!(final_event.final_text, event.text_chunk);
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        assert_eq!(rx.try_recv().unwrap().unwrap().final_text, "answer");
+        std::fs::remove_file(dir.join(".notified")).unwrap();
+        drop(rx);
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        assert!(!dir.join(".notified").exists());
     }
 }

@@ -45,6 +45,10 @@ bash examples/webots/boot.sh
 command. The wrapper is required when selecting the full variant because it
 keeps Soma and simulated health on the same robot description.
 
+The manifest enables Pilot's correction learning. New disabled rules are written to `config/pilot-corrections/`, with candidate records under `examples/webots/rbnx-boot/correction-learning/candidates/`. See [Pilot's README](../../system/pilot/README.md) for review, activation and revocation.
+
+Set `CORRECTION_VLM_BASE_URL`, `CORRECTION_VLM_MODEL`, and `CORRECTION_VLM_API_KEY` before boot to use a separate correction model. Unset values use the planning configuration; a different endpoint requires its own explicit key.
+
 ## Navigation recovery
 
 `config/nav2_params.yaml` and `config/navigate_to_pose.xml` configure Nav2 for

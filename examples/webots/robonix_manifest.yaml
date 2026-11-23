@@ -52,6 +52,12 @@ system:
   # interaction layer
   pilot:
     listen: 127.0.0.1:50071
+    corrections_dir: ${ROBONIX_SOURCE_PATH}/examples/webots/config/pilot-corrections
+    correction_learning: true
+    correction_learning_dir: ${ROBONIX_SOURCE_PATH}/examples/webots/rbnx-boot/correction-learning
+    correction_learning_upstream: ${CORRECTION_VLM_BASE_URL}
+    correction_learning_model: ${CORRECTION_VLM_MODEL}
+    correction_learning_api_key: ${CORRECTION_VLM_API_KEY}
     vlm:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
