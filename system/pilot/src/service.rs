@@ -182,6 +182,9 @@ pub struct PilotServiceImpl {
     history_budget: HistoryBudget,
     /// Operator-written hints added to a request when their condition holds.
     corrections: Arc<crate::corrections::CorrectionSet>,
+    /// User-feedback correction learning; `None` keeps every turn exactly as
+    /// it was before the feature existed.
+    learning: Option<Arc<crate::correction_learning::LearningRuntime>>,
     histories: Histories,
     /// The tasks of each session (see `tasks`). They survive a transport turn
     /// that pauses for user input.
@@ -212,6 +215,7 @@ impl PilotServiceImpl {
         vlm: VlmClient,
         history_budget: HistoryBudget,
         corrections: Arc<crate::corrections::CorrectionSet>,
+        learning: Option<Arc<crate::correction_learning::LearningRuntime>>,
     ) -> Self {
         Self {
             atlas,
@@ -219,6 +223,7 @@ impl PilotServiceImpl {
             vlm,
             history_budget,
             corrections,
+            learning,
             histories: Arc::new(Mutex::new(HashMap::new())),
             task_states: Arc::new(Mutex::new(HashMap::new())),
             forests: Arc::new(Mutex::new(HashMap::new())),
@@ -521,6 +526,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let vlm = self.vlm.clone();
         let history_budget = self.history_budget.clone();
         let corrections = Arc::clone(&self.corrections);
+        let learning = self.learning.clone();
         let session_id = task.session_id.clone();
         let term_signals = Arc::clone(&self.term_signals);
         let steers = Arc::clone(&self.steers);
@@ -580,6 +586,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 plan_seq,
                 &history_budget,
                 &corrections,
+                learning.as_ref(),
                 &mut transcript,
             )
             .await;

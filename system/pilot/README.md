@@ -144,13 +144,27 @@ actions:
       goal_near found no free spot near {{object_id}}; do not navigate for it.
 ```
 
-- `scope` limits which history the condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
-- Named groups in a `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
+- `scope` limits which history the leaf condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
+- Optional `when.latest_user_request` is an additional AND gate, e.g. `{regex: '几把|how many'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. The gate is independent of leaf scope, still requires `any`/`all` leaf feedback, and provides no template variables. It is a lexical filter, not task semantic validation or an execution guard.
+- Existing rules without the gate behave unchanged. An older Pilot without this field rejects gated files; rebuild this Pilot and restart before using them. `enabled: false` preserves a candidate file without loading or injecting it.
+- Named groups in a leaf `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
 - The hint is sent as a final user message headed `Pilot corrections for this step:`, after the task status board. Several matching rules are joined under one header in file-name order. It is never stored in the session history, so it leaves the request as soon as the condition stops holding.
 - A rule's text is limited to 1200 bytes. Actions of a kind this version does not know are skipped with a warning, so a rule written for a later version still loads.
 - Each request a rule changed logs one `[pilot/correction]` line with the rules, their round in the window and the captured variables.
 
 `corrections/examples/` holds an example rule.
+
+## Correction learning (user feedback, phase 1)
+
+When the user explicitly says an execution was wrong ("你去错地方了，我说的是…"), Pilot can draft a correction rule from that mistake automatically. Off by default; turn it on with `--correction-learning` (`ROBONIX_PILOT_CORRECTION_LEARNING`) plus a root directory `--correction-learning-dir` (`ROBONIX_PILOT_CORRECTION_LEARNING_DIR`), e.g. `<deploy>/rbnx-boot/correction-learning/`. The directory must be separate from `corrections_dir` and is created at startup; `--correction-learning-model` optionally picks a stronger reflection model (default: the planning model).
+
+What happens on an explicit correction, on a detached task that never delays the turn:
+
+1. The evidence between the original request and the correction (dispatch records and executor feedback, bounded) is snapshotted.
+2. A side-channel model call — no tools, no RTDL admission, no Executor access — classifies the mistake and drafts a rule in the format above, or answers `no_rule` / `needs_clarification` / `unsupported`.
+3. The draft is strictly validated (`validate_rule_text` in `src/corrections.rs` checks every field even though the draft is disabled), its id is sanitized and de-duplicated against the active rules, and it is stored as `candidates/<proposal_id>/rule.yaml` with `enabled: false`, plus `metadata.json`, `tests.json` and an `audit.jsonl` line. A repeated identical draft is recorded as `duplicate` and not written again.
+
+Nothing is auto-enabled: a human reviews the candidate, copies it into the active `corrections_dir` and restarts Pilot. A bare "不对" is logged as ambiguous and drafts nothing; hypotheses ("如果执行错了就告诉我") are ignored; at most 2 diagnoses run at once and each gets one revision attempt. Design and later phases: `docs/agent_fix/pilot_self_correction_skill_plan.md` in the main checkout.
 
 ## Tasks
 

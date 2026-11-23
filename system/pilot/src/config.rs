@@ -38,6 +38,20 @@ pub struct PilotConfig {
     /// Directory of correction rules (see `corrections.rs`). `None` turns the
     /// feature off and leaves every request exactly as it was.
     pub corrections_dir: Option<PathBuf>,
+    /// User-feedback correction learning (see `correction_learning.rs`).
+    /// `None` turns the feature off.
+    pub learning: Option<LearningConfig>,
+}
+
+/// Settings for user-feedback correction learning. Phase 1 drafts disabled
+/// candidates only; nothing is auto-enabled.
+#[derive(Debug, Clone)]
+pub struct LearningConfig {
+    /// Root directory for episodes, candidates and the audit log, e.g.
+    /// `<deploy>/rbnx-boot/correction-learning/`.
+    pub root_dir: PathBuf,
+    /// Model for the reflection call; `None` reuses the planning model.
+    pub reflection_model: Option<String>,
 }
 
 /// Connection settings used by Pilot's model client.
@@ -127,6 +141,22 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_PILOT_CORRECTIONS_DIR")]
     pub corrections_dir: Option<PathBuf>,
 
+    /// Turn on user-feedback correction learning: when the user explicitly
+    /// says an execution was wrong, Pilot drafts a disabled correction-rule
+    /// candidate. Off by default; drafts are never auto-enabled.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING")]
+    pub correction_learning: bool,
+
+    /// Root directory for correction learning (episodes, candidates,
+    /// audit.jsonl). Required when correction learning is on; must be
+    /// separate from the corrections dir.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING_DIR")]
+    pub correction_learning_dir: Option<PathBuf>,
+
+    /// Model used for the reflection call; defaults to the planning model.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING_MODEL")]
+    pub correction_learning_model: Option<String>,
+
     /// YAML config file (rbnx writes this; CLI/env still override individual fields).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -159,6 +189,12 @@ struct FileConfig {
     vlm: Option<FileVlmConfig>,
     #[serde(default)]
     corrections_dir: Option<PathBuf>,
+    #[serde(default)]
+    correction_learning: Option<bool>,
+    #[serde(default)]
+    correction_learning_dir: Option<PathBuf>,
+    #[serde(default)]
+    correction_learning_model: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -221,11 +257,43 @@ impl PilotConfig {
             .vlm_api_key
             .or(file_vlm.api_key)
             .filter(|value| !value.trim().is_empty());
-        let explicit_context = args
         let corrections_dir = args
             .corrections_dir
             .or(file_cfg.corrections_dir)
             .filter(|dir| !dir.as_os_str().is_empty());
+        let learning = if args.correction_learning || file_cfg.correction_learning.unwrap_or(false)
+        {
+            let root_dir = args
+                .correction_learning_dir
+                .or(file_cfg.correction_learning_dir)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .ok_or_else(|| {
+                    missing_field(
+                        "correction_learning_dir",
+                        "ROBONIX_PILOT_CORRECTION_LEARNING_DIR",
+                        "--correction-learning-dir",
+                    )
+                })?;
+            if corrections_dir
+                .as_ref()
+                .is_some_and(|active| *active == root_dir)
+            {
+                bail!(
+                    "correction_learning_dir must be separate from corrections_dir: \
+                       candidates are never loaded, and a shared directory blurs the two"
+                );
+            }
+            Some(LearningConfig {
+                root_dir,
+                reflection_model: args
+                    .correction_learning_model
+                    .or(file_cfg.correction_learning_model)
+                    .filter(|model| !model.trim().is_empty()),
+            })
+        } else {
+            None
+        };
+        let explicit_context = args
             .vlm_context_window_tokens
             .or(file_vlm.context_window_tokens)
             .filter(|tokens| *tokens > 0);
@@ -290,6 +358,7 @@ impl PilotConfig {
             id,
             vlm,
             corrections_dir,
+            learning,
         })
     }
 }

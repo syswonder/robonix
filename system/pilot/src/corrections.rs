@@ -85,6 +85,8 @@ struct WindowFile {
 #[serde(deny_unknown_fields)]
 struct WhenFile {
     #[serde(default)]
+    latest_user_request: Option<TextTestFile>,
+    #[serde(default)]
     any: Vec<MatcherFile>,
     #[serde(default)]
     all: Vec<MatcherFile>,
@@ -173,6 +175,9 @@ struct LeafMatcher {
 
 impl LeafMatcher {
     fn from_file(leaf: LeafFile, rule: &str) -> Result<Self> {
+        if leaf.contract.trim().is_empty() {
+            bail!("rule '{rule}': leaf contract must not be empty");
+        }
         let what = |field: &str| format!("rule '{rule}' leaf {}: {field}", leaf.contract);
         let error = leaf
             .error
@@ -225,6 +230,7 @@ enum Condition {
 struct Rule {
     id: String,
     scope: ScopeFile,
+    latest_user_request: Option<TextTest>,
     when: Condition,
     max_rounds: Option<u32>,
     template: String,
@@ -313,8 +319,30 @@ impl CorrectionSet {
     }
 }
 
+/// A fully validated rule file plus its on/off switch. Validation always
+/// covers every field; `enabled` only decides whether the rule is loaded.
+struct ParsedRule {
+    rule: Rule,
+    enabled: bool,
+}
+
 /// `Ok(None)` is a rule that is switched off.
 fn parse_rule(text: &str) -> Result<Option<Rule>> {
+    let parsed = parse_rule_full(text)?;
+    Ok(parsed.enabled.then_some(parsed.rule))
+}
+
+/// Strictly validate a candidate rule: every field is compiled and checked
+/// whether or not the rule is enabled. `load` skips invalid files with a
+/// warning and `parse_rule` returns early for disabled ones, so "it loaded"
+/// or "it is disabled" says nothing about a draft's validity; this entry
+/// point does. Returns the rule id.
+pub(crate) fn validate_rule_text(text: &str) -> Result<String> {
+    let parsed = parse_rule_full(text)?;
+    Ok(parsed.rule.id)
+}
+
+fn parse_rule_full(text: &str) -> Result<ParsedRule> {
     let file: RuleFile = serde_yaml::from_str(text).context("parse rule")?;
     if file.api_version != API_VERSION {
         bail!(
@@ -330,10 +358,12 @@ fn parse_rule(text: &str) -> Result<Option<Rule>> {
     {
         bail!("id '{}' must be non-empty and use only [a-z0-9_]", file.id);
     }
-    if !file.enabled {
-        return Ok(None);
-    }
 
+    let latest_user_request = file
+        .when
+        .latest_user_request
+        .map(|test| TextTest::from_file(test, "latest_user_request"))
+        .transpose()?;
     let when = match (file.when.any.is_empty(), file.when.all.is_empty()) {
         (false, true) => Condition::Any(leaf_matchers(file.when.any, &file.id)?),
         (true, false) => Condition::All(leaf_matchers(file.when.all, &file.id)?),
@@ -413,13 +443,17 @@ fn parse_rule(text: &str) -> Result<Option<Rule>> {
         }
     }
 
-    Ok(Some(Rule {
-        id: file.id,
-        scope: file.scope,
-        when,
-        max_rounds: file.window.max_rounds,
-        template,
-    }))
+    Ok(ParsedRule {
+        rule: Rule {
+            id: file.id,
+            scope: file.scope,
+            latest_user_request,
+            when,
+            max_rounds: file.window.max_rounds,
+            template,
+        },
+        enabled: file.enabled,
+    })
 }
 
 fn leaf_matchers(items: Vec<MatcherFile>, rule: &str) -> Result<Vec<LeafMatcher>> {
@@ -504,6 +538,38 @@ fn is_user_message(message: &Message) -> bool {
             .is_some_and(|c| c.starts_with(USER_MESSAGE_PREFIX))
 }
 
+fn latest_user_request(history: &[Message]) -> Option<&str> {
+    let message = history
+        .iter()
+        .rev()
+        .find(|message| is_user_message(message))?;
+    let labelled = message
+        .content
+        .as_deref()?
+        .strip_prefix(USER_MESSAGE_PREFIX)?;
+    let (message_id, labelled) = labelled.split_once(" (filed under ")?;
+    let (task_id, body) = labelled.split_once("): ")?;
+    let valid_id = |id: &str, prefix: char| {
+        id.strip_prefix(prefix)
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit()))
+    };
+    if !valid_id(message_id, 'm') || !valid_id(task_id, 'T') {
+        return None;
+    }
+    for suffix in [
+        crate::planner::RESPONSE_MODE_TEXT,
+        crate::planner::RESPONSE_MODE_VOICE,
+    ] {
+        if let Some(body) = body
+            .strip_suffix(suffix)
+            .and_then(|body| body.strip_suffix('\n'))
+        {
+            return Some(body);
+        }
+    }
+    Some(body)
+}
+
 /// Index of the first history message a rule with this scope may look at.
 fn scope_start(history: &[Message], scope: ScopeFile, turn_start: usize) -> usize {
     match scope {
@@ -566,7 +632,13 @@ impl CorrectionSet {
         let mut sections = Vec::new();
         let mut still_firing = HashSet::new();
 
+        let request = latest_user_request(history);
         for rule in &self.rules {
+            if let Some(test) = &rule.latest_user_request
+                && request.is_none_or(|body| test.captures(body).is_none())
+            {
+                continue;
+            }
             let start = scope_start(history, rule.scope, turn_start);
             let leaves: Vec<LeafResult> = history[start..]
                 .iter()
@@ -885,6 +957,156 @@ actions:
         );
     }
 
+    fn request_rule(test: &str) -> String {
+        format!(
+            "apiVersion: robonix.pilot/correction/v1\nid: request_gate\nwhen:\n  latest_user_request: {test}\n  any:\n    - leaf: {{contract: a/query, success: true}}\nactions:\n  - kind: inject_message\n    template: query reminder\n"
+        )
+    }
+
+    #[test]
+    fn request_gate_requires_both_the_latest_request_and_leaf_feedback() {
+        let rule = request_rule("{regex: '几把|how many'}");
+        let set = set_of(&[&rule]);
+        for (request, leaf, expected) in [
+            ("这里一共有几把椅子？", true, true),
+            ("how many chairs?", true, true),
+            ("这里一共有几把椅子？", false, false),
+            ("去会议桌旁边", true, false),
+        ] {
+            let mut history = vec![user_message(1, request)];
+            if leaf {
+                history.push(feedback("a/query", true, "objects", ""));
+            }
+            assert_eq!(
+                set.evaluate(&history, 0, &mut CorrectionState::default())
+                    .is_some(),
+                expected,
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_gate_preserves_multiline_body_but_excludes_labels_and_response_mode() {
+        for mode in [
+            crate::planner::RESPONSE_MODE_TEXT,
+            crate::planner::RESPONSE_MODE_VOICE,
+        ] {
+            let body = "先看场景\n数一下：椅子数量";
+            let message = user_message(1, &format!("{body}\n{mode}"));
+            assert_eq!(
+                latest_user_request(std::slice::from_ref(&message)),
+                Some(body)
+            );
+            let history = vec![message, feedback("a/query", true, "objects", "")];
+            let rule = request_rule("{regex: '(?s)^先看场景.*椅子数量$'}");
+            assert!(
+                set_of(&[&rule])
+                    .evaluate(&history, 0, &mut CorrectionState::default())
+                    .is_some()
+            );
+            for forbidden in ["User message", "filed under", "Response mode", "TTS"] {
+                let rule = request_rule(&format!("'{forbidden}'"));
+                assert!(
+                    set_of(&[&rule])
+                        .evaluate(&history, 0, &mut CorrectionState::default())
+                        .is_none()
+                );
+            }
+        }
+        let body = "说明：Response mode for this task only: 这行是用户正文\n继续";
+        assert_eq!(latest_user_request(&[user_message(1, body)]), Some(body));
+    }
+
+    #[test]
+    fn request_gate_does_not_match_feedback_boards_or_an_older_request() {
+        let rule = request_rule("'count chairs'");
+        let set = set_of(&[&rule]);
+        let leaf = feedback("a/query", true, "count chairs", "");
+        for history in [
+            vec![leaf.clone()],
+            vec![
+                user_message(1, "navigate"),
+                leaf.clone(),
+                Message::user("Tasks: count chairs"),
+            ],
+            vec![
+                user_message(1, "count chairs"),
+                leaf.clone(),
+                user_message(2, "navigate"),
+                leaf.clone(),
+            ],
+            vec![
+                Message {
+                    role: "assistant".into(),
+                    ..user_message(1, "count chairs")
+                },
+                leaf.clone(),
+            ],
+            vec![
+                user_message(1, "count chairs"),
+                Message::user("User message invalid: count chairs"),
+                leaf,
+            ],
+        ] {
+            assert!(
+                set.evaluate(&history, 0, &mut CorrectionState::default())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn request_gate_is_independent_of_leaf_scope_and_resets_its_window() {
+        let rule = request_rule("'count chairs'").replace(
+            "id: request_gate",
+            "id: request_gate\nscope: session\nwindow: {max_rounds: 1}",
+        );
+        let set = set_of(&[&rule]);
+        let mut history = vec![
+            user_message(1, "count chairs"),
+            feedback("a/query", true, "objects", ""),
+        ];
+        let mut state = CorrectionState::default();
+        assert!(set.evaluate(&history, 0, &mut state).is_some());
+        assert!(set.evaluate(&history, 0, &mut state).is_none());
+        history.push(user_message(2, "navigate"));
+        assert!(set.evaluate(&history, 0, &mut state).is_none());
+        history.push(user_message(3, "count chairs"));
+        assert!(set.evaluate(&history, 0, &mut state).is_some());
+        let rule = request_rule("'count chairs'")
+            .replace("id: request_gate", "id: request_gate\nscope: turn");
+        let set = set_of(&[&rule]);
+        let start = history.len();
+        assert!(
+            set.evaluate(&history, start, &mut CorrectionState::default())
+                .is_none()
+        );
+        history.push(feedback("a/query", true, "objects", ""));
+        assert!(
+            set.evaluate(&history, start, &mut CorrectionState::default())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn request_gate_validates_regex_and_keeps_captures_out_of_templates() {
+        expect_err(&request_rule("{regex: '['}"), "latest_user_request");
+        let rule = request_rule("{regex: '(?P<request>count)'}")
+            .replace("template: query reminder", "template: '{{request}}'");
+        expect_err(&rule, "not captured");
+        let rule = request_rule("'count'").replace("  any:", "  all:");
+        let history = vec![
+            user_message(1, "count chairs"),
+            feedback("a/query", true, "objects", ""),
+        ];
+        assert!(
+            set_of(&[&rule])
+                .evaluate(&history, 0, &mut CorrectionState::default())
+                .is_some()
+        );
+    }
+
     // ── Loading ──
 
     fn expect_err(text: &str, needle: &str) {
@@ -941,6 +1163,29 @@ actions:
     }
 
     #[test]
+    fn strict_validation_covers_disabled_drafts() {
+        // A disabled draft must still be fully validated: `parse_rule` returns
+        // None and `load` would skip it, so only the strict entry point can
+        // surface a broken condition hiding behind `enabled: false`.
+        let disabled = GOAL_NEAR_RULE.replace("description: test", "enabled: false");
+        assert_eq!(
+            validate_rule_text(&disabled).unwrap(),
+            "goal_near_unreachable"
+        );
+        for broken in [
+            GOAL_NEAR_RULE.replace(r"regex: 'no free cell", r"regex: 'no free cell ["),
+            GOAL_NEAR_RULE.replace("{{object_id}}", "{{missing}}"),
+            GOAL_NEAR_RULE.replace("contract: robonix/system/scene/goal_near", "contract: ''"),
+        ] {
+            let draft = broken.replace("description: test", "enabled: false");
+            assert!(
+                validate_rule_text(&draft).is_err(),
+                "disabled draft must not pass strict validation: {draft}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_action_kind_is_skipped_but_the_rest_of_the_rule_works() {
         let rule = GOAL_NEAR_RULE.replace(
             "actions:\n",
@@ -978,6 +1223,222 @@ actions:
         assert!(
             CorrectionSet::load(&dir).is_err(),
             "a missing directory is an error"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires ROBONIX_CORRECTIONS_TEST_DIR containing the operator's five rule files"]
+    fn operator_rule_files_have_the_expected_loading_and_request_gates() {
+        let dir = std::path::PathBuf::from(std::env::var("ROBONIX_CORRECTIONS_TEST_DIR").unwrap());
+        let set = CorrectionSet::load(&dir).unwrap();
+        assert_eq!(
+            set.ids(),
+            [
+                "file_patrol_source_and_scope",
+                "goal_near_unreachable",
+                "nearest_to_anchor_resolution",
+                "scene_count_all_regions"
+            ]
+        );
+        let query_contracts = [
+            "robonix/system/scene/find",
+            "robonix/system/scene/list_objects",
+            "robonix/system/scene/get_scene_graph",
+        ];
+        for request in [
+            "这里一共有几把椅子？",
+            "数一下办公区有几把椅子，然后播报",
+            "办公区有多少椅子？",
+            "How many chairs are there?",
+            "Count the chairs",
+            "先看场景\n统计椅子数量",
+        ] {
+            for contract in query_contracts {
+                let history = vec![
+                    user_message(1, request),
+                    feedback(contract, true, "objects", ""),
+                ];
+                let injection = set
+                    .evaluate(&history, 0, &mut CorrectionState::default())
+                    .unwrap();
+                assert_eq!(
+                    injection
+                        .fired
+                        .iter()
+                        .map(|rule| rule.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["scene_count_all_regions"]
+                );
+            }
+            assert!(
+                set.evaluate(
+                    &[user_message(1, request)],
+                    0,
+                    &mut CorrectionState::default()
+                )
+                .is_none()
+            );
+        }
+        for request in [
+            "去离会议室白板最近的那把椅子旁边",
+            "去会议桌旁边",
+            "同时拍照和扫雷达，然后保存地图",
+            "先去绿植旁播报，再去会议桌旁播报",
+            "按文件中的巡检约定巡检",
+            "读开工口令",
+            "这里一共要巡检两站",
+            "你前面是什么房间？",
+        ] {
+            let history = vec![
+                user_message(1, request),
+                feedback(
+                    "robonix/system/scene/list_objects",
+                    true,
+                    "几把椅子 count chairs",
+                    "",
+                ),
+                feedback("robonix/service/navigation/navigate", true, "done", ""),
+            ];
+            let fired = set
+                .evaluate(&history, 0, &mut CorrectionState::default())
+                .map(|injection| {
+                    injection
+                        .fired
+                        .into_iter()
+                        .map(|rule| rule.id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let expected = if request == "去离会议室白板最近的那把椅子旁边" {
+                vec!["nearest_to_anchor_resolution"]
+            } else {
+                vec![]
+            };
+            assert_eq!(fired, expected, "unexpected injection for {request}");
+        }
+        let count = std::fs::read_to_string(dir.join("scene_count_all_regions.yaml")).unwrap();
+        let count_set = set_of(&[&count]);
+        let mut history = vec![
+            user_message(1, "几把椅子？"),
+            feedback(query_contracts[0], true, "objects", ""),
+        ];
+        history.push(user_message(2, "去会议桌旁边"));
+        history.push(feedback(query_contracts[0], true, "objects", ""));
+        assert!(
+            count_set
+                .evaluate(&history, 0, &mut CorrectionState::default())
+                .is_none()
+        );
+        for history in [
+            vec![feedback(query_contracts[0], true, "几把椅子", "")],
+            vec![
+                user_message(1, "几把椅子？"),
+                feedback(query_contracts[0], false, "", "error"),
+            ],
+        ] {
+            assert!(
+                count_set
+                    .evaluate(&history, 0, &mut CorrectionState::default())
+                    .is_none()
+            );
+        }
+        let nearest =
+            std::fs::read_to_string(dir.join("nearest_to_anchor_resolution.yaml")).unwrap();
+        assert!(parse_rule(&nearest).unwrap().is_some());
+        let disabled = nearest.replacen("enabled: true", "enabled: false", 1);
+        assert!(parse_rule(&disabled).unwrap().is_none());
+        let candidate = set_of(&[&nearest]);
+        for request in [
+            "去离会议室白板最近的那把椅子旁边",
+            "找离办公桌最近的杯子",
+            "Go to the chair closest to the meeting room whiteboard",
+            "Find the object nearest to the sink",
+        ] {
+            let history = vec![
+                user_message(1, request),
+                feedback(query_contracts[0], true, "objects", ""),
+            ];
+            let mut state = CorrectionState::default();
+            for round in 1..=4 {
+                assert_eq!(
+                    candidate.evaluate(&history, 0, &mut state).is_some(),
+                    round <= 3,
+                    "{request} round {round}"
+                );
+            }
+            assert!(
+                candidate
+                    .evaluate(
+                        &[user_message(1, request)],
+                        0,
+                        &mut CorrectionState::default()
+                    )
+                    .is_none()
+            );
+        }
+        for request in [
+            "去离我最近的椅子旁边",
+            "去会议室靠窗的那把椅子旁边",
+            "这里一共有几把椅子？",
+            "同时拍照和扫雷达",
+        ] {
+            let history = vec![
+                user_message(1, request),
+                feedback(query_contracts[0], true, "objects", ""),
+            ];
+            assert!(
+                candidate
+                    .evaluate(&history, 0, &mut CorrectionState::default())
+                    .is_none(),
+                "{request}"
+            );
+        }
+        let request = "去离会议室白板最近的那把椅子旁边";
+        for contract in query_contracts
+            .into_iter()
+            .chain(["robonix/system/scene/get_object_context"])
+        {
+            let history = vec![
+                user_message(1, request),
+                feedback(contract, true, "objects", ""),
+            ];
+            let injection = set
+                .evaluate(&history, 0, &mut CorrectionState::default())
+                .unwrap();
+            assert_eq!(
+                injection
+                    .fired
+                    .iter()
+                    .map(|rule| rule.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["nearest_to_anchor_resolution"]
+            );
+            let failed = vec![
+                user_message(1, request),
+                feedback(contract, false, "", "error"),
+            ];
+            assert!(
+                set.evaluate(&failed, 0, &mut CorrectionState::default())
+                    .is_none()
+            );
+            let mut changed = history;
+            changed.push(user_message(2, "去会议桌旁边"));
+            changed.push(feedback(contract, true, "objects", ""));
+            assert!(
+                set.evaluate(&changed, 0, &mut CorrectionState::default())
+                    .is_none()
+            );
+        }
+        assert!(
+            set.evaluate(
+                &[user_message(1, request)],
+                0,
+                &mut CorrectionState::default()
+            )
+            .is_none()
+        );
+        println!(
+            "Operator YAML checks passed: four active rules, ordered rule disabled; count and anchor request gates and three-round nearest window verified."
         );
     }
 

@@ -155,8 +155,15 @@ impl HistoryBudget {
 }
 
 /// Take in a user message (a request or a steer): file it with the session's
-/// tasks and put it in history once, labelled with its id and task.
-fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
+/// tasks and put it in history once, labelled with its id and task. When
+/// correction learning is on, an explicit user correction also snapshots the
+/// evidence and starts a detached diagnosis; that never blocks this turn.
+fn receive_user_message(
+    task: &Task,
+    history: &mut Vec<Message>,
+    tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
+) -> bool {
     let Some(message) = tasks.receive(&task.text) else {
         return false;
     };
@@ -165,6 +172,13 @@ fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut Tas
         message.line(),
         response_mode(task)
     )));
+    crate::correction_learning::maybe_start_learning(
+        learning,
+        history,
+        &task.session_id,
+        &task.task_id,
+        &task.text,
+    );
     true
 }
 
@@ -307,11 +321,15 @@ fn task_modality(task: &Task) -> Option<String> {
         })
 }
 
+pub(crate) const RESPONSE_MODE_VOICE: &str = "Response mode for this task only: voice. Keep user-facing replies brief, plain, and suitable for TTS (about 30 Chinese characters or 50 English words).";
+pub(crate) const RESPONSE_MODE_TEXT: &str =
+    "Response mode for this task only: text. Earlier voice-only constraints no longer apply.";
+
 fn response_mode(task: &Task) -> &'static str {
     if task_modality(task).as_deref() == Some("voice") {
-        "Response mode for this task only: voice. Keep user-facing replies brief, plain, and suitable for TTS (about 30 Chinese characters or 50 English words)."
+        RESPONSE_MODE_VOICE
     } else {
-        "Response mode for this task only: text. Earlier voice-only constraints no longer apply."
+        RESPONSE_MODE_TEXT
     }
 }
 
@@ -983,8 +1001,13 @@ async fn fetch_executor_active_snapshot(executor: &mut ExecutorConn) -> (String,
 /// running. Draining is non-blocking; returns whether anything was pulled so
 /// the caller knows to re-plan. The model decides for itself whether the steer
 /// requires a root plan-control meta op.
-fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
-    let pulled = receive_user_message(&task, history, tasks);
+fn append_steer(
+    task: Task,
+    history: &mut Vec<Message>,
+    tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
+) -> bool {
+    let pulled = receive_user_message(&task, history, tasks, learning);
     if pulled {
         info!("[pilot/steer] mid-task input: {}", task.text.trim());
     }
@@ -995,10 +1018,11 @@ fn drain_steers(
     steer_rx: &mut mpsc::Receiver<Task>,
     history: &mut Vec<Message>,
     tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
 ) -> bool {
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
-        pulled |= append_steer(task, history, tasks);
+        pulled |= append_steer(task, history, tasks, learning);
     }
     pulled
 }
@@ -1288,6 +1312,7 @@ pub async fn run_turn(
     plan_seq: Arc<AtomicU64>,
     history_budget: &HistoryBudget,
     corrections: &crate::corrections::CorrectionSet,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
@@ -1386,7 +1411,7 @@ pub async fn run_turn(
     // history once, with its id. Compaction keeps the open tasks' messages.
     // Where this turn's additions to the history begin (for rules scoped to a turn).
     let turn_start = history.len();
-    receive_user_message(task, history, tasks);
+    receive_user_message(task, history, tasks, learning);
     if !memory_prompt.is_empty() {
         history.push(Message::user(&memory_prompt));
     }
@@ -1466,7 +1491,7 @@ pub async fn run_turn(
                     steer = steer_rx.recv() => {
                         match steer {
                             Some(task) => {
-                                if append_steer(task, history, tasks) {
+                                if append_steer(task, history, tasks, learning) {
                                     should_plan = true;
                                 }
                             }
@@ -1485,7 +1510,7 @@ pub async fn run_turn(
                 }
                 steer = steer_rx.recv() => {
                     if let Some(task) = steer
-                        && append_steer(task, history, tasks)
+                        && append_steer(task, history, tasks, learning)
                     {
                         // Re-plan now so the model can react (and decide
                         // whether to cancel any in-flight tree).
@@ -1509,7 +1534,7 @@ pub async fn run_turn(
 
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
-        drain_steers(&mut steer_rx, history, tasks);
+        drain_steers(&mut steer_rx, history, tasks, learning);
         clock_result!(transcript.record(history, tasks));
 
         // Re-discover capabilities from atlas every round so providers that
@@ -1713,9 +1738,9 @@ pub async fn run_turn(
                         drop(stream);
                         let cleanup = live.cancel(&mut executor.control).await;
                         publish_stream(live, forest, history, tx, &session_id).await;
-                        append_steer(task, history, tasks);
+                        append_steer(task, history, tasks, learning);
                         cleanup?;
-                        drain_steers(&mut steer_rx, history, tasks);
+                        drain_steers(&mut steer_rx, history, tasks, learning);
                         should_plan = true;
                         continue 'supervisor;
                     }
@@ -3229,6 +3254,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         tasks.answered();
         assert!(append_steer(
@@ -3238,6 +3264,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         assert_eq!(tasks.tasks.len(), 1);
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
@@ -3286,6 +3313,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
         tasks.attach_tree("T1", "11", "navigate to the meeting room");
@@ -3593,6 +3621,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 &HistoryBudget::new(None, "test"),
                 &crate::corrections::CorrectionSet::default(),
+                None,
                 &mut transcript,
             ),
         )
@@ -3765,6 +3794,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 &HistoryBudget::new(None, "test"),
                 rules,
+                None,
                 &mut transcript,
             ),
         )

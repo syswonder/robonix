@@ -605,6 +605,62 @@ impl VlmClient {
         &self.prompt_cache_key
     }
 
+    /// One non-streaming chat completion, for side channels that must not
+    /// touch the planning stream: a plain `system` + `user` exchange with no
+    /// tools, no RTDL admission and no history. Used by the correction
+    /// learning workflow, whose output is parsed as JSON by its caller and
+    /// never dispatched to the Executor.
+    ///
+    /// `model_override` selects a reflection model different from the
+    /// planning model; `None` reuses this client's model.
+    pub async fn chat_once(
+        &self,
+        model_override: Option<&str>,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
+        #[derive(serde::Serialize)]
+        struct OnceMessage<'a> {
+            role: &'a str,
+            content: &'a str,
+        }
+        let body = serde_json::json!({
+            "model": model_override.unwrap_or(&self.model),
+            "messages": [
+                OnceMessage { role: "system", content: system },
+                OnceMessage { role: "user", content: user },
+            ],
+            "stream": false,
+            "max_tokens": 4096,
+        });
+        let url = format!("{}/chat/completions", self.api_base);
+        let response = self
+            .inner
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("open VLM chat completion")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("read VLM chat completion body")?;
+        if !status.is_success() {
+            bail!("VLM chat completion: HTTP {status}: {text}");
+        }
+        let value: Value = serde_json::from_str(&text).context("parse VLM chat completion JSON")?;
+        value
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("VLM chat completion reply has no message content")
+    }
+
     /// Resolve the usable context-window limit at process start.
     ///
     /// A deployment setting is authoritative. Then prefer provider metadata,

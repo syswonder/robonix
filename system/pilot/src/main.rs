@@ -19,6 +19,7 @@
 //   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
 
+mod correction_learning;
 mod corrections;
 mod discovery;
 // Pilot shares Executor's expression grammar for admission.
@@ -278,6 +279,39 @@ async fn main() -> Result<()> {
         None => std::sync::Arc::new(corrections::CorrectionSet::default()),
     };
 
+    // User-feedback correction learning. Off unless the deployment asks for
+    // it; on, the root dir must exist (or be creatable) before the first
+    // correction can arrive. Drafts are stored disabled and are never loaded
+    // into the active set by this process.
+    let learning = match cfg.learning {
+        Some(learning_cfg) => {
+            std::fs::create_dir_all(&learning_cfg.root_dir).with_context(|| {
+                format!(
+                    "create the correction-learning root {}",
+                    learning_cfg.root_dir.display()
+                )
+            })?;
+            let rule_ids = corrections
+                .ids()
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            info!(
+                "[pilot/learning] correction learning on: drafting disabled candidates under {} \
+                 (reflection model: {})",
+                learning_cfg.root_dir.display(),
+                learning_cfg
+                    .reflection_model
+                    .as_deref()
+                    .unwrap_or("the planning model")
+            );
+            Some(std::sync::Arc::new(
+                correction_learning::LearningRuntime::new(learning_cfg, &cfg.vlm, rule_ids),
+            ))
+        }
+        None => None,
+    };
+
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
@@ -345,6 +379,7 @@ async fn main() -> Result<()> {
         vlm,
         history_budget,
         corrections,
+        learning,
     );
     let server_shutdown = lifecycle.subscribe_shutdown();
     let server_lifecycle = lifecycle.clone();
