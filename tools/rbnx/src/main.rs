@@ -116,6 +116,11 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    let _boot_lock = if let cmd::Commands::Boot { file, .. } = &cli.command {
+        Some(cmd::teardown::lock_boot(file)?)
+    } else {
+        None
+    };
     let verbose_boot = matches!(&cli.command, cmd::Commands::Boot { verbose: true, .. });
     prepare_boot_log_dir(&cli.command)?;
 

@@ -73,6 +73,35 @@ them.
 them `pilot-hidden`, because they remain registered and callable by system
 consumers.
 
+### Restart and shutdown checks
+
+`rbnx boot` locks the deployment before clearing logs or spawning anything.
+An existing boot or cleanup in progress fails immediately. Leftover `state.json`
+also blocks startup and instructs running `rbnx shutdown -f MANIFEST` first.
+Failed startup logs are preserved. Do not delete the state file to bypass this check.
+
+Shutdown serializes the CLI, boot owner and watchdog cleanup. On Linux it also
+checks children that detached into a separate process group, using the exact
+inherited `RBNX_BOOT_ID` and PID start time, not executable names. Each component
+has a 5-second shutdown budget, followed by a Linux boot-owned residual sweep.
+Timed-out stop hooks inherit boot ownership and are included in that sweep.
+Cleanup snapshots same-user descendants before stopping their parents, retaining
+PID/start-time identities even if a child makes its environment unreadable.
+Unrelated opaque processes are not treated as boot-owned merely by their age.
+State is retained on incomplete cleanup, and success waits for the boot owner
+to exit. Processes from another boot are not signalled.
+
+Run the hardware-free restart regression after building `rbnx` and making
+`robonix-atlas` available on PATH:
+
+```sh
+python3 tools/rbnx/tests/restart_smoke.py --binary target/debug/rbnx
+```
+
+The script uses an Atlas-only manifest on a free loopback port. It verifies
+fast duplicate rejection, detached-child cleanup, foreign-boot isolation and
+watchdog recovery after SIGKILL. It never declares robot hardware.
+
 ### What a boot leaves behind
 
 When boot prepares an unbuilt system package, it uses the deployment's

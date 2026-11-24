@@ -1959,7 +1959,13 @@ pub async fn execute(
             &children,
         );
         let providers = component_records(&children);
-        let complete = teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+        let complete = teardown::teardown(
+            &state_path,
+            Some(&atlas_endpoint),
+            &providers,
+            Some(&boot_id),
+        )
+        .await;
         if !complete {
             anyhow::bail!(
                 "interrupted boot left identity-mismatched process groups; preserving {}",
@@ -1988,8 +1994,13 @@ pub async fn execute(
                 &children,
             );
             let providers = component_records(&children);
-            let complete =
-                teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+            let complete = teardown::teardown(
+                &state_path,
+                Some(&atlas_endpoint),
+                &providers,
+                Some(&boot_id),
+            )
+            .await;
             if complete {
                 let _ = std::fs::remove_file(&state_path);
             } else {
@@ -2053,7 +2064,13 @@ pub async fn execute(
         ),
     );
     let providers = component_records(&children);
-    let complete = teardown::teardown(Some(&atlas_endpoint), &providers, Some(&boot_id)).await;
+    let complete = teardown::teardown(
+        &state_path,
+        Some(&atlas_endpoint),
+        &providers,
+        Some(&boot_id),
+    )
+    .await;
     if !complete {
         anyhow::bail!(
             "shutdown refused identity-mismatched process groups; preserving {}",

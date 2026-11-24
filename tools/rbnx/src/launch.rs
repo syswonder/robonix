@@ -184,7 +184,7 @@ pub async fn shutdown_package_runtime_checked(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        run_package_stop_hook(record, stop, atlas_endpoint).await;
+        run_package_stop_hook(record, stop, atlas_endpoint, boot_id).await;
     }
 
     if !terminate_process_group_guarded(record.pgid, term_wait, boot_id).await {
@@ -380,6 +380,7 @@ async fn run_package_stop_hook(
     record: &PackageRuntimeRecord,
     stop: &str,
     atlas_endpoint: Option<&str>,
+    boot_id: Option<&str>,
 ) {
     let Some(package_dir) = record.package_dir.as_deref() else {
         warn!("shutdown {} has stop hook but no package_dir", record.name);
@@ -391,7 +392,13 @@ async fn run_package_stop_hook(
         .current_dir(PathBuf::from(package_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // An explicit shutdown CLI is outside the boot's inherited environment.
+    // Its stop hook must carry the same ownership marker for residual cleanup.
+    if let Some(id) = boot_id {
+        cmd.env("RBNX_BOOT_ID", id);
+    }
     if let Some(endpoint) = atlas_endpoint {
         cmd.env("ROBONIX_ATLAS", endpoint);
     }

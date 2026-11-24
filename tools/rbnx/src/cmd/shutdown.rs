@@ -57,8 +57,13 @@ pub async fn execute(file: PathBuf) -> Result<()> {
     );
 
     let boot_id = (!state.boot_id.is_empty()).then_some(state.boot_id.as_str());
-    let complete =
-        teardown::teardown(Some(&state.atlas_endpoint), &state.components, boot_id).await;
+    let complete = teardown::teardown(
+        &state_path,
+        Some(&state.atlas_endpoint),
+        &state.components,
+        boot_id,
+    )
+    .await;
     if !complete {
         anyhow::bail!(
             "shutdown refused one or more stale/mismatched process groups; preserving {}",
@@ -70,15 +75,45 @@ pub async fn execute(file: PathBuf) -> Result<()> {
     // already dead because we just killed all its children, but if the
     // user ran `rbnx boot` in the foreground and `rbnx shutdown` from
     // another shell, this lets boot exit its signal-wait loop cleanly).
-    let boot_identity_matches = state.boot_start_time_ticks.is_none_or(|expected| {
-        robonix_cli::launch::proc_start_time_ticks(state.boot_pid) == Some(expected)
-    });
+    let boot_identity_matches = match state.boot_start_time_ticks {
+        Some(expected) => {
+            robonix_cli::launch::proc_start_time_ticks(state.boot_pid) == Some(expected)
+        }
+        None => {
+            boot_id.is_some_and(|id| robonix_cli::launch::process_has_boot_id(state.boot_pid, id))
+        }
+    };
     if state.boot_pid != 0 && state.boot_pid != std::process::id() && boot_identity_matches {
         let pid = nix::unistd::Pid::from_raw(state.boot_pid as i32);
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
     }
 
-    let _ = std::fs::remove_file(&state_path);
+    // Boot handles SIGTERM with its own teardown. Do not announce completion
+    // while that owner can still write state or hold the startup lock.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let owner = teardown::open_lock(&state_path.with_file_name("boot.owner.lock"))?;
+    loop {
+        match owner.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "boot pid {} has not exited; do not restart yet; preserving {}",
+                state.boot_pid,
+                state_path.display()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if state_path.exists() {
+        let current = teardown::read_state(&state_path)?;
+        if current.boot_id != state.boot_id || current.boot_pid != state.boot_pid {
+            anyhow::bail!("boot state changed during shutdown; leaving it untouched");
+        }
+        std::fs::remove_file(&state_path)?;
+    }
     output::success(&format!("torn down — removed {}", state_path.display()));
     Ok(())
 }

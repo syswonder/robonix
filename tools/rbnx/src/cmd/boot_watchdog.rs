@@ -75,6 +75,7 @@ pub async fn execute(
     }
     let state_boot_id = (!state.boot_id.is_empty()).then_some(state.boot_id.as_str());
     let complete = teardown::teardown(
+        &state_path,
         Some(&state.atlas_endpoint),
         &state.components,
         state_boot_id,

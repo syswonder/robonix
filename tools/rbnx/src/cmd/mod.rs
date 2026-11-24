@@ -30,7 +30,7 @@ mod path;
 mod run_package;
 mod setup;
 mod shutdown;
-mod teardown;
+pub(crate) mod teardown;
 mod update;
 mod validate;
 mod version;
