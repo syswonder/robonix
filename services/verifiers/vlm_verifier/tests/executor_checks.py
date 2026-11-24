@@ -118,8 +118,11 @@ async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
                                                 args_json=json.dumps({"path": str(successor_marker), "content": "reached"})))])
                                 terminal = []
                                 verifying = []
+                                plan_failed = None
                                 calls_before = model.calls
                                 async for event in stub.Execute(plan, timeout=20):
+                                    if event.HasField("plan_complete"):
+                                        plan_failed = event.plan_complete.any_failed
                                     if event.HasField("node_state"):
                                         ns = event.node_state
                                         if ns.op_id == "pick" and ns.state == 7:
@@ -127,6 +130,7 @@ async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
                                         if ns.op_id == "pick" and ns.state in (2, 3, 4):
                                             terminal.append(ns)
                                 assert len(terminal) == 1, terminal
+                                assert plan_failed is (mode != "passed")
                                 result = terminal[0].leaf_result
                                 assert result.success is (mode == "passed"), result
                                 assert target_marker.exists() is (mode != "missing_camera")
@@ -135,12 +139,15 @@ async def check(entry, mcp_port, model, overlap=False, cameras=("wrist",)):
                                 assert model.calls - calls_before == (0 if mode == "missing_camera" else 1)
                                 if mode == "missing_camera":
                                     assert not result.output, result
+                                    assert "capability was not dispatched" in result.error, result
                                 else:
                                     assert "original-marker" in result.output, result
                                 if mode == "rejected":
                                     assert result.error.startswith("result verification failed:"), result
                                 if mode in ("unobservable", "malformed", "missing_camera"):
                                     assert result.error.startswith("result verification unavailable:"), result
+                                if mode in ("rejected", "unobservable", "malformed"):
+                                    assert "capability reported success" in result.error, result
                                 if mode == "unobservable":
                                     assert "insufficient visual evidence" in result.error, result
                                 print(f"PASS: cameras={cameras} overlap={overlap} {mode}; target={target_marker.exists()} successor={successor_marker.exists()}")

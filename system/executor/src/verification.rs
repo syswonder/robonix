@@ -212,7 +212,7 @@ fn apply_verdict(
         original.call_id, detail
     );
     original.success = false;
-    original.error = format!("result verification failed: {detail}");
+    original.error = format!("result verification failed: capability reported success. {detail}");
     original
 }
 
@@ -222,7 +222,8 @@ fn unavailable(mut original: CapabilityCallResult, reason: String) -> Capability
         original.call_id, reason
     );
     original.success = false;
-    original.error = format!("result verification unavailable: {reason}");
+    original.error =
+        format!("result verification unavailable: capability reported success. {reason}");
     original
 }
 

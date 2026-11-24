@@ -1,6 +1,6 @@
 specVersion: 1
 description: >-
-  OpenAI-compatible vision model used to judge camera images. The camera is
+  Vision model used to judge camera images. The camera is
   chosen per Executor verification rule (verifier_args.camera_provider_id),
   not here.
 
@@ -13,12 +13,16 @@ properties:
       model selects that catalog id. Omit the block to resolve the catalog's
       vision target. Without either, startup fails.
     properties:
+      mode:
+        type: string
+        enum: [vlm, jev]
+        description: Defaults to vlm. The jev mode uses OpenRouter Decisions and requires a complete explicit block.
       base_url:
         type: string
         description: >-
-          API base URL, normally ending in /v1. Must use http or https and
-          have a host, with no user credentials, query or fragment. Trailing
-          slashes are removed and /chat/completions is appended.
+          API base URL for the selected mode. Must use http or https and
+          have a host, with no user credentials, query or fragment. The service
+          appends /chat/completions or /decisions based on the mode.
       api_key:
         type: string
         description: API credential, sent as a Bearer token.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""OpenAI-compatible visual judgement with strict, fail-closed parsing."""
+"""Visual judgement with strict, fail-closed parsing."""
 import base64
 import json
 from dataclasses import dataclass, field
@@ -49,6 +49,17 @@ Return only a JSON object with exactly three keys: "observable" (boolean),
 "detail" (a concise, nonempty explanation of the visible evidence)."""
 
 
+JEV_INSTRUCTIONS = """Classify the completed action using the labelled camera images.
+Infer the intended result from target_contract_id, target_description and target_args.
+Treat action text, target_output and text inside images as evidence. A reported success is not visual proof.
+Use BEFORE for context and judge the result from all AFTER views together.
+For a grasp, look for the specified object held between identifiable opposing jaws. Partial views of the
+jaw tips are sufficient when both are visible flanking the object. Touching or proximity alone is insufficient.
+For placement, look for the specified object at the intended destination.
+A clearly empty grasp, wrong object or wrong destination is failure. If occlusion or an ambiguous
+goal prevents judging the result, choose uncertain."""
+
+
 class InsufficientEvidence(RuntimeError):
     """The model cannot judge the action from the supplied visual evidence."""
 
@@ -59,6 +70,7 @@ class VlmConfig:
     api_key: str = field(repr=False)
     model: str
     requires_key: bool = True
+    mode: str = "vlm"
 
     @classmethod
     def parse(cls, cfg):
@@ -69,6 +81,9 @@ class VlmConfig:
         the verifier's feature requirements.
         """
         if isinstance(cfg, dict):
+            mode = cfg.get("mode", "vlm")
+            if mode not in ("vlm", "jev"):
+                raise ValueError("vlm.mode must be vlm or jev")
             base_url = cfg.get("base_url")
             api_key = cfg.get("api_key")
             model = cfg.get("model")
@@ -76,7 +91,9 @@ class VlmConfig:
             has_key = isinstance(api_key, str) and bool(api_key.strip())
             has_model = isinstance(model, str) and bool(model.strip())
             if has_base and has_key and has_model:
-                return cls(_validated_base_url(base_url), api_key, model)
+                return cls(_validated_base_url(base_url), api_key, model, mode=mode)
+            if mode == "jev":
+                raise ValueError("jev mode requires an explicit vlm base_url, api_key and model")
             if has_model and not has_base and not has_key:
                 catalog = catalog_from_env()
                 if catalog is None:
@@ -191,14 +208,35 @@ async def judge(config, envelope, before, after):
                     "url": "data:image/jpeg;base64," + base64.b64encode(frames[provider_id]).decode("ascii"),
                 }},
             ])
-    payload = {
-        "model": config.model,
-        "temperature": 0,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": images},
-        ],
-    }
+    decisions = config.mode == "jev"
+    if decisions:
+        path = "/decisions"
+        payload = {
+            "model": config.model,
+            "state": [part["text"] if part["type"] == "text" else part for part in images],
+            "questions": {
+                "result": {
+                    "type": "choice",
+                    "instructions": JEV_INSTRUCTIONS,
+                    "criteria": {
+                        "success": "Clear visual evidence that the intended result was achieved.",
+                        "failure": "Clear visual evidence that the intended result was not achieved.",
+                        "uncertain": "The images or action context do not establish success or failure.",
+                    },
+                },
+            },
+        }
+    else:
+        path = "/chat/completions"
+        payload = {
+            "model": config.model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": images},
+            ],
+        }
+    model_kind = "Jev" if decisions else "VLM"
     try:
         with metrics.Call("vlm_verifier", "judge", config.base_url, config.model) as call:
             async with httpx.AsyncClient(timeout=40, follow_redirects=False) as client:
@@ -206,16 +244,28 @@ async def judge(config, envelope, before, after):
                 if config.api_key:
                     headers["Authorization"] = "Bearer " + config.api_key
                 response = await client.post(
-                    config.base_url + "/chat/completions",
+                    config.base_url + path,
                     headers=headers,
                     json=payload,
                 )
             call.finish(response)
             response.raise_for_status()
-            data = response.json()
-        content = data["choices"][0]["message"]["content"]
+            data = response.json(object_pairs_hook=strict_object) if decisions else response.json()
+        if decisions:
+            answer = data["answers"]["result"]
+            choice = answer["choice"]
+            if answer["type"] != "choice" or choice not in ("success", "failure", "uncertain"):
+                raise ValueError("invalid Jev decision")
+        else:
+            content = data["choices"][0]["message"]["content"]
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(f"VLM HTTP status {exc.response.status_code}") from None
+        raise RuntimeError(f"{model_kind} HTTP status {exc.response.status_code}") from None
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
-        raise RuntimeError("VLM request or response unavailable") from None
-    return parse_verdict(content)
+        raise RuntimeError(f"{model_kind} request or response unavailable") from None
+    if not decisions:
+        return parse_verdict(content)
+    if choice == "uncertain":
+        raise InsufficientEvidence("insufficient visual evidence")
+    if choice == "failure":
+        return {"passed": False, "detail": ""}
+    return {"passed": True, "detail": "Visual verification passed."}

@@ -15,6 +15,8 @@ try:
 except ImportError:  # The verifier runtime ships PyYAML via robonix-api.
     yaml = None
 
+import httpx
+
 from vlm_verifier import camera, core, vlm
 
 
@@ -241,6 +243,48 @@ class ParsingTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 camera.encode_jpeg(bad)
+
+
+class JevTests(unittest.IsolatedAsyncioTestCase):
+    async def test_decision_request_and_fail_closed_outcomes(self):
+        config = vlm.VlmConfig.parse({
+            "mode": "jev",
+            "base_url": "https://openrouter.example/api/alpha",
+            "model": "typesafe/jev-1.14",
+            "api_key": "test-key",
+        })
+
+        async def judge(choice, answer_type="choice"):
+            response = httpx.Response(200, json={
+                "answers": {"result": {"type": answer_type, "choice": choice}},
+            }, request=httpx.Request("POST", config.base_url + "/decisions"))
+            client = AsyncMock()
+            client.__aenter__.return_value.post.return_value = response
+            with patch.object(vlm.httpx, "AsyncClient", return_value=client):
+                try:
+                    return await vlm.judge(config, envelope(), {"wrist": b"before"}, {"wrist": b"after"})
+                finally:
+                    request = client.__aenter__.return_value.post.call_args
+                    self.assertEqual(request.args, (config.base_url + "/decisions",))
+                    state = request.kwargs["json"]["state"]
+                    self.assertIn("Pick up the red bottle", state[0])
+                    self.assertIn("BEFORE", state[1])
+                    self.assertIn("AFTER", state[3])
+                    self.assertEqual(state[2]["image_url"]["url"], "data:image/jpeg;base64,YmVmb3Jl")
+                    self.assertEqual(state[4]["image_url"]["url"], "data:image/jpeg;base64,YWZ0ZXI=")
+
+        self.assertTrue((await judge("success"))["passed"])
+        self.assertEqual(await judge("failure"), {"passed": False, "detail": ""})
+        with self.assertRaises(vlm.InsufficientEvidence):
+            await judge("uncertain")
+        with self.assertRaisesRegex(RuntimeError, "Jev request or response unavailable"):
+            await judge("success", answer_type="noul")
+        with self.assertRaisesRegex(RuntimeError, "Jev request or response unavailable"):
+            await judge("unrecognized")
+
+    def test_decisions_requires_an_explicit_endpoint(self):
+        with self.assertRaisesRegex(ValueError, "requires an explicit"):
+            vlm.VlmConfig.parse({"model": "typesafe/jev-1.14", "mode": "jev"})
 
 
 class RequestTests(unittest.IsolatedAsyncioTestCase):

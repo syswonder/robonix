@@ -2,6 +2,10 @@
 
 `robonix-pilot` is the VLM-driven reasoning and planning service for Robonix. It receives `SystemPilot` tasks, builds the model prompt from the current Atlas capability catalog, asks the VLM for an RTDL plan, expands that RTDL into a `Plan`, and sends the plan to `robonix-executor`.
 
+When a verification error says the capability reported success, Pilot can use the
+original output and a fresh observation to decide whether to continue, retry, or
+report uncertainty. With overlapping verification, later steps may already have run.
+
 ## Build
 
 Transcript timestamps use the in-process Chronos wall clock and keep real dates

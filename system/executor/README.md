@@ -122,7 +122,10 @@ Provider-specific rules override contract-only rules; duplicate rules are
 rejected. `verifier_args` must be an object and is forwarded unchanged.
 Only successful calls with a matching rule invoke `robonix/service/verifier/verify`.
 A failed verdict, unavailable verifier, malformed response, or 60-second timeout
-makes the node fail.
+makes the node fail. The leaf result preserves the original provider output and
+its error records that the provider reported success before verification failed
+or became unavailable. Failed before-image capture reports that the capability
+was not dispatched.
 
 - `overlap: false` (default): wait for verification before completing the node.
 - `overlap: true`: emit `VERIFYING` and continue execution; wait for verification
