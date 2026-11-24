@@ -12,6 +12,8 @@ capabilities:
 - name: robonix/system/scene/list_objects
 - name: robonix/system/scene/get_robot_context
 - name: robonix/system/scene/list_regions
+- name: robonix/system/scene/list_outdoor_places
+- name: robonix/system/scene/preview_outdoor_place
 - name: robonix/system/scene/goal_near
 - name: robonix/system/scene/goal_region
 - name: robonix/system/scene/goal_room

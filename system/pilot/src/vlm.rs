@@ -690,6 +690,15 @@ impl VlmClient {
         // system prefix alive through the interactive task; compatibility
         // fallback below removes this optional field if a proxy rejects it.
         if let Some(body) = request_body.as_object_mut() {
+            if matches!(
+                self.api_base.as_str(),
+                "https://api.deepseek.com" | "https://api.deepseek.com/v1"
+            ) {
+                body.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({"type": "disabled"}),
+                );
+            }
             if let Some(effort) = &self.reasoning_effort {
                 body.insert(
                     "reasoning_effort".to_string(),

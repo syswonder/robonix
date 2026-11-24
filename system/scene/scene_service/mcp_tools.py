@@ -22,6 +22,7 @@ from .robot_geometry import RobotGeometryState
 
 if TYPE_CHECKING:
     from .annotations import Annotation, AnnotationStore
+    from .outdoor import OutdoorScene
 
 # Resolved at import time. PYTHONPATH is set by package_manifest.yaml's
 # `start:` block to include rbnx-build/codegen/{proto_gen,robonix_mcp_types}.
@@ -53,6 +54,11 @@ from semantic_map_mcp import (  # type: ignore
     Find_Response,
     ListRegions_Request,
     ListRegions_Response,
+    ListOutdoorPlaces_Request,
+    ListOutdoorPlaces_Response,
+    OutdoorPlace,
+    PreviewOutdoorPlace_Request,
+    PreviewOutdoorPlace_Response,
     ListRelations_Request,
     ListRelations_Response,
     Object,
@@ -75,6 +81,8 @@ _MAP_BINDING: dict = {}
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
 _SG_STORE: SceneGraphStore | None = None
 _ANNO_STORE: "AnnotationStore | None" = None
+_OUTDOOR: "OutdoorScene | None" = None
+_OUTDOOR_LOOP: asyncio.AbstractEventLoop | None = None
 _OBJECT_MUTATIONS: "ObjectMutationCoordinator | None" = None
 _ROBOT_GEOMETRY: RobotGeometryState | None = None
 
@@ -237,6 +245,19 @@ def attach_scene_graph_store(store: SceneGraphStore) -> None:
 def attach_annotation_store(store: "AnnotationStore | None") -> None:
     global _ANNO_STORE
     _ANNO_STORE = store
+
+
+def attach_outdoor(outdoor: "OutdoorScene | None") -> None:
+    global _OUTDOOR, _OUTDOOR_LOOP
+    _OUTDOOR_LOOP = asyncio.get_running_loop() if outdoor is not None else None
+    _OUTDOOR = outdoor
+
+
+async def _on_outdoor_loop(coroutine):
+    loop = _OUTDOOR_LOOP
+    if loop is None or loop is asyncio.get_running_loop():
+        return await coroutine
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, loop))
 
 
 def attach_object_mutations(
@@ -592,6 +613,32 @@ async def list_regions(_req: ListRegions_Request) -> ListRegions_Response:
         ],
         map_id=_ANNO_STORE.map_id,
         stamp_unix=time.time(),
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/list_outdoor_places")
+async def list_outdoor_places(req: ListOutdoorPlaces_Request) -> ListOutdoorPlaces_Response:
+    """For named outdoor navigation, look up the exact user-marked name on the current map. If no match or stale, explain; if multiple matches, ask the user to clarify. For one valid match call preview_outdoor_place with its ID and this map identity."""
+    if _OUTDOOR is None:
+        raise RuntimeError("Outdoor Scene is unavailable")
+    snapshot, places = await _on_outdoor_loop(_OUTDOOR.list_places(req.name))
+    return ListOutdoorPlaces_Response(
+        map_id=snapshot["map_id"], version=snapshot["version"],
+        places=[OutdoorPlace(id=p.annotation_id, name=p.name, stale=p.stale, stale_reason=p.stale_reason)
+                for p in places],
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/preview_outdoor_place")
+async def preview_outdoor_place(req: PreviewOutdoorPlace_Request) -> PreviewOutdoorPlace_Response:
+    """Plan and display the route to a named place in Outdoor Scene. For requests to navigate outdoors, use this as the final action after looking up the place, then report the destination and route length in the user's language. This is preview only. Do not ask for confirmation, call motion tools, or claim the robot has moved."""
+    if _OUTDOOR is None:
+        raise RuntimeError("Outdoor Scene is unavailable")
+    route = await _on_outdoor_loop(_OUTDOOR.preview_place(req.map_id, req.version, req.place_id))
+    return PreviewOutdoorPlace_Response(
+        place_name=route["place_name"], length_m=route["length_m"],
+        goal_x=route["goal"]["x"], goal_y=route["goal"]["y"], simulated_start=route["simulated_start"],
+        detail="Route shown in Outdoor Scene. Preview only; no movement or execution confirmation.",
     )
 
 

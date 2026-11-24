@@ -31,6 +31,7 @@ Common configuration:
 - `--listen` / `ROBONIX_PILOT_LISTEN`: Pilot gRPC listen address. Defaults to `127.0.0.1:50071`.
 - `--id` / `ROBONIX_PILOT_PROVIDER_ID`: Pilot provider id registered with Atlas. Defaults to `pilot`.
 - `--vlm-upstream` / `ROBONIX_VLM_UPSTREAM`: OpenAI-compatible API base URL.
+  Direct DeepSeek requests disable thinking so tool calls can continue without replaying reasoning content.
 - `--vlm-api-key` / `ROBONIX_VLM_API_KEY`: VLM API key.
 - `--vlm-model` / `ROBONIX_VLM_MODEL`: VLM model name.
 - `--vlm-reasoning-effort` / `ROBONIX_VLM_REASONING_EFFORT`: optional reasoning effort sent to the model API.

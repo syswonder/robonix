@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/scene/preview_outdoor_place"
+version = "1"
+kind = "service"
+idl = "semantic_map/srv/PreviewOutdoorPlace.srv"
+description = "Preview a user-marked outdoor place by ID and publish the route in Scene without moving the robot."
+
+[mode]
+type = "rpc"

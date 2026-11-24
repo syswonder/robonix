@@ -40,7 +40,7 @@ cargo install --force --path tools/rbnx --bin rbnx
 | `rbnx inspect`            | Dump atlas state for debugging                         |
 | `rbnx codegen [--mcp]`    | Generate proto + MCP type stubs for a package          |
 | `rbnx chat`               | Interactive TUI chat with the pilot                    |
-| `rbnx ask "..."`          | Single-turn task submission; `--session ID` continues or steers a session |
+| `rbnx ask "..."`          | Single-turn task submission with tool progress and the final reply; `--session ID` continues or steers a session |
 | `rbnx path KEY`           | Resolve a registered source path (root / capabilities / interfaces-lib / runtime-proto / robonix-api) |
 | `rbnx setup [PATH]`       | Register a robonix source tree at `PATH`               |
 | `rbnx clean`              | Remove per-package build artefacts                     |
@@ -72,6 +72,14 @@ them.
 `llm_callable = false`; `rbnx contracts` still lists those contracts and marks
 them `pilot-hidden`, because they remain registered and callable by system
 consumers.
+
+For built-in Pilot, set `system.pilot.vlm.upstream` and `system.pilot.vlm.model`
+in the deployment manifest, and provide `ROBONIX_VLM_API_KEY` in the boot
+environment. Legacy `vlm.api_key` is accepted but forwarded via the child's
+environment, not in command-line arguments.
+
+Deployment `status` values can reference exported environment variables.
+Use `!env-bool VARIABLE` for a config boolean supplied as `true` or `false`.
 
 ### What a boot leaves behind
 

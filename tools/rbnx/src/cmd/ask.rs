@@ -72,6 +72,7 @@ pub async fn execute(
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut last_was_chunk = false;
+    let mut streamed_text = String::new();
     let mut had_failure = false;
 
     while let Some(event) = stream.next().await {
@@ -135,8 +136,10 @@ pub async fn execute(
                     continue;
                 }
                 if !last_was_chunk {
+                    streamed_text.clear();
                     write!(out, "\n[agent] ")?;
                 }
+                streamed_text.push_str(&chunk);
                 write!(out, "{chunk}")?;
                 out.flush()?;
                 last_was_chunk = true;
@@ -210,7 +213,15 @@ pub async fn execute(
                 }
             }
             EVT_FINAL_TEXT => {
-                // text_chunk events already streamed the full text.
+                if !event.final_text.is_empty() && event.final_text != streamed_text {
+                    if last_was_chunk {
+                        writeln!(out)?;
+                        last_was_chunk = false;
+                    }
+                    writeln!(out, "[agent] {}", event.final_text)?;
+                    out.flush()?;
+                }
+                streamed_text.clear();
             }
             _ => {}
         }

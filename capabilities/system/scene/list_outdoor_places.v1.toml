@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/system/scene/list_outdoor_places"
+version = "1"
+kind = "service"
+idl = "semantic_map/srv/ListOutdoorPlaces.srv"
+description = "Find user-marked places by exact name on the active outdoor map. Use before preview_outdoor_place."
+
+[mode]
+type = "rpc"

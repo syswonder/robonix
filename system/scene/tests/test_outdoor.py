@@ -142,6 +142,70 @@ def test_collision_and_external_version_change_hide_stale_semantics(scene):
     assert client.post('/api/annotations',json=dict(kind='poi',name='blocked',points=[[2.,0.]])).status_code==400
 
 
+@pytest.mark.parametrize(("name", "goal_x"), [("快递点", 4.0), ("北门访客入口", 2.0)])
+def test_pilot_named_place_preview_is_visible_but_cannot_execute(scene, monkeypatch, name, goal_x):
+    from scene_service import map_clients, mcp_tools
+
+    client, backend, _, annotations, _ = scene
+    assert client.post("/api/maps/load", json={"map_id": "outside"}).status_code == 200
+    monkeypatch.setattr(mcp_tools, "_OUTDOOR", client.app.state.outdoor)
+    monkeypatch.setattr(client.app.state.outdoor, "preview_from_road_start", True)
+    request = mcp_tools.ListOutdoorPlaces_Request(name=f" {name} ")
+    assert not asyncio.run(mcp_tools.list_outdoor_places(request)).places
+    saved = client.post("/api/regions", json={"kind": "poi", "name": name, "points": [[goal_x, 0.0]],
+                                              "map_id": "outside", "version": "v1"})
+    assert saved.status_code == 200, saved.text
+    place_id = saved.json()["annotation"]["annotation_id"]
+    goal = {"x": goal_x, "y": 0.0}
+
+    original = map_clients.call
+
+    def call(namespace, operation, payload, timeout, provider):
+        if operation != "plan_route":
+            return original(namespace, operation, payload, timeout, provider)
+        assert payload["start"] == {"x": 0.0, "y": 0.0}
+        assert payload["goal"] == goal
+        return dict(ok=True, map_id="outside", version="v1", goal=payload["goal"],
+                    reference_path=[payload["start"], payload["goal"]], length_m=goal_x)
+
+    monkeypatch.setattr(map_clients, "call", call)
+    result = asyncio.run(mcp_tools.list_outdoor_places(request))
+    assert [found.id for found in result.places] == [place_id]
+    preview = asyncio.run(mcp_tools.preview_outdoor_place(mcp_tools.PreviewOutdoorPlace_Request(
+        map_id=result.map_id, version=result.version, place_id=result.places[0].id)))
+    assert preview.simulated_start and preview.length_m == goal_x
+    shown = client.get("/api/outdoor/state").json()["place_preview"]
+    assert shown["reference_path"][-1] == goal
+    assert "preview_id" not in shown
+    assert client.post("/api/outdoor/execute", json={}).status_code == 400
+    annotations.update(place_id, points=[[3.0, 0.0]])
+    assert client.get("/api/outdoor/state").json()["place_preview"] is None
+    backend["map"]["version"] = "v2"
+    with pytest.raises(ValueError, match="Outdoor map changed"):
+        asyncio.run(mcp_tools.preview_outdoor_place(mcp_tools.PreviewOutdoorPlace_Request(
+            map_id=result.map_id, version=result.version, place_id=place_id)))
+
+
+def test_pilot_outdoor_calls_use_scene_loop(monkeypatch):
+    from types import SimpleNamespace
+    from anyio.from_thread import start_blocking_portal
+    from scene_service import mcp_tools
+
+    monkeypatch.setattr(mcp_tools, "_OUTDOOR", None)
+    monkeypatch.setattr(mcp_tools, "_OUTDOOR_LOOP", None)
+
+    async def list_places(name):
+        assert name == "快递点"
+        assert asyncio.get_running_loop() is scene_loop
+        return {"map_id": "outside", "version": "v1"}, []
+
+    with start_blocking_portal() as portal:
+        scene_loop = portal.call(asyncio.get_running_loop)
+        portal.call(mcp_tools.attach_outdoor, SimpleNamespace(list_places=list_places))
+        result = asyncio.run(mcp_tools.list_outdoor_places(mcp_tools.ListOutdoorPlaces_Request(name="快递点")))
+    assert result.map_id == "outside"
+
+
 def test_costmap_http_facade_is_read_only_and_failures_are_independent(scene):
     import sys
     from pathlib import Path

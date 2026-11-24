@@ -699,6 +699,7 @@ async def _start_ros_ingest(
     rest as they appear; explicit `observations` skip both.
     """
     explicit = config.get("observations") or []
+    discover = not explicit and config.get("auto_discover_observations", True)
     transport = str(config.get("transport") or "ros2")
     camera_provider_id = str(config.get("camera_provider_id") or "").strip()
     if camera_provider_id:
@@ -706,8 +707,9 @@ async def _start_ros_ingest(
             "[scene] RGB-D camera pinned to provider %s",
             camera_provider_id,
         )
-    specs = _build_topic_specs(explicit, atlas_stub, transport, camera_provider_id)
-    if not specs and not explicit:
+    specs = (_build_topic_specs(explicit, atlas_stub, transport, camera_provider_id)
+             if explicit or discover else [])
+    if not specs and discover:
         attempt = 0
         while not specs:
             attempt += 1
@@ -759,7 +761,7 @@ async def _start_ros_ingest(
 
     # The camera often registers after the chassis; give it a bounded wait so
     # the RGB-D path is not lost to a startup race.
-    perception_wait_s = (0. if perception_config(config).profile == "annotate" else
+    perception_wait_s = (0. if not (explicit or discover) or perception_config(config).profile == "annotate" else
                          float(os.environ.get("SCENE_PERCEPTION_WAIT_S", "30")))
     deadline = time.time() + perception_wait_s
     while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
@@ -1754,7 +1756,10 @@ async def _run_active(config: dict) -> None:
             ),
             name="scene-lifecycle-watch",
         ),
-        asyncio.create_task(
+        *ingest_bg,
+    ]
+    if config.get("auto_discover_observations", True) and not config.get("observations"):
+        bg_tasks.append(asyncio.create_task(
             _auto_discover_loop(
                 atlas_stub=stub,
                 hub=hub,
@@ -1763,9 +1768,7 @@ async def _run_active(config: dict) -> None:
                 camera_provider_id=str(config.get("camera_provider_id") or "").strip(),
             ),
             name="scene-auto-discover",
-        ),
-        *ingest_bg,
-    ]
+        ))
     for _t in bg_tasks:
         _t.add_done_callback(_log_bg_task_exit)
 
@@ -1908,9 +1911,11 @@ async def _run_active(config: dict) -> None:
             object_views=object_views,
             map_providers=config.get("map_providers"),
             outdoor_navigation=config.get("outdoor_navigation"),
+            outdoor_preview_from_road_start=config.get("outdoor_preview_from_road_start", False),
             camera_viewer_port=config.get("camera_viewer_port", 0),
             camera_battery_port=config.get("camera_battery_port", 0),
         )
+        mcp_tools.attach_outdoor(getattr(web_app.state, "outdoor", None))
         web_uv = uvicorn.Config(
             app=web_app,
             host=web_host,

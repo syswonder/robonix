@@ -25,6 +25,10 @@ capabilities:
     transport: mcp
   - name: robonix/system/scene/list_regions
     transport: mcp
+  - name: robonix/system/scene/list_outdoor_places
+    transport: mcp
+  - name: robonix/system/scene/preview_outdoor_place
+    transport: mcp
   - name: robonix/system/scene/goal_near
     transport: mcp
   - name: robonix/system/scene/goal_region

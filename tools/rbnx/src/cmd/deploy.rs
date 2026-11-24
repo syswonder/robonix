@@ -370,6 +370,15 @@ stop: "true"
     }
 
     #[test]
+    fn pilot_key_is_omitted_from_all_child_arguments() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("vlm: {api_key: test-secret, model: example}").unwrap();
+        let args = system_cli_args("pilot", Some(&cfg), None);
+        assert!(!args.iter().any(|arg| arg.contains("test-secret")));
+        assert!(!args.iter().any(|arg| arg.contains("api_key")));
+    }
+
+    #[test]
     fn pilot_receives_optional_reasoning_effort() {
         for effort in [None, Some("high")] {
             let cfg: serde_yaml::Value =
@@ -486,18 +495,17 @@ soma_endpoint: 127.0.0.1:50091
         let known = vec![
             "--vlm-upstream".into(),
             "https://api.example/v1".into(),
-            "--vlm-api-key".into(),
-            "test-key".into(),
             "--vlm-model".into(),
             "gpt-4o".into(),
         ];
-        assert!(require_system_args("pilot", &known).is_ok());
+        assert!(require_system_args("pilot", &known, false).is_err());
+        assert!(require_system_args("pilot", &known, true).is_ok());
 
         let mut unknown = known.clone();
-        unknown[5] = "private-local-planner".into();
-        assert!(require_system_args("pilot", &unknown).is_ok());
+        unknown[3] = "private-local-planner".into();
+        assert!(require_system_args("pilot", &unknown, true).is_ok());
         unknown.extend(["--vlm-context-window-tokens".into(), "32768".into()]);
-        assert!(require_system_args("pilot", &unknown).is_ok());
+        assert!(require_system_args("pilot", &unknown, true).is_ok());
         assert!(system_boot_detail("pilot", &unknown).contains("context=32768 (manual)"));
     }
 }
@@ -943,12 +951,16 @@ async fn spawn_system_binary(
     name: &str,
     bin: &str,
     args: &[String],
+    pilot_api_key: Option<&str>,
 ) -> Result<Spawned> {
     // Run the installed binary directly.  Stdout / stderr are piped
     // through Scribe (tag = binary name, e.g. "executor") so nothing
     // escapes to the terminal.  Structured logs from within the binary
     // also go through Scribe via the `log` facade auto-init.
     let mut cmd = Command::new(bin);
+    if let Some(key) = pilot_api_key {
+        cmd.env("ROBONIX_VLM_API_KEY", key);
+    }
     for a in args {
         cmd.arg(a);
     }
@@ -991,7 +1003,7 @@ async fn spawn_system_binary(
         }
     });
     // Salient detail per builtin: port + role, redact long flag soup
-    // (--capabilities path lists, --vlm-api-key, …). Full args are
+    // (such as --capabilities path lists). Full args are
     // available in the log file; the boot line stays terse so users
     // can scan the bring-up sequence at a glance.
     let detail = system_boot_detail(name, args);
@@ -1626,6 +1638,15 @@ pub async fn execute(
                 if !deploy.system.contains_key(*name) {
                     continue;
                 }
+                let pilot_api_key = if *name == "pilot" {
+                    deploy
+                        .system
+                        .get(*name)
+                        .and_then(|cfg| cfg["vlm"]["api_key"].as_str())
+                        .filter(|key| !key.trim().is_empty())
+                } else {
+                    None
+                };
                 let mut args =
                     system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
                 if *name == "vitals"
@@ -1672,7 +1693,11 @@ pub async fn execute(
                 // required field 'vlm.upstream'`. Boot still printed `[ OK ]`
                 // because we never re-checked. Fail fast at spawn time and tell
                 // the user exactly what's missing.
-                if let Err(e) = require_system_args(name, &args) {
+                let has_api_key = *name == "pilot"
+                    && (pilot_api_key.is_some()
+                        || std::env::var("ROBONIX_VLM_API_KEY")
+                            .is_ok_and(|key| !key.trim().is_empty()));
+                if let Err(e) = require_system_args(name, &args, has_api_key) {
                     output::boot_fail(name, &e);
                     anyhow::bail!("system/{name}: {e}");
                 }
@@ -1684,7 +1709,8 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args).await?
+                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, pilot_api_key)
+                        .await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2120,16 +2146,22 @@ fn persist_state(
 /// with `missing required field 'vlm.upstream'`, and boot reports
 /// `[ OK ]` because the failure happens after spawn-and-register. Catch
 /// it here so the user sees a `[FAIL]` line naming the bad keys.
-fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), String> {
+fn require_system_args(
+    name: &str,
+    args: &[String],
+    has_api_key: bool,
+) -> std::result::Result<(), String> {
     if name != "pilot" {
         return Ok(());
     }
     let need = [
         ("--vlm-upstream", "vlm.upstream / VLM_BASE_URL"),
-        ("--vlm-api-key", "vlm.api_key / VLM_API_KEY"),
         ("--vlm-model", "vlm.model / VLM_MODEL"),
     ];
     let mut missing: Vec<&str> = Vec::new();
+    if !has_api_key {
+        missing.push("ROBONIX_VLM_API_KEY");
+    }
     for (flag, label) in need {
         let val = args
             .iter()
@@ -2142,9 +2174,8 @@ fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), S
     }
     if !missing.is_empty() {
         return Err(format!(
-            "missing required pilot config: {}. Set in manifest under \
-             system: pilot: vlm: {{...}} or via env (source your .zshrc / \
-             inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
+            "missing required pilot config: {}. Set upstream and model under \
+             system.pilot.vlm and supply the key via ROBONIX_VLM_API_KEY",
             missing.join(", "),
         ));
     }
@@ -2269,11 +2300,17 @@ fn system_cli_args(
     // robonix_scribe::init_from_config), so new manifest keys flow through
     // without per-key plumbing here. The typed flags below remain for the
     // fields binaries still read individually.
-    if let Some(v) = cfg
-        && let Ok(json) = serde_json::to_string(v)
-    {
-        out.push("--config-json".into());
-        out.push(json);
+    if let Some(v) = cfg {
+        let mut sanitized = v.clone();
+        if name == "pilot"
+            && let Some(vlm) = sanitized.get_mut("vlm").and_then(|v| v.as_mapping_mut())
+        {
+            vlm.remove("api_key");
+        }
+        if let Ok(json) = serde_json::to_string(&sanitized) {
+            out.push("--config-json".into());
+            out.push(json);
+        }
     }
 
     let s = |k: &str| -> Option<String> {
@@ -2335,7 +2372,6 @@ fn system_cli_args(
             push_pair(&mut out, "--log", s("log"));
             // Embedded VLM block.
             push_pair(&mut out, "--vlm-upstream", nested_str("vlm", "upstream"));
-            push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
             push_pair(
                 &mut out,

@@ -61,7 +61,7 @@ pub const SYSTEM_REQUIRED: &[&str] = &["atlas", "executor", "soma"];
 pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
     match entry.get("status") {
         None => Ok(false),
-        Some(v) => match v.as_str() {
+        Some(v) => match v.as_str().map(expand_deployment_env).as_deref() {
             Some("enabled") => Ok(false),
             Some("disabled") => Ok(true),
             _ => anyhow::bail!("{at}: status must be `enabled` or `disabled`, not {v:?}"),
@@ -142,7 +142,7 @@ pub fn prepare_deployment_manifest(
     for (key, value) in expanded {
         unsafe { std::env::set_var(key, value) };
     }
-    expand_deployment_yaml(&mut root);
+    expand_deployment_yaml(&mut root)?;
     drop_disabled(&mut root)?;
     Ok(root)
 }
@@ -282,21 +282,34 @@ pub fn split_system_package_config(
     Ok((manifest, serde_yaml::Value::Mapping(fields)))
 }
 
-fn expand_deployment_yaml(value: &mut serde_yaml::Value) {
+fn expand_deployment_yaml(value: &mut serde_yaml::Value) -> Result<()> {
     match value {
         serde_yaml::Value::String(s) => *s = expand_deployment_env(s),
+        serde_yaml::Value::Tagged(tagged) if tagged.tag == "!env-bool" => {
+            let name = tagged
+                .value
+                .as_str()
+                .context("!env-bool requires an environment variable name")?;
+            let flag = match std::env::var(name).as_deref() {
+                Ok("true") => true,
+                Ok("false") => false,
+                _ => anyhow::bail!("{name} must be true or false"),
+            };
+            *value = serde_yaml::Value::Bool(flag);
+        }
         serde_yaml::Value::Sequence(sequence) => {
             for item in sequence {
-                expand_deployment_yaml(item);
+                expand_deployment_yaml(item)?;
             }
         }
         serde_yaml::Value::Mapping(mapping) => {
             for (_, item) in mapping.iter_mut() {
-                expand_deployment_yaml(item);
+                expand_deployment_yaml(item)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -771,6 +784,22 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deployment_variables_select_entries_and_supply_boolean_config() {
+        let root = serde_yaml::from_str(
+            "env:\n  RBNX_TEST_HARDWARE_STATUS: disabled\n  RBNX_TEST_PLANNING_ONLY: 'true'\n\
+             primitive:\n  - {name: hardware, status: '${RBNX_TEST_HARDWARE_STATUS}'}\n\
+             service:\n  - name: map\n    config:\n      planning_only: !env-bool RBNX_TEST_PLANNING_ONLY\n",
+        )
+        .unwrap();
+        let prepared = prepare_deployment_manifest(root, None).unwrap();
+        assert!(prepared["primitive"].as_sequence().unwrap().is_empty());
+        assert_eq!(
+            prepared["service"][0]["config"]["planning_only"].as_bool(),
+            Some(true)
+        );
+    }
+
     #[test]
     fn disabled_entries_leave_the_deployment_and_say_so() {
         let mut root: serde_yaml::Value = serde_yaml::from_str(

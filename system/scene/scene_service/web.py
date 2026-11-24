@@ -743,7 +743,8 @@ def make_app(*, registry: ObjectRegistry,
              map_providers: Optional[dict] = None,
              camera_viewer_port: int = 0,
              camera_battery_port: int = 0,
-             outdoor_navigation: Optional[dict] = None) -> Starlette:
+             outdoor_navigation: Optional[dict] = None,
+             outdoor_preview_from_road_start: bool = False) -> Starlette:
     """The Scene web app: the pages, /api/state, region CRUD and the map
     library façade over robonix/service/map.
 
@@ -775,11 +776,12 @@ def make_app(*, registry: ObjectRegistry,
     from .outdoor import OutdoorScene
     clients = MapClients(map_providers)
     navigation = None
-    if outdoor_navigation:
+    if outdoor_navigation and not outdoor_preview_from_road_start:
         from outdoor_nav.scene import SceneNavigation
         navigation = SceneNavigation(**outdoor_navigation)
     outdoor = OutdoorScene(clients, map_binding, anno_store, map_meta,
-                           registry, ops_lock, semantic_hold, navigation=navigation)
+                           registry, ops_lock, semantic_hold, navigation=navigation,
+                           preview_from_road_start=outdoor_preview_from_road_start)
     # Retain the default facade for existing single-provider deployments/tests.
     def _map_rpc(op, payload=None, timeout_s=20.0):
         if map_providers:
@@ -2015,7 +2017,10 @@ def make_app(*, registry: ObjectRegistry,
                 with suppress(asyncio.CancelledError):
                     await task
 
-    return Starlette(routes=routes, middleware=[Middleware(_JsonPostsOnly)], lifespan=lifespan)
+    app = Starlette(routes=routes, middleware=[Middleware(_JsonPostsOnly)], lifespan=lifespan)
+    if map_providers and "outdoor" in map_providers:
+        app.state.outdoor = outdoor
+    return app
 
 
 class _JsonPostsOnly:

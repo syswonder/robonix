@@ -895,6 +895,8 @@ The map toolbar's satellite button fetches Esri World Imagery tiles for the rout
 
 Choose **Mark place**, click the map, and enter a name beside the point. Saved places display their names and persist with that map. In **View**, click a place to inspect its coordinates, rename or reposition it, delete it, or choose **Plan**. Editing uses the same name field; click the map to change the position before saving. In **Plan**, select a place on the map or under **Existing destinations**, then preview the route before confirming execution. Place destinations must be within 2 m of a surveyed road.
 
+Pilot can look up an exact place name on the active outdoor map with `list_outdoor_places` and call `preview_outdoor_place` using the returned map identity and place ID. The route appears in Outdoor Scene for two minutes or until the map or place changes. This preview cannot start navigation. Set `outdoor_preview_from_road_start: true` in Scene to preview from the first surveyed point of whichever outdoor map the operator loads, without a live pose.
+
 Temporary start and goal markers and route previews appear only in **Plan**. Switching tabs preserves the selection so planning can continue when returning.
 
 For native ROS manual annotation without perception models, build with `bash scripts/build_annotate.sh` and select `package_manifest.annotate-native.yaml` in the deployment. Set `ROS_SETUP` for a nonstandard ROS installation. Keep `rbnx-build/data` persistent. The default web host is loopback; use SSH forwarding for access from a laptop. This profile uses `web_viewer: off` and the outdoor SVG page; the existing indoor Rerun deployment remains available.

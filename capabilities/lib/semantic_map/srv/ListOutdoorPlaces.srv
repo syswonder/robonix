@@ -1,0 +1,5 @@
+string name
+---
+string map_id
+string version
+OutdoorPlace[] places

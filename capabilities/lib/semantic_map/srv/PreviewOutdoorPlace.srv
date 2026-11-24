@@ -1,0 +1,10 @@
+string map_id
+string version
+string place_id
+---
+string place_name
+float64 length_m
+float64 goal_x
+float64 goal_y
+bool simulated_start
+string detail

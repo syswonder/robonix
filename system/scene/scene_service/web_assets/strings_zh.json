@@ -191,6 +191,8 @@
   "outdoor.chooseStart": "在地图上选择起点",
   "outdoor.usePosition": "使用当前位置",
   "outdoor.preview": "预览路线",
+  "outdoor.placePreview": "Pilot 路线预览",
+  "outdoor.simulatedPlacePreview": "Pilot 路线预览（模拟起点）",
   "outdoor.start": "起点",
   "outdoor.goal": "终点",
   "outdoor.current": "当前 GNSS 位置",

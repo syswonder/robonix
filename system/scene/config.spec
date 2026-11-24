@@ -544,6 +544,12 @@ properties:
 
   # ═══ 2. Occasionally, continued ═══════════════════════════════════════════
 
+  outdoor_preview_from_road_start:
+    type: boolean
+    default: false
+    x-group: Map binding
+    description: Start Pilot outdoor previews at the first surveyed road point of the active map, without using robot localization.
+
   map_providers:
     type: object
     x-group: Map binding
@@ -621,6 +627,12 @@ properties:
   # These describe the sensor path, which Atlas normally resolves on its own.
   # Setting them is how a deployment overrides that discovery; it is not part
   # of a normal manifest.
+
+  auto_discover_observations:
+    type: boolean
+    default: true
+    x-group: Sensor overrides
+    description: Discover observation providers when no explicit observations are configured.
 
   observations:
     type: array

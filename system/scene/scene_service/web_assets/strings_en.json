@@ -191,6 +191,8 @@
   "outdoor.chooseStart": "Select start on map",
   "outdoor.usePosition": "Use current position",
   "outdoor.preview": "Preview route",
+  "outdoor.placePreview": "Pilot route preview",
+  "outdoor.simulatedPlacePreview": "Pilot preview (simulated start)",
   "outdoor.start": "Start",
   "outdoor.goal": "Goal",
   "outdoor.current": "Current GNSS position",
