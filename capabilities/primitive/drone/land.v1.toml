@@ -1,0 +1,10 @@
+# Land in place.
+[contract]
+id      = "robonix/primitive/drone/land"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/Land.srv"
+description = "Land in place."
+
+[mode]
+type = "rpc"

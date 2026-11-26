@@ -1,0 +1,10 @@
+# Query the control capabilities currently available on the drone (dynamic discovery).
+[contract]
+id      = "robonix/primitive/drone/list_capabilities"
+version = "1"
+kind    = "primitive"
+idl     = "drone/srv/ListCapabilities.srv"
+description = "Query the control capabilities currently available on the drone (name/parameters/description), for dynamic discovery and use with invoke."
+
+[mode]
+type = "rpc"
