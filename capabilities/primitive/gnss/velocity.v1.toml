@@ -1,0 +1,12 @@
+# Receiver-reported ground velocity in local ENU: x=east, y=north (m/s).
+# Providers publish only fresh receiver velocity samples; absence means the
+# velocity is unknown, not zero.
+[contract]
+id      = "robonix/primitive/gnss/velocity"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/geometry_msgs/msg/TwistStamped.msg"
+description = "Receiver-reported horizontal ground velocity in local ENU (frame gnss_enu, x=east, y=north), published only for fresh samples."
+
+[mode]
+type = "topic_out"
