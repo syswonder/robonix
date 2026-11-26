@@ -776,11 +776,11 @@ pub(super) fn prepare_manifest(
     root: serde_yaml::Value,
     robonix_source_path: Option<&Path>,
 ) -> Result<serde_yaml::Value> {
-    let mut root = root;
-    for entry in robonix_cli::manifest::drop_disabled(&mut root)? {
+    let skipped = robonix_cli::manifest::disabled_entry_names(&root)?;
+    let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
+    for entry in skipped {
         output::boot_skip(&entry, "disabled");
     }
-    let prepared = robonix_cli::manifest::prepare_deployment_manifest(root, robonix_source_path)?;
     robonix_cli::manifest::validate_deployment_instance_names(&prepared)?;
     Ok(prepared)
 }

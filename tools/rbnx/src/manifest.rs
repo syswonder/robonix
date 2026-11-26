@@ -69,6 +69,46 @@ pub fn entry_disabled(entry: &serde_yaml::Value, at: &str) -> Result<bool> {
     }
 }
 
+/// Name entries a deployment marks `status: disabled`, after expanding
+/// environment placeholders. Boot reports these before dropping them; the
+/// drop itself happens in [`prepare_deployment_manifest`] so a placeholder
+/// is resolved before its value is validated.
+pub fn disabled_entry_names(root: &serde_yaml::Value) -> Result<Vec<String>> {
+    let mut expanded = root.clone();
+    expand_deployment_yaml(&mut expanded);
+    let mut names = Vec::new();
+    let Some(map) = expanded.as_mapping() else {
+        return Ok(names);
+    };
+    for section in ["primitive", "service", "skill"] {
+        let Some(entries) = map.get(section).and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            let at = format!("{section}[{i}]");
+            if entry_disabled(entry, &at)? {
+                names.push(format!(
+                    "{section} {}",
+                    entry.get("name").and_then(|n| n.as_str()).unwrap_or(&at)
+                ));
+            }
+        }
+    }
+    if let Some(system) = map.get("system").and_then(|v| v.as_mapping()) {
+        for (key, entry) in system {
+            let name = key.as_str().unwrap_or_default();
+            let at = format!("system.{name}");
+            if entry_disabled(entry, &at)? {
+                if SYSTEM_REQUIRED.contains(&name) {
+                    anyhow::bail!("{at}: atlas, executor and soma cannot be disabled");
+                }
+                names.push(format!("system {name}"));
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// Take the entries marked `status: disabled` out of a deployment, and
 /// name them. [`prepare_deployment_manifest`] does this, so rbnx and soma
 /// both see the deployment without them; rbnx calls it first to report them. A disabled entry stays in the file, `url`, `branch` and
@@ -1139,5 +1179,19 @@ primitive:
         .unwrap_err()
         .to_string();
         assert!(error.contains("never both"));
+    }
+    #[test]
+    fn disabled_status_is_expanded_before_validation() {
+        // Safety: this test is the only user of the variable in this process.
+        unsafe { std::env::set_var("RBNX_TEST_STATUS", "disabled") };
+        let raw: serde_yaml::Value = serde_yaml::from_str(
+            "name: t\nprimitive:\n- name: a\n  path: a\n  status: ${RBNX_TEST_STATUS}\n- name: b\n  path: b\n  status: enabled\n",
+        )            .unwrap();
+        assert_eq!(
+            disabled_entry_names(&raw).unwrap(),
+            vec!["primitive a".to_string()]
+        );
+        let prepared = prepare_deployment_manifest(raw, None).unwrap();
+        assert_eq!(prepared["primitive"].as_sequence().unwrap().len(), 1);
     }
 }
