@@ -1,0 +1,12 @@
+# NavSatFix for the GNSS antenna. Providers publish one sample per receiver
+# navigation solution, including STATUS_NO_FIX with NaN coordinates when no
+# solution is available. Altitude is metres above the WGS 84 ellipsoid.
+[contract]
+id      = "robonix/primitive/gnss/fix"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/NavSatFix.msg"
+description = "GNSS antenna position in WGS 84 with receiver-reported covariance; altitude is above the ellipsoid and invalid samples use STATUS_NO_FIX with NaN coordinates."
+
+[mode]
+type = "topic_out"

@@ -1,0 +1,13 @@
+# Receiver status as a JSON object in String.data, published at least once per
+# second including while no position solution exists. Required keys, the state
+# enum and null semantics are defined by the GNSS interface catalog; providers
+# may add fields without changing the required ones.
+[contract]
+id      = "robonix/primitive/gnss/rtk_status"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/std_msgs/msg/String.msg"
+description = "GNSS receiver status as a JSON object in String.data, including fix quality, input ages and RTK correction state."
+
+[mode]
+type = "topic_out"
