@@ -1,0 +1,1117 @@
+--- a/utils/object_detector.py
++++ b/utils/object_detector.py
+@@ -10,24 +10,28 @@
+ import cv2
+ import numpy as np
+ import open3d as o3d
+-import open_clip
+ import supervision as sv
+-import torch
+ from omegaconf import DictConfig
+-from PIL import Image
+ from scipy.spatial.transform import Rotation as R
+ from scipy.spatial.transform import Slerp
+ from sklearn.metrics.pairwise import cosine_similarity
+-from ultralytics import SAM, YOLO, FastSAM
+ 
+ from utils.pcd_utils import (
+-    mask_depth_to_points,
+     refine_points_with_clustering,
+     safe_create_bbox,
+ )
+ from utils.time_utils import timing_context
+ from utils.types import DataInput, LocalObservation, ObjectClasses
+ from utils.visualizer import ReRunVisualizer, visualize_result_rgb
++
++def _mask_intersections(left, right):
++    # Count booleans without retaining full-resolution float copies of either stack.
++    result = np.empty((len(left), len(right)), dtype=np.float32)
++    for i, mask in enumerate(left):
++        for j, other in enumerate(right):
++            result[i, j] = np.count_nonzero(mask & other)
++    return result
++
+ 
+ # Set up the module-level logger
+ logger = logging.getLogger(__name__)
+@@ -76,6 +80,7 @@
+     def __init__(
+         self,
+         cfg: DictConfig,
++        inference=None,
+     ) -> None:
+         """
+         Initialize the Detector class.
+@@ -105,6 +110,8 @@
+ 
+         # Configs
+         self.cfg = cfg
++        self.inference = inference
++        self.clip_model = self.clip_tokenizer = self.clip_preprocess = None
+         # Detection results
+         # NOTICE: Detection results are stored in Batch, it is not separated by objects
+         self.curr_results = {}
+@@ -142,88 +149,31 @@
+ 
+         logger.info(f"[Detector][Init] Initilizating detection modules...")
+ 
++        if cfg.run_detection and inference is None:
++            from scene_service.ingest.perception_torch import TorchPerception
++
++            inference = self.inference = TorchPerception(
++                self.obj_classes.get_classes_arr(), cfg.yolo.model_path, cfg.sam.model_path,
++                cfg.clip.model_name, cfg.clip.pretrained, device=cfg.device,
++                fastsam_path=cfg.fastsam.model_path if cfg.use_fastsam else None)
++            # Preserve the standalone Core's direct text-query access.
++            self.clip_model = inference.clip
++            self.clip_tokenizer = inference.tokenizer
++            self.clip_preprocess = inference.preprocess
++
+         if cfg.run_detection:
+-            try:
+-                # CLIP module
+-                logger.info(
+-                    f"[Detector][Init] Loading CLIP model: {cfg.clip.model_name} with pretrained weights '{cfg.clip.pretrained}'"
+-                )
+-
+-                self.clip_model, _, self.clip_preprocess = (
+-                    open_clip.create_model_and_transforms(
+-                        cfg.clip.model_name, pretrained=cfg.clip.pretrained
+-                    )
+-                )
+-                self.clip_model = self.clip_model.to(cfg.device)
+-                self.clip_model.eval()
+-
+-                # Only reparameterize if the model is MobileCLIP
+-                if "MobileCLIP" in cfg.clip.model_name:
+-                    from mobileclip.modules.common.mobileone import reparameterize_model
+-
+-                    self.clip_model = reparameterize_model(self.clip_model)
+-
+-                self.clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
+-            except Exception as e:
+-                logger.error(f"[Detector][Init] Error loading CLIP model: {e}")
+-                return
+-
+-            try:
+-                # Detection module
+-                logger.info(
+-                    f"[Detector][Init] Loading YOLO model from\t{cfg.yolo.model_path}"
+-                )
+-                self.yolo = YOLO(cfg.yolo.model_path)
+-                self.yolo.set_classes(self.obj_classes.get_classes_arr())
+-            except Exception as e:
+-                logger.error(f"[Detector][Init] Error loading YOLO model: {e}")
+-                return
+-
+-            try:
+-                # Segmentation module
+-                logger.info(
+-                    f"[Detector][Init] Loading SAM model from\t{cfg.sam.model_path}"
+-                )
+-                self.sam = SAM(cfg.sam.model_path)
+-            except Exception as e:
+-                logger.error(f"[Detector][Init] Error loading SAM model: {e}")
+-                return
+-
+-            # Open fastsam for open vocabulary detection
+-            if cfg.use_fastsam:
+-                try:
+-                    logger.info(
+-                        f"[Detector][Init] Loading FastSAM model from\t{cfg.fastsam.model_path}"
+-                    )
+-                    self.fastsam = FastSAM(cfg.fastsam.model_path)
+-                except Exception as e:
+-                    logger.error(f"[Detector][Init] Error loading FASTSAM model: {e}")
+-                    return
+-
+             logger.info("[Detector][Init] Initializing high-low mobility classifier.")
+             lm_examples = cfg.lm_examples
+             hm_examples = cfg.hm_examples
+             lm_descriptions = cfg.lm_descriptions
+             num_examples = [len(lm_examples), len(hm_examples), len(lm_descriptions)]
+             prototypes = lm_examples + hm_examples + lm_descriptions
+-            proto_feats = get_text_features(
+-                prototypes,
+-                self.clip_model,
+-                self.clip_tokenizer,
+-                device=cfg.device,
+-                clip_length=cfg.clip.clip_length,
+-            )
++            proto_feats = get_text_features(prototypes, inference.embed_text)
+             self.num_examples = num_examples
+             self.proto_feats = proto_feats
+ 
+             # Get the text feats of all the classes
+-            class_feats = get_text_features(
+-                self.obj_classes.get_classes_arr(),
+-                self.clip_model,
+-                self.clip_tokenizer,
+-                device=cfg.device,
+-                clip_length=cfg.clip.clip_length,
+-            )
++            class_feats = get_text_features(self.obj_classes.get_classes_arr(), inference.embed_text)
+             self.class_feats = class_feats
+ 
+             # Used for unknown class
+@@ -412,67 +362,23 @@
+         return False
+ 
+     def process_yolo_results(self, color, obj_classes):
+-
+-        # Perform YOLO prediction
+-        results = self.yolo.predict(color, conf=0.2, verbose=False)
+-
+-        # Extract confidence scores
+-        confidence_tensor = results[0].boxes.conf
+-        confidence_np = confidence_tensor.cpu().numpy()
+-
+-        # Extract class IDs
+-        detection_class_id_tensor = results[0].boxes.cls
+-        detection_class_id_np = detection_class_id_tensor.cpu().numpy().astype(int)
+-
+-        # Generate class labels
++        # DataInput is RGB; perception sessions and Ultralytics accept BGR.
++        bgr = np.ascontiguousarray(color[..., ::-1])
++        boxes = self.inference.detect(bgr, 0.2)
++        confidence_np = boxes[:, 4]
++        detection_class_id_np = boxes[:, 5].astype(int)
++        xyxy_np = boxes[:, :4]
+         detection_class_labels = [
+             f"{obj_classes.get_classes_arr()[class_id]} {class_idx}"
+             for class_idx, class_id in enumerate(detection_class_id_np)
+         ]
+ 
+-        # Extract bounding box coordinates
+-        xyxy_tensor = results[0].boxes.xyxy
+-        xyxy_np = xyxy_tensor.cpu().numpy()
+-
+         return confidence_np, detection_class_id_np, detection_class_labels, xyxy_np
+ 
+     def process_fastsam_results(self, color):
+-        results = self.fastsam(
+-            color,
+-            device="cuda",
+-            retina_masks=True,
+-            imgsz=1024,
+-            conf=self.cfg.fastsam_confidence,
+-            iou=0.9,
+-            verbose=False,
+-        )
+-        # Extract confidence scores
+-        confidence_tensor = results[0].boxes.conf
+-        confidence_np = confidence_tensor.cpu().numpy()
+-
+-        # Extract bounding box coordinates
+-        xyxy_tensor = results[0].boxes.xyxy
+-        xyxy_np = xyxy_tensor.cpu().numpy()
+-
+-        # Extract Masks with protection against None
+-        if results[0].masks is not None:
+-            masks_tensor = results[0].masks.data
+-            masks_np = masks_tensor.cpu().numpy().astype(bool)
+-        else:
+-            logging.warning(
+-                "[Detector] fastSAM did not return any masks, using empty mask array"
+-            )
+-            # If no mask is returned, create an empty array. Assume mask size matches input image's first two dims
+-            masks_np = np.empty((0,) + color.shape[:2], dtype=bool)
+-
+-        # Extract class IDs (default all set to unknown_class_id)
+-        detection_class_id_tensor = results[0].boxes.cls
+-        detection_class_id_np = detection_class_id_tensor.cpu().numpy().astype(int)
+-        detection_class_id_np = np.full_like(
+-            detection_class_id_np, self.unknown_class_id
+-        )
+-
+-        return confidence_np, detection_class_id_np, xyxy_np, masks_np
++        boxes, masks = self.inference.segment_instances(
++            np.ascontiguousarray(color[..., ::-1]), self.cfg.fastsam_confidence)
++        return boxes[:, 4], np.full(len(boxes), self.unknown_class_id, dtype=int), boxes[:, :4], masks
+ 
+     def merge_detections(self, detections1, detections2):
+         # Check if first detections is empty
+@@ -539,6 +445,7 @@
+         self.fastsam_detections = fs_detections
+ 
+     def process_yolo_and_sam(self, color):
++        self.curr_detections = None
+         with timing_context("YOLO", self):
+             confidence, class_id, class_labels, xyxy = self.process_yolo_results(
+                 color, self.obj_classes
+@@ -551,9 +458,8 @@
+             self.curr_results = {}
+             return
+         with timing_context("Segmentation", self):
+-            sam_out = self.sam.predict(color, bboxes=xyxy, verbose=False)
+-            masks_tensor = sam_out[0].masks.data
+-            masks_np = masks_tensor.cpu().numpy()
++            bgr = np.ascontiguousarray(color[..., ::-1])
++            masks_np = self.inference.segment(bgr, xyxy)
+             self.masks_np = masks_np
+ 
+         curr_detections = sv.Detections(
+@@ -568,72 +474,20 @@
+     def filter_fs_detections_by_curr(
+         self, fs_detections, curr_detections, iou_threshold=0.5, overlap_threshold=0.6
+     ):
+-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-
+-        # Convert numpy arrays to torch tensors and move to GPU
+-        fs_masks = torch.tensor(
+-            fs_detections.mask, dtype=torch.bool, device=device
+-        )  # (N1, H, W)
+-        fs_xyxy = torch.tensor(
+-            fs_detections.xyxy, dtype=torch.float32, device=device
+-        )  # (N1, 4)
+-        fs_confidence = torch.tensor(
+-            fs_detections.confidence, dtype=torch.float32, device=device
+-        )
+-        fs_class_id = torch.tensor(
+-            fs_detections.class_id, dtype=torch.int64, device=device
+-        )
+-
+-        curr_masks = torch.tensor(
+-            curr_detections.mask, dtype=torch.bool, device=device
+-        )  # (N2, H, W)
+-
+-        # Get total number of pixels in masks
+-        num_fs = fs_masks.shape[0]  # N1
+-        num_curr = curr_masks.shape[0]  # N2
+-
+-        # Flatten masks to (N, H * W) and convert to float32 for matrix multiplication
+-        fs_masks_flat = fs_masks.view(num_fs, -1).to(torch.float32)  # (N1, H * W)
+-        curr_masks_flat = curr_masks.view(num_curr, -1).to(torch.float32)  # (N2, H * W)
+-
+-        # Compute intersection and union (using float operations)
+-        intersection = torch.matmul(fs_masks_flat, curr_masks_flat.T)  # (N1, N2)
+-        fs_area = fs_masks_flat.sum(dim=1, keepdim=True)  # (N1, 1)
+-        curr_area = curr_masks_flat.sum(dim=1).unsqueeze(0)  # (1, N2)
+-        union = fs_area + curr_area - intersection  # (N1, N2)
+-
+-        # Compute IoU
+-        iou_matrix = intersection / torch.clamp(union, min=1e-7)  # (N1, N2)
+-
+-        # Compute overlap ratio
+-        overlap_ratio_fs = intersection / torch.clamp(fs_area, min=1e-7)  # (N1, N2)
+-        overlap_ratio_curr = intersection / torch.clamp(curr_area, min=1e-7)  # (N1, N2)
+-
+-        # Initialize keep mask, default is to keep all fs_masks
+-        keep_mask = torch.ones(num_fs, dtype=torch.bool, device=device)
+-
+-        # Filter masks one by one
+-        for i in range(num_fs):
+-            # Check if current fs_mask overlaps with curr_mask
+-            overlap = (
+-                (iou_matrix[i] > iou_threshold)
+-                | (overlap_ratio_fs[i] > overlap_threshold)
+-                | (overlap_ratio_curr[i] > overlap_threshold)
+-            )
+-
+-            # If overlap exists, mark as not keep
+-            if overlap.any():
+-                keep_mask[i] = False
+-
+-        # Filter detections based on keep mask
+-        filtered_fs_detections = sv.Detections(
+-            xyxy=fs_xyxy[keep_mask].cpu().numpy(),
+-            confidence=fs_confidence[keep_mask].cpu().numpy(),
+-            class_id=fs_class_id[keep_mask].cpu().numpy(),
+-            mask=fs_masks[keep_mask].cpu().numpy(),
+-        )
+-
+-        return filtered_fs_detections
++        fs_masks = np.asarray(fs_detections.mask, dtype=bool)
++        curr_masks = np.asarray(curr_detections.mask, dtype=bool)
++        intersection = _mask_intersections(fs_masks, curr_masks)
++        fs_area = fs_masks.sum(axis=(1, 2), dtype=np.float32)[:, None]
++        curr_area = curr_masks.sum(axis=(1, 2), dtype=np.float32)[None, :]
++        union = fs_area + curr_area - intersection
++        overlap = ((intersection / np.maximum(union, 1e-7) > iou_threshold)
++                   | (intersection / np.maximum(fs_area, 1e-7) > overlap_threshold)
++                   | (intersection / np.maximum(curr_area, 1e-7) > overlap_threshold))
++        keep = ~overlap.any(axis=1)
++        return sv.Detections(xyxy=fs_detections.xyxy[keep],
++                             confidence=fs_detections.confidence[keep],
++                             class_id=fs_detections.class_id[keep], mask=fs_masks[keep])
++
+ 
+     def add_extra_detections_from_fastsam(
+         self, color, fastsam_detections, incoming_detections
+@@ -661,37 +515,26 @@
+         color = self.curr_data.color.astype(np.uint8)
+ 
+         with timing_context("YOLO+Segmentation+FastSAM", self):
+-            # Run FastSAM
++            # Sequential GPU stages bound scratch memory and propagate inference errors.
+             if self.cfg.use_fastsam:
+-                fastsam_thread = threading.Thread(
+-                    target=self.process_fastsam, args=(color,)
+-                )
+-                fastsam_thread.start()
+-
+-            # Run YOLO and SAM
++                self.process_fastsam(color)
+             self.process_yolo_and_sam(color)
+ 
+-            # Waiting for FastSAM to finish
+-            if self.cfg.use_fastsam:
+-                fastsam_thread.join()
+-
+-        with timing_context("Detection Filter", self):
+-            self.filter.update_detections(self.curr_detections, color)
+-            filtered_detections = self.filter.run_filter()
+-
+-        if self.filter.get_len() == 0:
+-            logger.warning(
+-                "[Detector] No valid detections in curr frame after filtering."
+-            )
++        filtered_detections = self.curr_detections
++        if filtered_detections is not None:
++            with timing_context("Detection Filter", self):
++                self.filter.update_detections(filtered_detections, color)
++                filtered_detections = self.filter.run_filter()
++
++        if self.cfg.use_fastsam and len(self.fastsam_detections):
++            if filtered_detections is None or not len(filtered_detections):
++                filtered_detections = self.fastsam_detections
++            else:
++                filtered_detections = self.add_extra_detections_from_fastsam(
++                    color, self.fastsam_detections, filtered_detections)
++        if filtered_detections is None or not len(filtered_detections):
+             self.curr_results = {}
+             return
+-
+-        # add extra detections from FastSAM results
+-        # if no detection from fastsam, just skip
+-        if self.cfg.use_fastsam and self.fastsam_detections:
+-            filtered_detections = self.add_extra_detections_from_fastsam(
+-                color, self.fastsam_detections, filtered_detections
+-            )
+ 
+         with timing_context("CLIP+Create Object Pointcloud", self):
+             cluster_thread = threading.Thread(
+@@ -704,10 +547,6 @@
+                     self.compute_clip_features_batched(
+                         color,
+                         filtered_detections,
+-                        self.clip_model,
+-                        self.clip_tokenizer,
+-                        self.clip_preprocess,
+-                        self.cfg.device,
+                         self.obj_classes.get_classes_arr(),
+                     )
+                 )
+@@ -735,91 +574,37 @@
+         self.curr_results = results
+ 
+     def process_masks(self, masks):
+-        """
+-        Processes the given masks to extract and refine 3D points and colors.
+-
+-        Args:
+-            self: The object containing configuration and data attributes.
+-            masks: A NumPy array of shape (N, H, W), where N is the number of masks.
+-
+-        Returns:
+-            refined_points_list: A list of refined 3D points for each mask.
+-            refined_colors_list: A list of refined colors corresponding to the points for each mask.
+-        """
+-
+-        with timing_context("Create Object Pointcloud", self):
+-            N, _, _ = masks.shape
+-
+-            # Convert input data to tensors
+-            depth_tensor = (
+-                torch.from_numpy(self.curr_data.depth)
+-                .to(self.cfg.device)
+-                .float()
+-                .squeeze()
+-            )
+-            masks_tensor = torch.from_numpy(masks).to(self.cfg.device).float()
+-            intrinsic_tensor = (
+-                torch.from_numpy(self.curr_data.intrinsics).to(self.cfg.device).float()
+-            )
+-            image_rgb_tensor = (
+-                torch.from_numpy(self.curr_data.color).to(self.cfg.device).float()
+-                / 255.0
+-            )
+-
+-            # Generate 3D points and colors for the masks
+-            points_tensor, colors_tensor = mask_depth_to_points(
+-                depth_tensor,
+-                image_rgb_tensor,
+-                intrinsic_tensor,
+-                masks_tensor,
+-                self.cfg.device,
+-            )
+-
+-            refined_points_list = []
+-            refined_colors_list = []
+-
+-            # Process each mask
+-            for i in range(N):
+-                mask_points = points_tensor[i]
+-                mask_colors = colors_tensor[i]
+-
+-                # Filter valid points based on Z-axis > 0
+-                valid_points_mask = mask_points[:, :, 2] > 0
+-
+-                if torch.sum(valid_points_mask) < self.cfg.min_points_threshold:
+-                    refined_points_list.append(None)
+-                    refined_colors_list.append(None)
+-                    continue
+-
+-                valid_points = mask_points[valid_points_mask]
+-                valid_colors = mask_colors[valid_points_mask]
+-
+-                # Random sampling based on sample ratio
+-                sample_ratio = self.cfg.pcd_sample_ratio
+-                num_points = valid_points.shape[0]
+-
+-                if sample_ratio < 1.0:
+-                    sample_count = int(num_points * sample_ratio)
+-                    sample_indices = torch.randperm(num_points)[:sample_count]
+-                    downsampled_points = valid_points[sample_indices]
+-                    downsampled_colors = valid_colors[sample_indices]
+-                else:
+-                    downsampled_points = valid_points
+-                    downsampled_colors = valid_colors
+-
+-                # Refine points using clustering
+-                refined_points, refined_colors = refine_points_with_clustering(
+-                    downsampled_points,
+-                    downsampled_colors,
+-                    eps=self.cfg.dbscan_eps,
+-                    min_points=self.cfg.dbscan_min_points,
+-                )
+-
+-                refined_points_list.append(refined_points)
+-                refined_colors_list.append(refined_colors)
+-
+-        self.masked_points = refined_points_list
+-        self.masked_colors = refined_colors_list
++        """Project one mask at a time instead of retaining N dense 3D images."""
++        depth = np.asarray(self.curr_data.depth, dtype=np.float32).squeeze(-1)
++        color = np.asarray(self.curr_data.color, dtype=np.float32) / 255.0
++        intrinsic = np.asarray(self.curr_data.intrinsics, dtype=np.float32)
++        height, width = depth.shape
++        ys, xs = np.indices((height, width), dtype=np.float32)
++        self.masked_points, self.masked_colors = [], []
++        ratio = self.cfg.pcd_sample_ratio
++        # Pixel ranks keep boundary changes from reshuffling the whole sample.
++        ranks = (np.random.default_rng(int(self.curr_data.idx)).random(depth.shape, dtype=np.float32)
++                 if ratio < 1.0 else None)
++        for mask in masks:
++            valid = np.asarray(mask, dtype=bool) & (depth > 0)
++            if np.count_nonzero(valid) < self.cfg.min_points_threshold:
++                self.masked_points.append(None)
++                self.masked_colors.append(None)
++                continue
++            z = depth[valid]
++            points = np.stack(((xs[valid] - intrinsic[0, 2]) * z / intrinsic[0, 0],
++                               (ys[valid] - intrinsic[1, 2]) * z / intrinsic[1, 1], z), axis=-1)
++            colors = color[valid]
++            if ratio < 1.0:
++                count = int(len(points) * ratio)
++                indices = (np.argpartition(ranks[valid], count - 1)[:count]
++                           if count else np.empty(0, dtype=np.intp))
++                indices.sort()
++                points, colors = points[indices], colors[indices]
++            points, colors = refine_points_with_clustering(
++                points, colors, eps=self.cfg.dbscan_eps, min_points=self.cfg.dbscan_min_points)
++            self.masked_points.append(points)
++            self.masked_colors.append(colors)
+ 
+     def compute_max_cos_sim(self, image_feats, class_feats):
+         """
+@@ -1404,86 +1189,10 @@
+ 
+         return distance
+ 
+-    def compute_clip_features_batched(
+-        self,
+-        image,
+-        detections,
+-        clip_model,
+-        clip_tokenizer,
+-        clip_preprocess,
+-        device,
+-        classes,
+-    ):
+-        # Convert the image to a PIL Image
+-        image = Image.fromarray(image)
+-
+-        # Set the padding for cropping
+-        padding = 20
+-
+-        # Initialize lists to store the cropped images and features
++    def compute_clip_features_batched(self, image, detections, classes):
+         image_crops = []
+-        image_feats = []
+-        text_feats = []
+-
+-        # Initialize lists to store preprocessed images and text tokens for batch processing
+-        preprocessed_images = []
+-        text_tokens = []
+-
+-        # Prepare data for batch processing
+-        for idx in range(len(detections.xyxy)):
+-            x_min, y_min, x_max, y_max = detections.xyxy[idx]
+-            image_width, image_height = image.size
+-
+-            # Calculate the padding for each side of the bounding box
+-            left_padding = min(padding, x_min)
+-            top_padding = min(padding, y_min)
+-            right_padding = min(padding, image_width - x_max)
+-            bottom_padding = min(padding, image_height - y_max)
+-
+-            # Adjust the bounding box coordinates based on the padding
+-            x_min -= left_padding
+-            y_min -= top_padding
+-            x_max += right_padding
+-            y_max += bottom_padding
+-
+-            # Crop the image
+-            cropped_image = image.crop((x_min, y_min, x_max, y_max))
+-
+-            # Preprocess the cropped image
+-            preprocessed_image = clip_preprocess(cropped_image).unsqueeze(0)
+-            preprocessed_images.append(preprocessed_image)
+-
+-            # Get the class id for the detection
+-            class_id = detections.class_id[idx]
+-
+-            # Append the class name to the text tokens list
+-            text_tokens.append(classes[class_id])
+-
+-            # Append the cropped image to the image crops list
+-            image_crops.append(cropped_image)
+-
+-        # Convert lists to batches
+-        preprocessed_images_batch = torch.cat(preprocessed_images, dim=0).to(device)
+-        text_tokens_batch = clip_tokenizer(text_tokens).to(device)
+-
+-        # Perform batch inference
+-        with torch.no_grad():
+-            # Encode the images using the CLIP model
+-            image_features = clip_model.encode_image(preprocessed_images_batch)
+-
+-            # Normalize the image features
+-            image_features /= image_features.norm(dim=-1, keepdim=True)
+-
+-            # Encode the text tokens using the CLIP model
+-            text_features = clip_model.encode_text(text_tokens_batch)
+-
+-            # Normalize the text features
+-            text_features /= text_features.norm(dim=-1, keepdim=True)
+-
+-        # Convert the image and text features to numpy arrays
+-        image_feats = image_features.cpu().numpy()
+-        text_feats = text_features.cpu().numpy()
+-
++        image_feats = self.inference.clip_feats(image, detections.xyxy)
++        text_feats = self.inference.embed_text([classes[index] for index in detections.class_id])
+         if self.cfg.use_avg_feat_for_unknown:
+             count = 0
+             for idx, class_id in enumerate(detections.class_id):
+@@ -1505,14 +1214,8 @@
+         else:
+             for idx, class_id in enumerate(detections.class_id):
+                 if class_id == self.unknown_class_id:
+-                    count += 1
+-                    # Modify the text_feats for the unknown class
+-                    # text_feats[idx] = self.class_feats_mean  # You can modify how you update the text_feats here
+-
+-                    random_feats = np.random.rand(*self.class_feats_mean.shape)
+-                    random_feats /= np.linalg.norm(random_feats)
+-
+-                    text_feats[idx] = random_feats
++                    random_feats = np.random.rand(text_feats.shape[1])
++                    text_feats[idx] = random_feats / np.linalg.norm(random_feats)
+ 
+         # Return the cropped images, image features, and text features
+         return image_crops, image_feats, text_feats
+@@ -1558,14 +1261,7 @@
+             self.masks_size = np.sum(self.masks, axis=(1, 2))
+ 
+             # Compute intersection every time the detections are updated
+-            N = self.get_len()
+-            # Convert masks to PyTorch tensors to accelerate computation
+-            # Compute pairwise intersection using matrix operations
+-            device = self.device
+-            masks = torch.tensor(self.masks, dtype=torch.float32).to(device)
+-            intersection = torch.matmul(masks.view(N, -1), masks.view(N, -1).T)
+-
+-            self.inter_np = intersection.cpu().numpy()
++            self.inter_np = _mask_intersections(self.masks, self.masks)
+ 
+     def set_device(self, device):
+         self.device = device
+@@ -1631,6 +1327,14 @@
+         )
+         self.inter_np = self.inter_np[keep][:, keep]
+ 
++    def _prefer_first(self, i, j):
++        # Rasterization can change boundary pixels without changing the object.
++        tolerance = max(1, 0.001 * max(self.masks_size[i], self.masks_size[j]))
++        if abs(self.masks_size[i] - self.masks_size[j]) <= tolerance:
++            return (self.confidence[i], -self.class_id[i]) >= (
++                self.confidence[j], -self.class_id[j])
++        return (self.masks_size[i] > self.masks_size[j]) == self.keep_larger
++
+     def filter_by_iou(self):
+         N = self.get_len()
+         # use a list of boolean to control
+@@ -1638,7 +1342,6 @@
+             return np.array([], dtype=bool)
+ 
+         masks = self.masks
+-        masks_size = self.masks_size
+ 
+         # Compute pairwise IoU matrix using matrix operations for acceleration
+         intersection = self.inter_np
+@@ -1655,9 +1358,7 @@
+                 continue
+             for j in range(i + 1, N):
+                 if iou_matrix[i, j] > self.iou_th:
+-                    if ((masks_size[i] > masks_size[j]) and self.keep_larger) or (
+-                        (masks_size[i] < masks_size[j]) and not self.keep_larger
+-                    ):
++                    if self._prefer_first(i, j):
+                         keep[j] = False
+                     else:
+                         keep[i] = False
+@@ -1683,7 +1384,6 @@
+         N = self.get_len()
+         # Initialize keep mask
+         keep = np.ones(N, dtype=bool)
+-        masks_size = self.masks_size
+ 
+         # Get all the cropped images first to accelerate computation
+         cropped_images = []
+@@ -1712,9 +1412,7 @@
+                     if from_same_dis:
+                         class_i = self.classes.get_classes_arr()[self.class_id[i]]
+                         class_j = self.classes.get_classes_arr()[self.class_id[j]]
+-                        if ((masks_size[i] > masks_size[j]) and self.keep_larger) or (
+-                            (masks_size[i] < masks_size[j]) and not self.keep_larger
+-                        ):
++                        if self._prefer_first(i, j):
+                             keep[j] = False
+                             self.merge_detections(j, i)
+                             logger.info(
+@@ -1828,7 +1526,7 @@
+ 
+ 
+ def get_text_features(
+-    class_names: list, clip_model, clip_tokenizer, device, clip_length, batch_size=64
++    class_names: list, encode_text
+ ) -> np.ndarray:
+ 
+     multiple_templates = [
+@@ -1841,26 +1539,7 @@
+         x.format(lm) for lm in class_names for x in multiple_templates
+     ]
+ 
+-    # Get tokens
+-    text_tokens = clip_tokenizer(class_name_prompts).to(device)
+-    # Get Output features
+-    text_feats = np.zeros((len(class_name_prompts), clip_length), dtype=np.float32)
+-    # Get the text feature batch by batch
+-    text_id = 0
+-    while text_id < len(class_name_prompts):
+-        # Get batch size
+-        batch_size = min(len(class_name_prompts) - text_id, batch_size)
+-        # Get text prompts based on batch size
+-        text_batch = text_tokens[text_id : text_id + batch_size]
+-        with torch.no_grad():
+-            batch_feats = clip_model.encode_text(text_batch).float()
+-
+-        batch_feats /= batch_feats.norm(dim=-1, keepdim=True)
+-        batch_feats = np.float32(batch_feats.cpu())
+-        # move the calculated batch into the Ouput features
+-        text_feats[text_id : text_id + batch_size, :] = batch_feats
+-        # Move on and Move on
+-        text_id += batch_size
++    text_feats = encode_text(class_name_prompts)
+ 
+     # shrink the output text features into classes names size
+     text_feats = text_feats.reshape((-1, len(multiple_templates), text_feats.shape[-1]))
+--- a/utils/pcd_utils.py
++++ b/utils/pcd_utils.py
+@@ -2,55 +2,8 @@
+ 
+ import numpy as np
+ import open3d as o3d
+-import torch
+ 
+ 
+-def mask_depth_to_points(
+-    depth: torch.Tensor,
+-    image: torch.Tensor,
+-    cam_K: torch.Tensor,
+-    masks: torch.Tensor,
+-    device: str = "cuda",
+-):
+-    N, H, W = masks.shape
+-
+-    fx, fy, cx, cy = cam_K[0, 0], cam_K[1, 1], cam_K[0, 2], cam_K[1, 2]
+-
+-    # x, y = (H, W)
+-    y, x = torch.meshgrid(
+-        torch.arange(0, H, device=device),
+-        torch.arange(0, W, device=device),
+-        indexing="ij",
+-    )
+-
+-    # z = (N, H, W)
+-    z = depth.repeat(N, 1, 1) * masks
+-
+-    # (N, H, W)
+-    valid = (z > 0).float()
+-
+-    # (N, H, W)
+-    x = (x - cx) * z / fx
+-    y = (y - cy) * z / fy
+-
+-    # (N, H, W, 3)
+-    points = torch.stack((x, y, z), dim=-1) * valid.unsqueeze(-1)
+-
+-    if image is not None:
+-        rgb = image.repeat(N, 1, 1, 1) * masks.unsqueeze(-1)
+-        colors = rgb * valid.unsqueeze(-1)
+-    else:
+-        print("No RGB image provided, assigning random colors to objects")
+-        # Generate a random color for each mask
+-        random_colors = (
+-            torch.randint(0, 256, (N, 3), device=device, dtype=torch.float32) / 255.0
+-        )  # RGB colors in [0, 1]
+-        # Expand dims to match (N, H, W, 3) and apply to valid points
+-        colors = random_colors.unsqueeze(1).unsqueeze(1).expand(
+-            -1, H, W, -1
+-        ) * valid.unsqueeze(-1)
+-
+-    return points, colors
+ 
+ 
+ def init_pcd_denoise_dbscan(
+@@ -114,8 +67,8 @@
+     - refined_colors: Filtered point cloud colors (numpy.ndarray).
+     """
+     # Convert to numpy format
+-    points_np = points.cpu().numpy()
+-    colors_np = colors.cpu().numpy()
++    points_np = points.cpu().numpy() if hasattr(points, "cpu") else np.asarray(points)
++    colors_np = colors.cpu().numpy() if hasattr(colors, "cpu") else np.asarray(colors)
+ 
+     # If there are no points, return empty arrays to avoid further processing
+     if points_np.shape[0] == 0:
+--- a/utils/tracker.py
++++ b/utils/tracker.py
+@@ -1,3 +1,5 @@
++from __future__ import annotations
++
+ import logging
+ import pdb
+ from typing import List
+@@ -5,8 +7,6 @@
+ import faiss
+ import numpy as np
+ import open3d as o3d
+-import torch
+-import torch.nn.functional as F
+ from omegaconf import DictConfig
+ from scipy.sparse.csgraph import connected_components
+ 
+@@ -100,8 +100,8 @@
+             if (
+                 spatial_sim_mat is None
+                 or visual_sim_mat is None
+-                or spatial_sim_mat.numel() == 0
+-                or visual_sim_mat.numel() == 0
++                or spatial_sim_mat.size == 0
++                or visual_sim_mat.size == 0
+                 or spatial_sim_mat.shape != visual_sim_mat.shape
+             ):
+                 logger.warning(
+@@ -136,17 +136,17 @@
+         map_bbox_values = []
+         for obj in self.ref_map:
+             obj_bbox = np.asarray(obj.bbox.get_box_points())
+-            obj_bbox = torch.from_numpy(obj_bbox)
++            obj_bbox = np.asarray(obj_bbox)
+             map_bbox_values.append(obj_bbox)
+-        map_bbox_torch = torch.stack(map_bbox_values, dim=0)
++        map_bbox_torch = np.stack(map_bbox_values, axis=0)
+ 
+         # from curr obs
+         curr_bbox_values = []
+         for obj in self.ref_map:
+             obj_bbox = np.asarray(obj.bbox.get_box_points())
+-            obj_bbox = torch.from_numpy(obj_bbox)
++            obj_bbox = np.asarray(obj_bbox)
+             curr_bbox_values.append(obj_bbox)
+-        curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
++        curr_bbox_torch = np.stack(curr_bbox_values, axis=0)
+ 
+         # calculate iou
+         iou = self.compute_3d_iou_batch(map_bbox_torch, curr_bbox_torch)
+@@ -171,7 +171,7 @@
+         len_curr = len(self.curr_frame)
+ 
+         if len_map == 0 or len_curr == 0:
+-            return torch.zeros((len_map, len_curr))  # shape = (0, N) or (M, 0)
++            return np.zeros((len_map, len_curr))  # shape = (0, N) or (M, 0)
+ 
+         overlap_matrix = np.zeros((len_map, len_curr))
+ 
+@@ -193,17 +193,17 @@
+         map_bbox_values = []
+         for obj in self.ref_map:
+             obj_bbox = np.asarray(obj.bbox.get_box_points())
+-            obj_bbox = torch.from_numpy(obj_bbox)
++            obj_bbox = np.asarray(obj_bbox)
+             map_bbox_values.append(obj_bbox)
+-        map_bbox_torch = torch.stack(map_bbox_values, dim=0)
++        map_bbox_torch = np.stack(map_bbox_values, axis=0)
+ 
+         # from curr obs
+         curr_bbox_values = []
+         for obs in self.curr_frame:
+             obs_bbox = np.asarray(obs.bbox.get_box_points())
+-            obs_bbox = torch.from_numpy(obs_bbox)
++            obs_bbox = np.asarray(obs_bbox)
+             curr_bbox_values.append(obs_bbox)
+-        curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
++        curr_bbox_torch = np.stack(curr_bbox_values, axis=0)
+ 
+         # calculate iou
+         iou = self.compute_3d_iou_batch(map_bbox_torch, curr_bbox_torch)
+@@ -227,7 +227,7 @@
+                 else:
+                     overlap_matrix[idx_a, idx_b] = overlap / denom
+ 
+-        overlap_matrix = torch.from_numpy(overlap_matrix)
++        overlap_matrix = np.asarray(overlap_matrix)
+ 
+         return overlap_matrix
+ 
+@@ -250,9 +250,9 @@
+             min_bound = obj.bbox_2d.get_min_bound()
+             max_bound = obj.bbox_2d.get_max_bound()
+             map_bbox_values.append(
+-                torch.tensor([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
++                np.asarray([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
+             )
+-        map_bbox_torch = torch.stack(map_bbox_values, dim=0)
++        map_bbox_torch = np.stack(map_bbox_values, axis=0)
+ 
+         # from curr obs
+         curr_bbox_values = []
+@@ -260,9 +260,9 @@
+             min_bound = obs.bbox_2d.get_min_bound()
+             max_bound = obs.bbox_2d.get_max_bound()
+             curr_bbox_values.append(
+-                torch.tensor([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
++                np.asarray([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
+             )
+-        curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
++        curr_bbox_torch = np.stack(curr_bbox_values, axis=0)
+ 
+         ratio = self.compute_match_by_intersection_ratio(
+             map_bbox_torch, curr_bbox_torch
+@@ -271,8 +271,8 @@
+         return ratio
+ 
+     def compute_match_by_intersection_ratio(
+-        self, bboxes1: torch.Tensor, bboxes2: torch.Tensor, threshold=0.8
+-    ) -> torch.Tensor:
++        self, bboxes1: np.ndarray, bboxes2: np.ndarray, threshold=0.8
++    ) -> np.ndarray:
+         """
+         Calculate match matrix based on the intersection ratio between bounding boxes.
+ 
+@@ -297,22 +297,22 @@
+         )
+ 
+         # Compute intersection coordinates
+-        inter_min_x = torch.max(
++        inter_min_x = np.maximum(
+             bboxes1_min_x[:, None], bboxes2_min_x
+         )  # top-left x of intersection
+-        inter_min_y = torch.max(
++        inter_min_y = np.maximum(
+             bboxes1_min_y[:, None], bboxes2_min_y
+         )  # top-left y of intersection
+-        inter_max_x = torch.min(
++        inter_max_x = np.minimum(
+             bboxes1_max_x[:, None], bboxes2_max_x
+         )  # bottom-right x of intersection
+-        inter_max_y = torch.min(
++        inter_max_y = np.minimum(
+             bboxes1_max_y[:, None], bboxes2_max_y
+         )  # bottom-right y of intersection
+ 
+         # Calculate intersection width and height, ensuring non-negative values
+-        inter_width = (inter_max_x - inter_min_x).clamp(min=0)
+-        inter_height = (inter_max_y - inter_min_y).clamp(min=0)
++        inter_width = (inter_max_x - inter_min_x).clip(min=0)
++        inter_height = (inter_max_y - inter_min_y).clip(min=0)
+ 
+         # Calculate intersection area
+         inter_area = inter_width * inter_height
+@@ -327,40 +327,21 @@
+ 
+         # Determine matches if either ratio exceeds the threshold
+         # match_matrix = (ratio1 >= threshold) | (ratio2 >= threshold)
+-        match_matrix = torch.max(ratio1, ratio2)
++        match_matrix = np.maximum(ratio1, ratio2)
+ 
+         return match_matrix
+ 
+-    def compute_visual_sim(
+-        self,
+-    ) -> np.ndarray:
+-        # Get stacked clip fts for calculation
+-        # from map
+-        map_feats_values = []
+-        for obj in self.ref_map:
+-            obj_feat = torch.from_numpy(obj.clip_ft)
+-            map_feats_values.append(obj_feat)
+-
+-        if len(map_feats_values) == 0:
+-            return torch.zeros((0, 0))
+-
+-        map_feats_torch = torch.stack(map_feats_values, dim=0)  # (M, D)
+-
+-        # from curr obs
+-        curr_feats_values = []
+-        for obs in self.curr_frame:
+-            obs_feat = torch.from_numpy(obs.clip_ft)
+-            curr_feats_values.append(obs_feat)
+-        curr_feats_torch = torch.stack(curr_feats_values, dim=0)  # (N, D)
+-
+-        map_fts = map_feats_torch.unsqueeze(-1)  # (M, D, 1)
+-        curr_fts = curr_feats_torch.T.unsqueeze(0)  # (1, D, N)
+-
+-        visual_sim = F.cosine_similarity(map_fts, curr_fts, dim=1)  # (M, N)
+-
+-        return visual_sim
+-
+-    def update_obs_with_sim_mat(self, sim_mat: torch.Tensor) -> None:
++    def compute_visual_sim(self) -> np.ndarray:
++        if not self.ref_map or not self.curr_frame:
++            return np.zeros((len(self.ref_map), len(self.curr_frame)))
++        left = np.stack([obj.clip_ft for obj in self.ref_map])
++        right = np.stack([obs.clip_ft for obs in self.curr_frame])
++        left = left / np.maximum(np.linalg.norm(left, axis=1, keepdims=True), 1e-8)
++        right = right / np.maximum(np.linalg.norm(right, axis=1, keepdims=True), 1e-8)
++        return np.sum(left[:, :, None] * right.T[None, :, :], axis=1)
++
++
++    def update_obs_with_sim_mat(self, sim_mat: np.ndarray) -> None:
+         # update the obs in current frame with the matched map
+         # IF no matches, then the current obs matched places will be None
+ 
+@@ -372,7 +353,7 @@
+         # update information into current observation
+         for idx in range(len_curr_obs):
+             max_sim_value = sim_mat[idx].max()
+-            if max_sim_value > self.cfg.sim_threshold:
++            if max_sim_value > np.asarray(self.cfg.sim_threshold, dtype=sim_mat.dtype):
+                 map_idx = sim_mat[idx].argmax().item()
+                 self.curr_frame[idx].matched_obj_uid = self.ref_map[map_idx].uid
+                 self.curr_frame[idx].matched_obj_score = max_sim_value
+@@ -385,7 +366,7 @@
+             f"[Tracker] Added {add_new_obj} new objects, current detections: {len_curr_obs}"
+         )
+ 
+-    def update_global_obs_with_sim_mat(self, sim_mat: torch.Tensor) -> None:
++    def update_global_obs_with_sim_mat(self, sim_mat: np.ndarray) -> None:
+         len_curr_obs = len(self.curr_frame)
+ 
+         add_new_obj = 0
+@@ -394,7 +375,7 @@
+             max_sim_value = sim_mat[obs_idx].max()
+ 
+             # Use configurable threshold
+-            if max_sim_value > self.cfg.object_tracking.max_similarity:
++            if max_sim_value > np.asarray(self.cfg.object_tracking.max_similarity, dtype=sim_mat.dtype):
+                 map_idx = sim_mat[obs_idx].argmax().item()
+ 
+                 # print obs_idx, map_idx, max_sim_value
+@@ -465,60 +446,21 @@
+         return overlapping_ratio
+ 
+     def compute_box_volume_torch(self, box):
+-        # box shape is (M, 8, 3)
+-        edge1 = torch.norm(box[:, 1] - box[:, 0], dim=-1)
+-        edge2 = torch.norm(box[:, 3] - box[:, 0], dim=-1)
+-        edge3 = torch.norm(box[:, 4] - box[:, 0], dim=-1)
++        edge1 = np.linalg.norm(box[:, 1] - box[:, 0], axis=-1)
++        edge2 = np.linalg.norm(box[:, 3] - box[:, 0], axis=-1)
++        edge3 = np.linalg.norm(box[:, 4] - box[:, 0], axis=-1)
+         return edge1 * edge2 * edge3
+ 
++
+     def compute_intersection_volume_torch(self, bbox1, bbox2):
+-        # Calculate min/max corners for intersection computation
+-        min_corner1 = torch.min(bbox1, dim=1).values  # Shape (M, 3)
+-        max_corner1 = torch.max(bbox1, dim=1).values  # Shape (M, 3)
+-        min_corner2 = torch.min(bbox2, dim=1).values  # Shape (N, 3)
+-        max_corner2 = torch.max(bbox2, dim=1).values  # Shape (N, 3)
+-
+-        # Broadcasting for pairwise intersection
+-        min_intersection = torch.maximum(
+-            min_corner1[:, None], min_corner2
+-        )  # Shape (M, N, 3)
+-        max_intersection = torch.minimum(
+-            max_corner1[:, None], max_corner2
+-        )  # Shape (M, N, 3)
+-        intersection_dims = torch.clamp(
+-            max_intersection - min_intersection, min=0
+-        )  # Shape (M, N, 3)
+-        return torch.prod(intersection_dims, dim=-1)  # Shape (M, N)
++        lower = np.maximum(bbox1.min(axis=1)[:, None], bbox2.min(axis=1))
++        upper = np.minimum(bbox1.max(axis=1)[:, None], bbox2.max(axis=1))
++        return np.prod(np.maximum(upper - lower, 0), axis=-1)
++
+ 
+     def compute_3d_iou_batch(self, bbox1, bbox2):
+-        """
+-        Optimized IoU computation between two sets of axis-aligned 3D bounding boxes using PyTorch.
+-
+-        bbox1: (M, 8, 3) tensor
+-        bbox2: (N, 8, 3) tensor
+-
+-        returns: (M, N) tensor of IoU values
+-        """
+-        # Ensure inputs are torch tensors
+-        if not torch.is_tensor(bbox1):
+-            bbox1 = torch.tensor(bbox1, dtype=torch.float32)
+-        if not torch.is_tensor(bbox2):
+-            bbox2 = torch.tensor(bbox2, dtype=torch.float32)
+-
+-        # Move to GPU if available
+-        device = "cuda" if torch.cuda.is_available() else "cpu"
+-        bbox1 = bbox1.to(device)
+-        bbox2 = bbox2.to(device)
+-
+-        # Compute volumes
+-        volume1 = self.compute_box_volume_torch(bbox1)  # Shape (M,)
+-        volume2 = self.compute_box_volume_torch(bbox2)  # Shape (N,)
+-
+-        # Compute intersection volumes
+-        intersection_volume = self.compute_intersection_volume_torch(
+-            bbox1, bbox2
+-        )  # Shape (M, N)
+-
+-        # Compute IoU
+-        iou = intersection_volume / (volume1[:, None] + volume2 - intersection_volume)
+-        return iou.cpu()
++        bbox1, bbox2 = np.asarray(bbox1), np.asarray(bbox2)
++        volume1 = self.compute_box_volume_torch(bbox1)
++        volume2 = self.compute_box_volume_torch(bbox2)
++        intersection = self.compute_intersection_volume_torch(bbox1, bbox2)
++        return intersection / (volume1[:, None] + volume2 - intersection)

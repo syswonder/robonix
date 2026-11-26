@@ -178,3 +178,63 @@ def test_engine_identity_includes_external_tensor_data(tmp_path):
     first = pe.onnx_hash12(str(graph))
     sidecar.write_bytes(b"changed weights")
     assert pe.onnx_hash12(str(graph)) != first
+
+
+def test_instance_masks_keep_coefficients_aligned_and_discard_empty_masks():
+    # Confidence sorting changes anchor order; the negative prototype must be removed.
+    predictions = np.array([[[40, 80, 120], [50, 50, 50], [30, 30, 30], [30, 30, 30],
+                             [.7, .9, .8], [1, -1, 1]]], dtype=np.float32)
+    boxes, masks = pe.instance_masks(predictions, np.ones((1, 1, 25, 40), np.float32),
+                                     (100, 160), (100, 160), .25)
+    np.testing.assert_allclose(boxes[:, 4], [.8, .7])
+    assert masks.shape == (2, 100, 160)
+    assert masks[0, 50, 120] and not masks[0, 50, 40]
+    assert masks[1, 50, 40] and not masks[1, 50, 120]
+    empty_boxes, empty_masks = pe.instance_masks(predictions, np.ones((1, 1, 25, 40), np.float32),
+                                                 (100, 160), (100, 160), .99)
+    assert empty_boxes.shape == (0, 6) and empty_masks.shape == (0, 100, 160)
+
+
+@pytest.mark.parametrize('shape', [(61, 47), (47, 61)])
+def test_instance_segmentation_matches_ultralytics_native_masks(shape):
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('ultralytics')
+    from ultralytics.data.augment import LetterBox
+    from ultralytics.utils import ops
+    from ultralytics.utils.nms import non_max_suppression
+    from ultralytics.models.fastsam.utils import adjust_bboxes_to_image_border
+
+    rng = np.random.default_rng(42)
+    image = rng.integers(0, 256, (*shape, 3), dtype=np.uint8)
+    inputs = pe.yolo_preprocess(image, 1024, auto=True)
+    reference_image = LetterBox((1024, 1024), auto=True, stride=32)(image=image)
+    np.testing.assert_array_equal(inputs, reference_image[..., ::-1].transpose(2, 0, 1).astype(np.float32) / 255)
+    ih, iw = inputs.shape[1:]
+    boxes = np.array([[20 + 100 * (i % 8), 20 + 100 * (i // 8), 70, 70] for i in range(56)], np.float32)
+    prediction = np.concatenate([boxes.T, np.linspace(.9, .6, 56)[None], rng.normal(size=(4, 56))]).astype(np.float32)[None]
+    proto = rng.normal(size=(1, 4, ih // 4, iw // 4)).astype(np.float32)
+    pred = non_max_suppression(torch.from_numpy(prediction.copy()), .25, .9, nc=1)[0]
+    pred[:, :4] = ops.scale_boxes((ih, iw), pred[:, :4], shape)
+    expected_masks = ops.process_mask_native(torch.from_numpy(proto[0]), pred[:, 6:], pred[:, :4], shape).numpy().astype(bool)
+    keep = expected_masks.any(axis=(1, 2))
+    pred, expected_masks = pred[keep], expected_masks[keep]
+    expected_boxes = adjust_bboxes_to_image_border(pred[:, :4], shape)
+    area = (expected_boxes[:, 2] - expected_boxes[:, 0]) * (expected_boxes[:, 3] - expected_boxes[:, 1])
+    expected_boxes[area / np.prod(shape) > .9] = torch.tensor([0, 0, shape[1], shape[0]], dtype=torch.float32)
+    got, masks = pe.instance_masks(prediction, proto, shape, (ih, iw), .25)
+    np.testing.assert_allclose(got, pred[:, :6].numpy(), atol=1e-4)
+    np.testing.assert_array_equal(masks, expected_masks)
+
+
+def test_instance_segmentation_derives_class_count_from_the_prototypes():
+    # Two classes followed by one mask coefficient: the class scores are not coefficients.
+    predictions = np.array([[[40], [40], [30], [30], [.3], [.8], [1]]], np.float32)
+    detections, masks = pe.instance_masks(predictions, np.ones((1, 1, 25, 25), np.float32),
+                                         (100, 100), (100, 100), .25)
+    assert detections[0, 5] == 1 and masks[0, 40, 40]
+
+
+def test_box_scaling_reuses_the_rounded_letterbox_padding():
+    boxes = np.array([[1.6, 2.6, 6.4, 4.2]], np.float32)
+    np.testing.assert_allclose(pe.unletterbox_boxes(boxes, (3, 5), (8, 8)),
+                               [[1., 1., 4., 2.]], atol=1e-6)

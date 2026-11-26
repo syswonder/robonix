@@ -51,12 +51,14 @@ def gpu_info(inference: str) -> dict:
 def perception_check(inference: str) -> None:
     import numpy as np
     import open3d as o3d
-    from scene_service.ingest.perception_concept_graphs import _load_engine_bundle
+    from scene_service.ingest.perception_concept_graphs import _resolved_classes
+    from scene_service.ingest.perception_models import load_perception
 
     cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.eye(3)))
     assert len(cloud.voxel_down_sample(.01).points) == 3
-    bundle, device = _load_engine_bundle(os.environ.get('SCENE_PROFILE') or 'lite')
-    assert bundle is not None and device == ('cpu' if os.environ.get('SCENE_CG_FORCE_CPU') == '1' else 'cuda'), 'Perception model loading failed'
+    backend = os.environ.get('SCENE_PERCEPTION_BACKEND') or 'concept_graphs'
+    bundle = load_perception(_resolved_classes(), profile=os.environ.get('SCENE_PROFILE') or 'lite', backend=backend)
+    assert bundle is not None, 'Perception model loading failed'
     try:
         image = np.full((480, 640, 3), 127, dtype=np.uint8)
         boxes = np.array([[32, 32, 128, 128]], dtype=np.float32)

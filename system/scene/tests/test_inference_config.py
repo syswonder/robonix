@@ -53,7 +53,29 @@ def test_full_metadata_is_used_and_mismatched_selection_is_rejected(tmp_path):
         model_metadata(tmp_path, profile="full", clip_model="ViT-H-14")
 
 
-def test_annotate_keeps_build_dependencies_but_disables_tensorrt(tmp_path):
+def test_annotate_reuses_lite_models_without_loading_inference(tmp_path):
     assert model_config("annotate", tmp_path) == model_config("lite", tmp_path)
-    with pytest.raises(ValueError, match="lite or full"):
-        validate_tensorrt_config(profile="annotate")
+    validate_tensorrt_config(profile="annotate")
+
+
+def test_dualmap_uses_its_model_space_and_preserves_legacy_weight_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCENE_PERCEPTION_BACKEND", "dualmap")
+    monkeypatch.setenv("SCENE_DUALMAP_MOBILECLIP_WEIGHTS", "/custom/mobileclip.bin")
+    selected = model_config("lite", tmp_path)
+    assert selected["clip_model"] == "MobileCLIP-S2"
+    assert selected["clip_pretrained"] == "/custom/mobileclip.bin"
+    assert selected["sam"] == str(tmp_path / "mobile_sam.pt")
+    assert model_config("lite", tmp_path, backend="concept_graphs")["clip_model"] == "ViT-B-32"
+    validate_tensorrt_config(profile="lite", backend="dualmap")
+    validate_tensorrt_config(profile="full", backend="dualmap")
+
+
+@pytest.mark.parametrize("profile", ["lite", "full"])
+@pytest.mark.parametrize("backend,expected", [
+    ("concept_graphs", ("yolo", "sam", "clip")),
+    ("dualmap", ("yolo", "sam", "clip", "fastsam", "replica")),
+])
+def test_portable_export_selection_covers_the_mapper_models(tmp_path, profile, backend, expected):
+    from scene_service.inference_config import export_model_names
+
+    assert export_model_names(model_config(profile, tmp_path, backend=backend)) == expected

@@ -2,6 +2,7 @@
 """Native preparation reuses host capabilities and preserves working environments."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -63,8 +64,17 @@ def test_build_recovers_only_a_missing_managed_bootstrap_interpreter(tmp_path, m
     assert ('bootstrap-ready' in result.stdout) == managed
 
 
-def test_setup_reuses_working_torch_without_installing_packages(tmp_path, monkeypatch):
+@pytest.mark.parametrize("npu", [False, True])
+def test_setup_reuses_working_torch_without_installing_packages(tmp_path, monkeypatch, npu):
     prepare = module()
+    monkeypatch.setenv('SCENE_PERCEPTION_BACKEND', 'dualmap' if npu else 'concept_graphs')
+    if npu:
+        from scripts import prepare_dualmap
+        monkeypatch.setenv('SCENE_DUALMAP_NPU_DIR', str(tmp_path / 'npu'))
+        monkeypatch.setenv('SCENE_DUALMAP_ROOT', str(tmp_path / 'npu-dualmap'))
+        monkeypatch.setattr(prepare_dualmap, 'prepare', Mock(side_effect=AssertionError('keep the NPU checkout')))
+    else:
+        monkeypatch.delenv('SCENE_DUALMAP_NPU_DIR', raising=False)
     monkeypatch.setattr(prepare, 'BUILD', tmp_path)
     monkeypatch.setattr(prepare, 'environment_key', lambda *_: 'a' * 64)
     monkeypatch.setattr(prepare, 'install_ros', lambda: 'jazzy')
@@ -93,6 +103,9 @@ def test_setup_reuses_working_torch_without_installing_packages(tmp_path, monkey
     assert (python.parents[1] / 'gpu-constraints.txt').read_text() == (
         'numpy<2\ntorch==2.8.0\ntorchvision==0.23.0\n')
     assert not (tmp_path / 'native-env.sh').exists()
+    if npu:
+        assert 'dualmap_root' not in candidate
+        assert os.environ['SCENE_DUALMAP_ROOT'] == str(tmp_path / 'npu-dualmap')
 
 
 @pytest.mark.parametrize('transaction', [

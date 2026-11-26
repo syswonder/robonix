@@ -1887,6 +1887,8 @@ async def _run_active(config: dict) -> None:
             host=web_host,
             port=web_port,
             log_level="warning",
+            # Rerun streams remain open; finish HTTP shutdown before lifecycle cleanup expires.
+            timeout_graceful_shutdown=2.0,
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")

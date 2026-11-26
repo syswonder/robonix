@@ -64,8 +64,8 @@ def validate_config():
         validate_tensorrt_config()
         if force_cpu():
             raise RuntimeError('TensorRT requires GPU passthrough; unset ROBONIX_FORCE_CPU')
-    if os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() not in ('', 'concept_graphs'):
-        raise RuntimeError('The packaged Jetson image supports SCENE_PERCEPTION_BACKEND=concept_graphs')
+    if os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() not in ('', 'concept_graphs', 'dualmap'):
+        raise RuntimeError('The packaged Jetson image requires concept_graphs or dualmap')
 
 
 def gpu_args() -> list[str]:
@@ -74,7 +74,7 @@ def gpu_args() -> list[str]:
     info = json.loads(run(['docker', 'info', '--format', '{{json .Runtimes}}'], capture=True).stdout)
     if 'nvidia' not in info:
         raise RuntimeError('Docker NVIDIA runtime is missing; configure NVIDIA Container Toolkit before building Scene')
-    return ['--runtime', 'nvidia', '-e', 'NVIDIA_DRIVER_CAPABILITIES=all']
+    return ['--runtime', 'nvidia', '-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility']
 
 
 def file_hash(path: Path) -> str:
@@ -89,9 +89,14 @@ def source_hash() -> str:
     digest = hashlib.sha256()
     models = model_config(weights_dir=PKG / 'docker/_weights')
     digest.update(json.dumps(models, sort_keys=True).encode())
+    for key in ('yolo', 'sam', 'clip_pretrained', 'fastsam', 'replica_clip_pretrained'):
+        if key in models:
+            path = Path(models[key])
+            digest.update(key.encode())
+            digest.update(file_hash(path).encode() if path.is_file() else b'missing')
     digest.update((os.environ.get('SCENE_PROFILE') or 'lite').strip().lower().encode())
     paths = [PKG / 'scene_service', PKG / 'scripts', PKG / 'docker/requirements']
-    files = [PKG / 'docker/Dockerfile.jetson', PKG / 'docker/entrypoint.sh',
+    files = [PKG / 'docker/Dockerfile.jetson', PKG / 'docker/entrypoint.sh', PKG / 'docker/dualmap-inference.patch',
              PKG / 'package_manifest.jetson-docker.yaml']
     for root in paths:
         files.extend(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc')
@@ -192,10 +197,14 @@ def stage(profile: dict, inference: str, fingerprint: str) -> Path:
     models.mkdir()
     selected = model_config(weights_dir=PKG / 'docker/_weights')
     targets = model_defaults(weights_dir=Path("."))
-    for key in ("yolo", "sam", "clip_pretrained"):
+    model_keys = ["yolo", "sam", "clip_pretrained"]
+    if 'fastsam' in selected:
+        model_keys.extend(('fastsam', 'replica_clip_pretrained'))
+    for key in model_keys:
         target = models / targets[key]
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(selected[key], target)
+        target.chmod(0o644)
     shutil.copy2(clip, models / 'ViT-B-32.pt')
     sdk = profile['docker']
     (context / 'tensorrt-packages.txt').write_text('\n'.join(sdk['tensorrt_packages']))
@@ -212,6 +221,14 @@ def stage(profile: dict, inference: str, fingerprint: str) -> Path:
     ignored = shutil.ignore_patterns('__pycache__', '*.pyc', '.git', '.env*')
     for directory in ('scene_service', 'scripts'):
         shutil.copytree(PKG / directory, app / directory, ignore=ignored)
+    if os.environ.get('SCENE_PERCEPTION_BACKEND', '').strip().lower() == 'dualmap':
+        from scripts.prepare_dualmap import prepare
+
+        shutil.copytree(prepare(), context / 'dualmap')
+        (app / 'docker').mkdir()
+        shutil.copy2(PKG / 'docker/dualmap-inference.patch', app / 'docker/dualmap-inference.patch')
+    else:
+        (context / 'dualmap').mkdir()
     shutil.copy2(PKG / 'package_manifest.jetson-docker.yaml', app / 'package_manifest.yaml')
     api = Path(run(['rbnx', 'path', 'robonix-api'], capture=True).stdout.strip())
     shutil.copytree(api / 'robonix_api', context / 'api/robonix_api', ignore=ignored)
@@ -238,6 +255,7 @@ def build_image(profile, inference, fingerprint, candidate):
             '--build-arg', f'ROS_BASE_IMAGE={base}', '--build-arg', f"ROS_DISTRO={profile['ros']}",
             '--build-arg', f"CUDA_APT_SUFFIX={profile['cuda'].replace('.', '-')}",
             '--build-arg', f'SCENE_CG_INFERENCE={inference}',
+            '--build-arg', f"SCENE_PERCEPTION_BACKEND={os.environ.get('SCENE_PERCEPTION_BACKEND') or 'concept_graphs'}",
             '--build-arg', f"SCENE_PROFILE={(os.environ.get('SCENE_PROFILE') or 'lite').strip().lower()}",
             '--build-arg', f"SCENE_CLIP_MODEL={model_config()['clip_model']}",
             '--build-arg', f'SCENE_SOURCE_SHA={fingerprint}',

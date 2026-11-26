@@ -55,7 +55,7 @@ NMS_MAX_WH = 7680    # per-class box offset for batched NMS
 YOLO_NC_MAX = 256
 WORKSPACE = 1 << 30
 # Increment when builder semantics change beyond the settings fingerprinted below.
-ENGINE_BUILD_VERSION = 1
+ENGINE_BUILD_VERSION = 3
 
 
 def compute_cap() -> str:
@@ -335,7 +335,7 @@ class SimpleTokenizer:
 
 
 # ── Preprocessing (bit-matched to the ultralytics / open_clip pipelines) ─────
-def _letterbox(img: np.ndarray, new_shape, center: bool = True, pad: int = 114) -> np.ndarray:
+def _letterbox(img: np.ndarray, new_shape, center: bool = True, pad: int = 114, auto=False) -> np.ndarray:
     """ultralytics LetterBox (auto=False, scaleup=True) on an HWC uint8 image."""
     h, w = img.shape[:2]
     if isinstance(new_shape, int):
@@ -343,6 +343,9 @@ def _letterbox(img: np.ndarray, new_shape, center: bool = True, pad: int = 114) 
     r = min(new_shape[0] / h, new_shape[1] / w)
     new_unpad = (round(w * r), round(h * r))  # (w, h)
     dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    if auto:
+        dw, dh = dw % 32, dh % 32
+        new_shape = (new_unpad[1] + dh, new_unpad[0] + dw)
     if center:
         dw /= 2
         dh /= 2
@@ -355,10 +358,10 @@ def _letterbox(img: np.ndarray, new_shape, center: bool = True, pad: int = 114) 
     return canvas
 
 
-def yolo_preprocess(bgr: np.ndarray) -> np.ndarray:
+def yolo_preprocess(bgr: np.ndarray, image_size=YOLO_IMGSZ, *, auto=False) -> np.ndarray:
     """(3, 672, 672) float32 (call sites add the batch dim): letterbox square,
     BGR->RGB (ultralytics flips numpy input, assuming BGR), HWC->CHW, /255."""
-    im = _letterbox(bgr, YOLO_IMGSZ, center=True)
+    im = _letterbox(bgr, image_size, center=True, auto=auto)
     im = im[:, :, ::-1].transpose(2, 0, 1)  # flip channels, HWC->CHW
     return np.ascontiguousarray(im, dtype=np.float32) / 255.0
 
@@ -377,15 +380,12 @@ def sam_scale_boxes(xyxy: np.ndarray, src_hw: tuple[int, int], image_size: int =
     return np.asarray(xyxy, dtype=np.float32) * r
 
 
-def yolo_unletterbox(xyxy: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
-    """Engine boxes (672-letterbox space) -> source pixels: the inverse of
-    ops.scale_boxes as ultralytics predict applies it after NMS (float pad,
-    clamped to the frame) — NMS itself runs in letterbox space on both
-    paths, so the only difference is this shared transform."""
+def unletterbox_boxes(xyxy, src_hw, input_hw):
+    """Undo the rounded resize and centered padding used by Ultralytics."""
     h, w = src_hw
-    gain = min(YOLO_IMGSZ / h, YOLO_IMGSZ / w)
-    pad_x = (YOLO_IMGSZ - w * gain) / 2
-    pad_y = (YOLO_IMGSZ - h * gain) / 2
+    gain = min(input_hw[0] / h, input_hw[1] / w)
+    pad_x = round((input_hw[1] - round(w * gain)) / 2 - 0.1)
+    pad_y = round((input_hw[0] - round(h * gain)) / 2 - 0.1)
     out = np.asarray(xyxy, dtype=np.float32).copy()
     out[:, [0, 2]] -= pad_x
     out[:, [1, 3]] -= pad_y
@@ -393,6 +393,10 @@ def yolo_unletterbox(xyxy: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
     out[:, [0, 2]] = out[:, [0, 2]].clip(0, w)
     out[:, [1, 3]] = out[:, [1, 3]].clip(0, h)
     return out
+
+
+def yolo_unletterbox(xyxy: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
+    return unletterbox_boxes(xyxy, src_hw, (YOLO_IMGSZ, YOLO_IMGSZ))
 
 
 def sam_postprocess_masks(logits: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
@@ -419,10 +423,15 @@ def sam_postprocess_masks(logits: np.ndarray, src_hw: tuple[int, int]) -> np.nda
 
 
 def clip_crop_crops(rgb: np.ndarray, xyxy: np.ndarray, padding: int = 20,
-                    image_size: int = CLIP_CROP, mean=CLIP_MEAN, std=CLIP_STD) -> np.ndarray:
+                    image_size: int = CLIP_CROP, mean=CLIP_MEAN, std=CLIP_STD,
+                    interpolation: str = "bicubic") -> np.ndarray:
     """Apply the exported CLIP resize, center crop and normalization."""
     from PIL import Image
     from .perception_images import clip_crops
+
+    resampling = {"bicubic": Image.Resampling.BICUBIC, "bilinear": Image.Resampling.BILINEAR}
+    if interpolation not in resampling:
+        raise ValueError(f"Unsupported CLIP interpolation: {interpolation}")
 
     crops = []
     for crop in clip_crops(rgb, xyxy, padding):
@@ -432,7 +441,7 @@ def clip_crop_crops(rgb: np.ndarray, xyxy: np.ndarray, padding: int = 20,
                 ow, oh = image_size, int(image_size * ch / cw)
             else:
                 ow, oh = int(image_size * cw / ch), image_size
-            crop = crop.resize((ow, oh), Image.BICUBIC)
+            crop = crop.resize((ow, oh), resampling[interpolation])
         cw, ch = crop.size
         top = int(round((ch - image_size) / 2.0))
         left = int(round((cw - image_size) / 2.0))
@@ -498,17 +507,19 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> np.ndarray:
 
 
 def yolo_nms(boxes_xywh: np.ndarray, scores: np.ndarray, conf: float,
-             iou: float = NMS_IOU, max_det: int = NMS_MAX_DET) -> np.ndarray:
+             iou: float = NMS_IOU, max_det: int = NMS_MAX_DET, *, return_indices=False):
     """Ultralytics 8.4 predict NMS with one best class per anchor.
 
     boxes_xywh (N,4) decoded center-format pixels; scores (nc,N) post-sigmoid.
-    Returns (n,6) rows [x1, y1, x2, y2, conf, cls], descending confidence."""
+    Returns (n,6) rows [x1, y1, x2, y2, conf, cls], descending confidence.
+    return_indices also returns source anchors for segmentation coefficients."""
     classes = np.argmax(scores, axis=0)
     confs = scores[classes, np.arange(scores.shape[1])]
     sj = np.flatnonzero(confs > conf)
     si = classes[sj]
     if si.size == 0:
-        return np.zeros((0, 6), dtype=np.float32)
+        empty = np.zeros((0, 6), dtype=np.float32)
+        return (empty, np.empty(0, np.int64)) if return_indices else empty
     confs = confs[sj]
     if confs.size > NMS_MAX_NMS:
         top = np.argsort(-confs, kind="stable")[:NMS_MAX_NMS]
@@ -523,8 +534,52 @@ def yolo_nms(boxes_xywh: np.ndarray, scores: np.ndarray, conf: float,
     xyxy[:, 3] = x[:, 1] + x[:, 3] / 2
     boxes = xyxy + si.astype(np.float32)[:, None] * NMS_MAX_WH
     keep = _nms(boxes.astype(np.float64), confs.astype(np.float64), iou)[:max_det]
-    return np.concatenate(
+    result = np.concatenate(
         [xyxy[keep], confs[keep, None], si[keep, None].astype(np.float32)], axis=1)
+    return (result, sj[keep]) if return_indices else result
+
+
+def instance_masks(predictions, prototypes, src_hw, input_hw, conf, iou=0.9):
+    """Decode YOLO segmentation with native-resolution masks and FastSAM borders."""
+    pred = predictions[0].T
+    class_end = pred.shape[1] - prototypes.shape[1]
+    dets, indices = yolo_nms(pred[:, :4], pred[:, 4:class_end].T, conf, iou, return_indices=True)
+    h, w = src_hw
+    if not len(dets):
+        return dets, np.empty((0, h, w), bool)
+    dets[:, :4] = unletterbox_boxes(dets[:, :4], src_hw, input_hw)
+    proto = prototypes[0]
+    _, mh, mw = proto.shape
+    mask_gain = min(mh / h, mw / w)
+    dw, dh = (mw - round(w * mask_gain)) / 2, (mh - round(h * mask_gain)) / 2
+    top, bottom = round(dh - 0.1), mh - round(dh + 0.1)
+    left, right = round(dw - 0.1), mw - round(dw + 0.1)
+    masks = np.empty((len(dets), h, w), bool)
+    columns, rows = np.arange(w)[None, :], np.arange(h)[:, None]
+    # Decode one mask at a time to bound the native-resolution float workspace.
+    for index, (anchor, box) in enumerate(zip(indices, dets[:, :4])):
+        logits = (pred[anchor, class_end:] @ proto.reshape(proto.shape[0], -1)).reshape(mh, mw)
+        mask = cv2.resize(logits[top:bottom, left:right], (w, h), interpolation=cv2.INTER_LINEAR) > 0
+        masks[index] = mask & (columns >= box[0]) & (columns < box[2]) & (rows >= box[1]) & (rows < box[3])
+    keep = masks.any(axis=(1, 2))
+    dets, masks = dets[keep], masks[keep]
+    boxes = dets[:, :4]
+    boxes[:, 0] = np.where(boxes[:, 0] < 20, 0, boxes[:, 0])
+    boxes[:, 1] = np.where(boxes[:, 1] < 20, 0, boxes[:, 1])
+    boxes[:, 2] = np.where(boxes[:, 2] > w - 20, w, boxes[:, 2])
+    boxes[:, 3] = np.where(boxes[:, 3] > h - 20, h, boxes[:, 3])
+    full = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]) / (h * w) > 0.9
+    boxes[full] = (0, 0, w, h)
+    return dets, masks
+
+
+def trt_model_names(models_dir):
+    path = os.path.join(models_dir, "model-config.json")
+    metadata = {}
+    if os.path.exists(path):
+        with open(path) as source:
+            metadata = json.load(source)
+    return TRT_MODELS + (("fastsam",) if metadata.get("fastsam") else ())
 
 
 # ── Session bundle ───────────────────────────────────────────────────────────
@@ -537,7 +592,7 @@ class PerceptionEngines:
 
     def __init__(self, classes: list[str], yolo: TrtRunner, sam_enc: TrtRunner,
                  clip_vis: TrtRunner, e: np.ndarray, clip_text: OrtSess,
-                 sam_dec: TrtRunner, scales, biases, ns, metadata):
+                 sam_dec: TrtRunner, scales, biases, ns, metadata, fastsam=None):
         self.metadata = metadata
         self.tokenizer = _TOKENIZER or SimpleTokenizer()
         self.classes = list(classes)
@@ -546,6 +601,7 @@ class PerceptionEngines:
         self.clip_vis = clip_vis
         self.clip_text = clip_text
         self.sam_dec = sam_dec
+        self.fastsam = fastsam
         self.e = e
         self._score_e = normalize_rows(e).T
         self._score_scales = np.concatenate([
@@ -554,14 +610,20 @@ class PerceptionEngines:
             np.full(int(n), b, dtype=np.float32) for b, n in zip(biases, ns)])
 
     def close(self) -> None:
-        for runner in (self.yolo, self.sam_enc, self.sam_dec, self.clip_vis):
-            runner.close()
+        for runner in (self.yolo, self.sam_enc, self.sam_dec, self.clip_vis, self.fastsam):
+            if runner is not None:
+                runner.close()
         self.clip_text = None
 
     @property
     def device_memory_bytes(self) -> int:
         return sum(r.device_memory_bytes for r in
-                   (self.yolo, self.sam_enc, self.sam_dec, self.clip_vis))
+                   (self.yolo, self.sam_enc, self.sam_dec, self.clip_vis, self.fastsam) if r is not None)
+
+    def segment_instances(self, bgr, conf, iou=0.9):
+        images = yolo_preprocess(bgr, self.metadata["fastsam_image_size"], auto=True)[None]
+        outs = self.fastsam.run({"images": images})
+        return instance_masks(outs["predictions"], outs["prototypes"], bgr.shape[:2], images.shape[2:], conf, iou)
 
     def detect(self, bgr: np.ndarray, conf: float):
         """Full YOLO-World pass: preprocess -> engine -> score stage -> NMS.
@@ -596,7 +658,8 @@ class PerceptionEngines:
     def clip_feats(self, rgb: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
         """L2-normalized image features using the exported preprocessing."""
         crops = clip_crop_crops(rgb, xyxy, image_size=self.metadata["clip_image_size"],
-                                mean=self.metadata["clip_mean"], std=self.metadata["clip_std"])
+                                mean=self.metadata["clip_mean"], std=self.metadata["clip_std"],
+                                interpolation=self.metadata.get("clip_interpolation", "bicubic"))
         n = crops.shape[0]
         feats = []
         for chunk in clip_batches(crops, self.metadata["clip_batch_size"]):
@@ -619,7 +682,7 @@ _TOKENIZER: SimpleTokenizer = None
 
 
 def load_engines(classes: list[str], models_dir: str = None,
-                 cache_dir: str = None, *, profile=None, clip_model=None) -> PerceptionEngines:
+                 cache_dir: str = None, *, profile=None, clip_model=None, use_fastsam=False) -> PerceptionEngines:
     """Load every session or raise with the reason.  Engine fingerprints are
     resolved the same way build_engines.py names them; a missing or stale
     engine raises FileNotFoundError (the preflight hook builds them)."""
@@ -630,7 +693,10 @@ def load_engines(classes: list[str], models_dir: str = None,
     from ..inference_config import model_metadata
 
     metadata = model_metadata(models_dir, profile=profile, clip_model=clip_model)
-    missing = [m for m in TRT_MODELS + ORT_MODELS
+    names = trt_model_names(models_dir)
+    if use_fastsam and "fastsam" not in names:
+        raise ValueError("Prepared models lack FastSAM; rebuild Scene for DualMap")
+    missing = [m for m in names + ORT_MODELS
                if not os.path.isfile(os.path.join(models_dir, f"{m}.onnx"))]
     if missing:
         raise FileNotFoundError(f"ONNX models missing in {models_dir}: {missing}")
@@ -639,7 +705,7 @@ def load_engines(classes: list[str], models_dir: str = None,
     scales, biases, ns = npz["scales"], npz["biases"], npz["ns"]
 
     eng_paths = {}
-    for name in TRT_MODELS:
+    for name in names:
         path = engine_file(name, models_dir, cache_dir)
         if not os.path.isfile(path):
             raise FileNotFoundError(
@@ -661,7 +727,8 @@ def load_engines(classes: list[str], models_dir: str = None,
     del yolo_text
     clip_text = OrtSess(os.path.join(models_dir, "clip-text.onnx"))
     bundle = PerceptionEngines(classes, yolo, sam_enc, clip_vis,
-                               e, clip_text, sam_dec, scales, biases, ns, metadata=metadata)
+                               e, clip_text, sam_dec, scales, biases, ns, metadata=metadata,
+                               fastsam=TrtRunner(eng_paths["fastsam"]) if use_fastsam else None)
     log.info("[scene-engines] loaded: E(%d,512), yolo/sam/clip TRT %.0fMB device mem",
              bundle.e.shape[0], bundle.device_memory_bytes / 2**20)
     return bundle

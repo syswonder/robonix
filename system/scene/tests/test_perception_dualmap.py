@@ -558,3 +558,138 @@ def test_operator_hooks_work_without_a_global_map():
     assert p._lm.local_map == []
     _run(p.reset_derived_state())
     assert p._lm.local_map == []
+
+
+def test_stop_releases_injected_inference_after_export_failure():
+    import asyncio
+    from unittest.mock import Mock
+    import pytest
+
+    detector = _detector()
+    provider = Mock()
+    detector._engines = provider
+    detector._dm = types.SimpleNamespace(inference=provider)
+    detector._export = Mock(side_effect=RuntimeError('export failed'))
+    with pytest.raises(RuntimeError, match='export failed'):
+        asyncio.run(detector.stop())
+    provider.close.assert_called_once()
+    assert detector._dm.inference is None
+    assert detector._engines is None
+
+
+def test_replica_encoder_is_torch_free_and_uses_its_own_model_space(tmp_path, monkeypatch):
+    import numpy as np
+    import pytest
+    import builtins
+    import json
+    from unittest.mock import Mock
+    from scene_service.ingest import perception_engines
+
+    weights = tmp_path / 'replica.bin'
+    weights.touch()
+    (tmp_path / 'model-config.json').write_text(json.dumps(dict(
+        replica_clip_model='ViT-B-32', replica_clip_pretrained=str(weights.resolve()), replica_context_length=77)))
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setenv('SCENE_ONNX_DIR', str(tmp_path))
+    run = Mock(side_effect=lambda feeds: {'text_feats': np.ones((len(feeds['tokens']), 512), np.float32)})
+    monkeypatch.setattr(perception_engines, 'OrtSess', lambda path: types.SimpleNamespace(run=run))
+    original = builtins.__import__
+    def no_torch(name, *args, **kwargs):
+        if name.split('.')[0] in ('torch', 'open_clip', 'ultralytics'):
+            raise AssertionError(name)
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', no_torch)
+    detector = _detector()
+    encoder = detector._text_encoder('ViT-B-32', str(weights))
+    first = detector._label_feature(encoder, 'chair')
+    np.testing.assert_allclose(np.linalg.norm(first), 1., atol=1e-6)
+    np.testing.assert_array_equal(first, detector._label_feature(encoder, 'chair'))
+    assert run.call_count == 1
+    assert detector._text_encoder('ViT-B-32', str(weights)) is encoder
+    detector._export_encoder = None
+    with pytest.raises(ValueError, match='differs'):
+        detector._text_encoder('different-model', str(weights))
+
+
+def test_replica_write_error_is_reported_instead_of_succeeding(tmp_path, monkeypatch):
+    import numpy as np
+    import pytest
+    from unittest.mock import Mock
+    from scene_service.ingest import perception_dualmap
+
+    monkeypatch.setenv('SCENE_EXPORT_CG_PICKLE', str(tmp_path))
+    detector = _detector()
+    detector._text_encoder = Mock(return_value=lambda texts: np.ones((len(texts), 512), np.float32))
+    monkeypatch.setattr(perception_dualmap, 'export_map_objects', Mock(side_effect=PermissionError('read only')))
+    with pytest.raises(PermissionError, match='read only'):
+        detector._export()
+
+
+def test_npu_keeps_its_detector_and_needs_only_bundle_weights(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from scene_service.ingest import perception_models
+
+    root = tmp_path / 'npu-dualmap'
+    (root / 'config').mkdir(parents=True)
+    bundle = tmp_path / 'models'
+    bundle.mkdir()
+    for name in ('npu_meta.json', 'yoloworld.rknn', 'yoloworld.weight',
+                 'mobilesam.rknn', 'mobilesam.weight', 'mobilesam_decoder.rknn',
+                 'mobilesam_decoder.weight', 'clip_image.rknn', 'clip_image.weight'):
+        (bundle / name).touch()
+    clip = tmp_path / 'clip.pt'
+    clip.touch()
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'torch')
+    monkeypatch.setenv('SCENE_DUALMAP_NPU_DIR', str(bundle))
+    monkeypatch.setenv('SCENE_DUALMAP_CLIP_WEIGHTS', str(clip))
+    captured = {}
+    classes = types.SimpleNamespace(get_classes_arr=lambda: ['chair'])
+
+    class Detector:
+        def __init__(self, cfg, inference=None):
+            captured['cfg'] = cfg
+            captured['inference'] = inference
+            self.obj_classes = classes
+
+    monkeypatch.setattr(perception_models, 'load_perception',
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError('keep NPU inference')))
+    modules = {
+        'hydra': {'initialize_config_dir': lambda **_: nullcontext(),
+                  'compose': lambda **kwargs: kwargs['overrides']},
+        'hydra.core': {},
+        'hydra.core.global_hydra': {'GlobalHydra': types.SimpleNamespace(
+            instance=lambda: types.SimpleNamespace(clear=lambda: None))},
+        'torch': {'cuda': types.SimpleNamespace(is_available=lambda: False)},
+        'utils.global_map_manager': {'GlobalMapManager': lambda cfg: object()},
+        'utils.local_map_manager': {'LocalMapManager': lambda cfg: object()},
+        'utils.object_detector': {'Detector': Detector},
+        'utils.types': {'DataInput': object},
+        'utils.visualizer': {'ReRunVisualizer': lambda cfg: types.SimpleNamespace(
+            obj_classes=classes, set_use_rerun=lambda value: None)},
+    }
+    for name, fields in modules.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(fields)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.syspath_prepend(str(root))
+    detector = _detector(device='cpu')
+    detector._dm_root = str(root)
+    assert detector._load_dualmap()
+    assert captured['inference'] is None
+    assert 'use_npu=true' in captured['cfg']
+    assert f'npu_model_dir={bundle}' in captured['cfg']
+    assert 'clip.model_name=ViT-B-32' in captured['cfg']
+    assert f'clip.pretrained={clip}' in captured['cfg']
+    assert detector._engines is None
+
+
+def test_tensorrt_rejects_an_npu_bundle_before_loading_models(tmp_path, monkeypatch):
+    import pytest
+    root = tmp_path / 'dualmap'
+    (root / 'config').mkdir(parents=True)
+    monkeypatch.setenv('SCENE_CG_INFERENCE', 'tensorrt')
+    monkeypatch.setenv('SCENE_DUALMAP_NPU_DIR', str(tmp_path / 'npu'))
+    detector = _detector()
+    detector._dm_root = str(root)
+    with pytest.raises(ValueError, match='either DualMap NPU models or TensorRT'):
+        detector._load_dualmap()

@@ -183,38 +183,21 @@ def _env_or(name: str, fallback: str) -> str:
 
 def _load_engine_bundle(profile="lite", yolo_path=None, sam_path=None,
                         clip_model_name=None, clip_pretrained=None):
-    from ..inference_config import (
-        inference_backend, prepared_models_dir, engine_cache_dir, validate_tensorrt_config,
-    )
+    from ..inference_config import inference_backend
+    from .perception_models import load_perception
 
-    backend = inference_backend()
-    models = model_config(profile)
-    yw = yolo_path or models["yolo"]
-    classes = _resolved_classes()
-    log.info("[scene-cg] inference=%s profile=%s", backend, profile)
-    if backend == "torch":
-        try:
-            from .perception_torch import TorchPerception
-
-            bundle = TorchPerception(
-                classes, yw,
-                sam_path or models["sam"],
-                clip_model_name or models["clip_model"],
-                clip_pretrained or models["clip_pretrained"],
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Torch models unavailable (%s) — perception disabled", exc)
-            return None, "cpu"
-        return bundle, bundle.device
-
-    validate_tensorrt_config(profile=profile)
-    from .perception_engines import load_engines
-
-    models_dir = _env_or("SCENE_ONNX_DIR", os.path.join(os.path.dirname(yw), "onnx"))
-    models_dir = prepared_models_dir(models_dir)
-    return load_engines(classes, models_dir=models_dir,
-                        cache_dir=str(engine_cache_dir(models_dir)),
-                        profile=profile, clip_model=clip_model_name or models["clip_model"]), "cuda"
+    try:
+        bundle = load_perception(
+            _resolved_classes(), profile=profile, backend="concept_graphs",
+            yolo_path=yolo_path, sam_path=sam_path,
+            clip_model=clip_model_name, clip_pretrained=clip_pretrained,
+        )
+    except Exception as exc:
+        if inference_backend() != "torch":
+            raise
+        log.warning("Torch models unavailable (%s) — perception disabled", exc)
+        return None, "cpu"
+    return bundle, getattr(bundle, "device", "cuda")
 
 
 # ── Visible-absence detection ────────────────────────────────────────────

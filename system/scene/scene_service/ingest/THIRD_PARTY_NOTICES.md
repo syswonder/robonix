@@ -58,3 +58,13 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## DualMap
+
+The build-time patch in `docker/dualmap-inference.patch` modifies DualMap
+commit `157235ec49e6a1f439babbc571c4c02ad1f06aa9` to accept an inference
+implementation and use NumPy for mapping arithmetic. DualMap retains its
+Apache-2.0 license in the prepared source. A copy is provided in
+`docker/dualmap-LICENSE`.
+
+Source: https://github.com/Eku127/DualMap/tree/157235ec49e6a1f439babbc571c4c02ad1f06aa9
