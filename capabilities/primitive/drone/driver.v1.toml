@@ -4,7 +4,7 @@ id      = "robonix/primitive/drone/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
-description = "Lifecycle management for the dji_msdk drone primitive."
+description = "Lifecycle management for the drone primitive."
 
 [mode]
 type = "rpc"
