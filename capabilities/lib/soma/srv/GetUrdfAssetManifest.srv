@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+
+# Return URDF text and metadata for resources available through StreamUrdfAsset.
+string robot_id  # empty = default robot
+---
+string robot_id
+string urdf_xml
+string resource_set_id
+uint64 total_size_bytes
+UrdfAssetMetadata[] assets

@@ -29,7 +29,9 @@ env -u CC -u CXX -u CFLAGS -u CXXFLAGS \
   make install
 ```
 
-The Piper URDF and its generated DAE resources are tracked as one model bundle.
+The Piper URDF and its generated DAE resources are tracked as one small model
+bundle. Its individual files and total resource size remain below the ordinary
+Git thresholds documented in `system/soma/ROBOT_MODEL_ASSETS.md`.
 Regenerate them from the pinned official repository revision whenever the
 model is updated:
 
@@ -52,8 +54,8 @@ This creates `model/meshes/dae/` beside the tracked URDF. The URDF references
 resources with paths such as `meshes/dae/link1.dae`, resolved relative to
 `model/piper_with_gripper.urdf`. The generated Mesh files are part of the
 tracked robot model; stage them together with the URDF, manifest, source
-metadata, and license. See `system/soma/README.md` for the general resource
-path convention and `MODEL_SOURCE.md` for provenance.
+metadata, and license. See `system/soma/ROBOT_MODEL_ASSETS.md` for the complete
+resource policy and `MODEL_SOURCE.md` for provenance.
 
 Load the VLM settings needed for Pilot, then build the one primitive:
 

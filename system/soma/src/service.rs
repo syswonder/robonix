@@ -3,24 +3,31 @@
 use crate::pb::contracts::{
     robonix_system_soma_footprint_server::RobonixSystemSomaFootprint,
     robonix_system_soma_get_health_server::RobonixSystemSomaGetHealth,
+    robonix_system_soma_get_urdf_asset_manifest_server::RobonixSystemSomaGetUrdfAssetManifest,
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdf,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
     robonix_system_soma_health_server::RobonixSystemSomaHealth,
+    robonix_system_soma_stream_urdf_asset_server::RobonixSystemSomaStreamUrdfAsset,
 };
 use crate::pb::geometry_msgs::Point;
 use crate::pb::soma::{
     ActuatorState, ComponentStatus, GetFootprintRequest, GetFootprintResponse, GetHealthRequest,
-    GetHealthResponse, GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse, Metric,
-    Scalar, SomaHealthSnapshot, StreamHealthRequest, UrdfAsset,
+    GetHealthResponse, GetUrdfAssetManifestRequest, GetUrdfAssetManifestResponse, GetUrdfRequest,
+    GetUrdfResponse, GetYamlRequest, GetYamlResponse, Metric, Scalar, SomaHealthSnapshot,
+    StreamHealthRequest, StreamUrdfAssetRequest, UrdfAsset, UrdfAssetChunk, UrdfAssetMetadata,
 };
 use crate::runtime_state::RuntimeStateStore;
 use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+
+const DEFAULT_URDF_ASSET_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_URDF_ASSET_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct SomaService {
@@ -409,6 +416,117 @@ impl RobonixSystemSomaGetUrdf for SomaService {
 }
 
 #[tonic::async_trait]
+impl RobonixSystemSomaGetUrdfAssetManifest for SomaService {
+    /// Return immutable resource metadata while keeping asset bytes out of the response.
+    async fn get_urdf_asset_manifest(
+        &self,
+        request: Request<GetUrdfAssetManifestRequest>,
+    ) -> Result<Response<GetUrdfAssetManifestResponse>, Status> {
+        let req = request.into_inner();
+        let body = self
+            .body
+            .resolve(&req.robot_id)
+            .map_err(Self::map_lookup_error)?;
+        let robot_id = body.robot_id.clone();
+        let urdf_xml = body.urdf_xml.clone();
+        let body = Arc::clone(&self.body);
+        let manifest = tokio::task::spawn_blocking(move || body.urdf_asset_manifest())
+            .await
+            .map_err(|error| Status::internal(format!("join URDF manifest reader: {error}")))?
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        Ok(Response::new(GetUrdfAssetManifestResponse {
+            robot_id,
+            urdf_xml,
+            resource_set_id: manifest.resource_set_id,
+            total_size_bytes: manifest.total_size_bytes,
+            assets: manifest
+                .assets
+                .into_iter()
+                .map(|asset| UrdfAssetMetadata {
+                    path: asset.path,
+                    size_bytes: asset.size_bytes,
+                    sha256: asset.sha256,
+                    media_type: asset.media_type,
+                })
+                .collect(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl RobonixSystemSomaStreamUrdfAsset for SomaService {
+    type StreamUrdfAssetStream = ReceiverStream<Result<UrdfAssetChunk, Status>>;
+
+    /// Stream one indexed asset from an optional byte offset in bounded messages.
+    async fn stream_urdf_asset(
+        &self,
+        request: Request<StreamUrdfAssetRequest>,
+    ) -> Result<Response<Self::StreamUrdfAssetStream>, Status> {
+        let req = request.into_inner();
+        self.body
+            .resolve(&req.robot_id)
+            .map_err(Self::map_lookup_error)?;
+        let source_path = self
+            .body
+            .resolve_urdf_asset_path(&req.path)
+            .map_err(|error| Status::not_found(error.to_string()))?;
+        let file_size = source_path
+            .metadata()
+            .map_err(|error| Status::failed_precondition(error.to_string()))?
+            .len();
+        if req.offset > file_size {
+            return Err(Status::out_of_range(format!(
+                "asset offset {} exceeds file size {}",
+                req.offset, file_size
+            )));
+        }
+        let chunk_size = match req.chunk_size {
+            0 => DEFAULT_URDF_ASSET_CHUNK_BYTES,
+            requested => usize::try_from(requested)
+                .unwrap_or(MAX_URDF_ASSET_CHUNK_BYTES)
+                .clamp(1, MAX_URDF_ASSET_CHUNK_BYTES),
+        };
+        let path = req.path;
+        let offset = req.offset;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let result = async {
+                let mut source = tokio::fs::File::open(&source_path).await?;
+                source.seek(std::io::SeekFrom::Start(offset)).await?;
+                let mut current_offset = offset;
+                let mut buffer = vec![0_u8; chunk_size];
+                loop {
+                    let read = source.read(&mut buffer).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    let chunk = UrdfAssetChunk {
+                        path: path.clone(),
+                        offset: current_offset,
+                        data: buffer[..read].to_vec(),
+                    };
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        return Ok::<(), std::io::Error>(());
+                    }
+                    current_offset = current_offset.saturating_add(read as u64);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = tx
+                    .send(Err(Status::internal(format!(
+                        "stream URDF asset '{}': {error}",
+                        source_path.display()
+                    ))))
+                    .await;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[tonic::async_trait]
 impl RobonixSystemSomaFootprint for SomaService {
     async fn get_footprint(
         &self,
@@ -447,10 +565,14 @@ mod tests {
     use crate::pb::contracts::{
         robonix_system_soma_footprint_client::RobonixSystemSomaFootprintClient,
         robonix_system_soma_footprint_server::RobonixSystemSomaFootprintServer,
+        robonix_system_soma_get_urdf_asset_manifest_client::RobonixSystemSomaGetUrdfAssetManifestClient,
+        robonix_system_soma_get_urdf_asset_manifest_server::RobonixSystemSomaGetUrdfAssetManifestServer,
         robonix_system_soma_get_urdf_client::RobonixSystemSomaGetUrdfClient,
         robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
         robonix_system_soma_get_yaml_client::RobonixSystemSomaGetYamlClient,
         robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYamlServer,
+        robonix_system_soma_stream_urdf_asset_client::RobonixSystemSomaStreamUrdfAssetClient,
+        robonix_system_soma_stream_urdf_asset_server::RobonixSystemSomaStreamUrdfAssetServer,
     };
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -460,6 +582,28 @@ mod tests {
             .join("../..")
             .join("examples/test_ci/soma.yaml");
         Arc::new(SomaBody::load(&yaml_path).expect("load fixture body"))
+    }
+
+    /// Build a temporary robot whose single resource can exceed unary gRPC limits.
+    fn body_with_asset(size_bytes: u64) -> (tempfile::TempDir, Arc<SomaBody>) {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let yaml_path = directory.path().join("soma.yaml");
+        std::fs::write(
+            &yaml_path,
+            "urdf:\n  path: robot.urdf\nrobot:\n  id: large_asset_robot\n",
+        )
+        .expect("write Soma YAML");
+        std::fs::write(
+            directory.path().join("robot.urdf"),
+            r#"<robot name="large_asset_robot"><link name="base_link"><visual><geometry><mesh filename="meshes/link.stl"/></geometry></visual></link></robot>"#,
+        )
+        .expect("write URDF");
+        std::fs::create_dir(directory.path().join("meshes")).expect("create mesh directory");
+        let asset =
+            std::fs::File::create(directory.path().join("meshes/link.stl")).expect("create mesh");
+        asset.set_len(size_bytes).expect("size mesh");
+        let body = Arc::new(SomaBody::load(&yaml_path).expect("load large asset body"));
+        (directory, body)
     }
 
     #[tokio::test]
@@ -489,6 +633,66 @@ mod tests {
             .into_inner();
         assert_eq!(response.robot_id, "test_ci_robot");
         assert!(response.urdf_xml.contains("<robot name=\"test_ci_robot\">"));
+    }
+
+    /// A resource larger than the legacy 32 MiB response remains streamable in bounded chunks.
+    #[tokio::test]
+    async fn grpc_streams_large_urdf_asset_in_bounded_chunks() {
+        let expected_size = 33 * 1024 * 1024 + 17;
+        let (_directory, body) = body_with_asset(expected_size);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let service = Arc::new(SomaService::new(body));
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RobonixSystemSomaGetUrdfAssetManifestServer::from_arc(
+                    Arc::clone(&service),
+                ))
+                .add_service(RobonixSystemSomaStreamUrdfAssetServer::from_arc(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .expect("serve");
+        });
+
+        let endpoint = format!("http://{addr}");
+        let mut manifest_client =
+            RobonixSystemSomaGetUrdfAssetManifestClient::connect(endpoint.clone())
+                .await
+                .expect("connect manifest");
+        let mut stream_client = RobonixSystemSomaStreamUrdfAssetClient::connect(endpoint)
+            .await
+            .expect("connect stream");
+        let manifest = manifest_client
+            .get_urdf_asset_manifest(GetUrdfAssetManifestRequest {
+                robot_id: "large_asset_robot".into(),
+            })
+            .await
+            .expect("get manifest")
+            .into_inner();
+        assert_eq!(manifest.total_size_bytes, expected_size);
+        assert_eq!(manifest.assets[0].size_bytes, expected_size);
+
+        let mut stream = stream_client
+            .stream_urdf_asset(StreamUrdfAssetRequest {
+                robot_id: "large_asset_robot".into(),
+                path: "meshes/link.stl".into(),
+                offset: 0,
+                chunk_size: u32::MAX,
+            })
+            .await
+            .expect("stream asset")
+            .into_inner();
+        let mut received = 0_u64;
+        let mut chunks = 0;
+        while let Some(chunk) = stream.message().await.expect("read chunk") {
+            assert_eq!(chunk.offset, received);
+            assert!(chunk.data.len() <= MAX_URDF_ASSET_CHUNK_BYTES);
+            received += chunk.data.len() as u64;
+            chunks += 1;
+        }
+        assert_eq!(received, expected_size);
+        assert!(chunks > 8);
+        server.abort();
     }
 
     #[tokio::test]
