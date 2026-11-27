@@ -315,15 +315,6 @@ impl PilotConfig {
                 .or(file_cfg
                     .correction_learning_api_key
                     .filter(|value| !value.trim().is_empty()));
-            if reflection_upstream
-                .as_ref()
-                .is_some_and(|value| value.trim_end_matches('/') != upstream.trim_end_matches('/'))
-                && reflection_api_key.is_none()
-            {
-                bail!(
-                    "correction_learning_api_key is required when correction_learning_upstream differs from vlm.upstream"
-                );
-            }
             Some(LearningConfig {
                 root_dir,
                 reflection_upstream,
@@ -397,6 +388,17 @@ impl PilotConfig {
                 api_format,
             )?
         };
+        if let Some(learning) = &learning
+            && learning
+                .reflection_upstream
+                .as_ref()
+                .is_some_and(|value| value.trim_end_matches('/') != vlm.upstream.trim_end_matches('/'))
+            && learning.reflection_api_key.is_none()
+        {
+            bail!(
+                "correction_learning_api_key is required when correction_learning_upstream differs from vlm.upstream"
+            );
+        }
         Ok(Self {
             atlas_endpoint,
             listen,
