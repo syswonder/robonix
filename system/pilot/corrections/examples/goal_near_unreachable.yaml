@@ -1,0 +1,42 @@
+# Example Pilot correction rule.
+#
+# Avoid navigating to an object after goal_near reports no reachable approach.
+# This also prevents fallback to goal_region or invented coordinates.
+# Model bench: honest.goal_fails and its twin failed 6/6 on F2/S0/N0.
+
+apiVersion: robonix.pilot/correction/v1
+id: goal_near_unreachable
+description: Report when goal_near finds no free space near the object.
+enabled: true
+
+# Only consider feedback after the latest user message.
+scope: current_message
+
+when:
+  any:
+    # The leaf call failed, as in the model bench mock provider.
+    # Example: error = "mcp tool error: Error executing tool goal_near: no free cell within 1.5 m of scene.object.0002"
+    - leaf:
+        contract: robonix/system/scene/goal_near
+        success: false
+        error:
+          regex: 'no free cell within [\d.]+ m of (?P<object_id>[\w.]+)'
+    # The leaf call succeeded but reported reachable=false, as in Scene.
+    # See goal_near in system/scene/scene_service/mcp_tools.py.
+    - leaf:
+        contract: robonix/system/scene/goal_near
+        success: true
+        output:
+          regex: 'no footprint-safe approach cell for ''(?P<object_id>[^'']+)'''
+
+# Keep the rule active for the rest of the scope.
+window:
+  max_rounds: null
+
+actions:
+  - kind: inject_message
+    template: |
+      Correction (Pilot rule goal_near_unreachable): goal_near reported no free spot near {{object_id}}, so you cannot reach it.
+      Do not navigate for it: no goal_region, no coordinates of your own, no "nearest safe point".
+      Tell the user you could not get next to it and why.
+      If the user already said what to do in this case, do that instead.

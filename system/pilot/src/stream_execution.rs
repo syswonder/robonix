@@ -17,6 +17,7 @@ use tonic::{Streaming, transport::Channel};
 pub(crate) enum SubmissionInterrupt {
     Stale,
     Failed,
+    Blocked,
 }
 
 /// Admission context checked before each streamed node is submitted.
@@ -29,6 +30,10 @@ pub(crate) struct SubmissionGuard<'a> {
     pub revision: &'a AtomicU64,
     /// Execution revision observed when this planning request began.
     pub expected_revision: u64,
+    /// Require navigation targets to match coordinates supplied by the user.
+    pub require_user_coordinates: bool,
+    /// Current conversation, used to verify navigation targets.
+    pub history: &'a [crate::vlm::Message],
 }
 
 /// One submitted tree's input, observed output, and exact accepted node arena.
@@ -59,6 +64,16 @@ impl StreamExecution {
         guard: SubmissionGuard<'_>,
     ) -> Result<Option<SubmissionInterrupt>> {
         for message in messages {
+            if guard.require_user_coordinates
+                && let Some(call) = message.node.as_ref().and_then(|node| node.call.as_ref())
+                && call.contract_id == "robonix/service/navigation/navigate"
+                && !crate::corrections::navigation_uses_user_coordinates(
+                    guard.history,
+                    &call.args_json,
+                )
+            {
+                return Ok(Some(SubmissionInterrupt::Blocked));
+            }
             if self.plan.nodes.is_empty()
                 && guard.revision.load(Ordering::Acquire) != guard.expected_revision
             {
@@ -268,6 +283,75 @@ mod tests {
     use crate::pb::executor::{ControlPlanResponse, RtdlPlanComplete};
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn navigation_without_explicit_coordinates_is_not_submitted() {
+        let (input, mut rx) = mpsc::channel(8);
+        let mut live = StreamExecution {
+            input: Some(input),
+            ..Default::default()
+        };
+        let mut client = RobonixSystemExecutorExecuteStreamClient::new(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+        );
+        let message = ExecuteStreamInput {
+            message_kind: EXECUTE_STREAM_NODE,
+            node: Some(crate::pb::pilot::RtdlNode {
+                node_kind: 2,
+                call: Some(crate::pb::pilot::CapabilityCall {
+                    contract_id: "robonix/service/navigation/navigate".into(),
+                    args_json: r#"{"goal":{"pose":{"position":{"x":1.0,"y":2.0}}}}"#.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let revision = AtomicU64::new(0);
+        let forbidden = HashSet::new();
+        let no_coordinates = [crate::vlm::Message::user(
+            "User message m1 (filed under T1): 去客厅", // i18n-ok
+        )];
+        let result = live
+            .submit(
+                vec![message.clone()],
+                SubmissionGuard {
+                    client: &mut client,
+                    forbidden: &forbidden,
+                    revision: &revision,
+                    expected_revision: 0,
+                    require_user_coordinates: true,
+                    history: &no_coordinates,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, Some(SubmissionInterrupt::Blocked)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let coordinates = [crate::vlm::Message::user(
+            "User message m2 (filed under T1): 去客厅 x=1, y=2", // i18n-ok
+        )];
+        let result = live
+            .submit(
+                vec![message],
+                SubmissionGuard {
+                    client: &mut client,
+                    forbidden: &forbidden,
+                    revision: &revision,
+                    expected_revision: 0,
+                    require_user_coordinates: true,
+                    history: &coordinates,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(rx.try_recv().unwrap().message_kind, EXECUTE_STREAM_NODE);
+    }
 
     #[tokio::test]
     async fn identical_active_call_is_rejected_before_dispatch() {

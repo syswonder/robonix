@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import yaml
@@ -236,7 +238,83 @@ def call_output(value):
     return value
 
 
-def run_case(a, world: Path, case: dict, tag: str) -> dict:
+def restore_workspace_file(root: Path, path: Path, original: bytes | None, mode: int | None) -> None:
+    for parent in path.parents:
+        if parent == root:
+            break
+        if parent.is_symlink() or not parent.is_dir():
+            raise RuntimeError(f"workspace parent changed during the case: {parent}")
+    if path.is_symlink():
+        path.unlink()
+    if original is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(original)
+        path.chmod(mode)
+
+
+@contextmanager
+def case_workspace(root: Path, files: dict):
+    """Install text fixtures for one attempt, restoring files and directories on exit."""
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError(f"workspace is not a directory: {root}")
+    with ExitStack() as cleanup:
+        fd = os.open(root, os.O_RDONLY)
+        cleanup.callback(os.close, fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"workspace is already in use by another bench: {root}") from error
+        targets = []
+        for name, text in files.items():
+            if not isinstance(name, str) or not isinstance(text, str):
+                raise ValueError("workspace_files must map relative paths to text")
+            relative = Path(name)
+            if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"unsafe workspace_files path: {name}")
+            path = root / relative
+            for candidate in [path, *path.parents]:
+                if candidate == root:
+                    break
+                if candidate.is_symlink():
+                    raise ValueError(f"symlink in workspace_files path: {name}")
+                if candidate.exists() and not (candidate.is_file() if candidate == path else candidate.is_dir()):
+                    raise ValueError(f"invalid workspace_files path: {name}")
+            targets.append((path, text))
+        paths = {path for path, _ in targets}
+        if len(paths) != len(targets) or any(parent in paths for path in paths for parent in path.parents):
+            raise ValueError("workspace_files paths overlap")
+        for path, text in targets:
+            missing = []
+            parent = path.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for parent in reversed(missing):
+                parent.mkdir()
+                cleanup.callback(parent.rmdir)
+            original = path.read_bytes() if path.exists() else None
+            mode = path.stat().st_mode & 0o7777 if original is not None else None
+            cleanup.callback(restore_workspace_file, root, path, original, mode)
+            path.write_text(text, encoding="utf-8")
+        yield
+
+
+def run_case(a, world: Path, case: dict, tag: str, workspace_files: dict | None = None) -> dict:
+    defaults = workspace_files if workspace_files is not None else {}
+    local = case.get("workspace_files", {})
+    if not isinstance(defaults, dict) or not isinstance(local, dict):
+        raise ValueError("workspace_files must be a mapping")
+    files = {**defaults, **local}
+    if not files:
+        return _run_case(a, world, case, tag)
+    root = Path(getattr(a, "workspace", None) or a.deploy)
+    with case_workspace(root, files):
+        return _run_case(a, world, case, tag)
+
+
+def _run_case(a, world: Path, case: dict, tag: str) -> dict:
     w = case.get("world", {})
     log_dir = getattr(a, "log_dir", None)
     (world / "state.json").write_text(json.dumps({
@@ -466,6 +544,7 @@ def main() -> None:
     ap.add_argument("--env-file", required=True, help="KEY=VALUE file with VLM_BASE_URL and VLM_API_KEY")
     ap.add_argument("--model", action="append", required=True, help="model id, or id=vendor/name to label it; repeatable")
     ap.add_argument("--deploy", default=str(HERE / ".deploy"), help="the booted bench deployment (world/make_deploy.py)")
+    ap.add_argument("--workspace", help="Executor file root for workspace_files; defaults to --deploy. Must match its boot cwd or ROBONIX_WORKSPACE")
     ap.add_argument("--server", default="127.0.0.1:52051", help="its Atlas")
     ap.add_argument("--rbnx", default=os.environ.get("RBNX_BIN", "rbnx"))
     ap.add_argument("--cases", default=str(HERE / "cases.yaml"))
@@ -582,7 +661,8 @@ def _run(a) -> None:
                 # about the model: run the case again, up to twice.
                 rounds = []
                 for attempt in range(3):
-                    run = run_case(a, world, case, f"{a.run_id}|{label}|{case['id']}|{rep}|{attempt}")
+                    run = run_case(a, world, case, f"{a.run_id}|{label}|{case['id']}|{rep}|{attempt}",
+                                   workspace_files=spec.get("workspace_files", {}))
                     rounds.extend(run["rounds"])
                     cap_rounds(rounds)
                     route_failed = any(v["status"] in (0, 429, 500, 502, 503, 504) for v in run["vlm"]) or (not run["vlm"] and run["failed"])

@@ -155,8 +155,15 @@ impl HistoryBudget {
 }
 
 /// Take in a user message (a request or a steer): file it with the session's
-/// tasks and put it in history once, labelled with its id and task.
-fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
+/// tasks and put it in history once, labelled with its id and task. When
+/// correction learning is on, an explicit user correction also snapshots the
+/// evidence and starts a detached diagnosis; that never blocks this turn.
+fn receive_user_message(
+    task: &Task,
+    history: &mut Vec<Message>,
+    tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
+) -> bool {
     let Some(message) = tasks.receive(&task.text) else {
         return false;
     };
@@ -165,7 +172,67 @@ fn receive_user_message(task: &Task, history: &mut Vec<Message>, tasks: &mut Tas
         message.line(),
         response_mode(task)
     )));
+    crate::correction_learning::maybe_start_learning(
+        learning,
+        history,
+        &task.session_id,
+        &task.task_id,
+        &task.text,
+    );
     true
+}
+
+async fn send_final_with_correction_candidates(
+    learning: Option<&Arc<crate::correction_learning::LearningRuntime>>,
+    session_id: &str,
+    tx: &mpsc::Sender<Result<PilotEvent, tonic::Status>>,
+    reply: String,
+) {
+    let notices = learning.map_or_else(Vec::new, |runtime| runtime.pending_notices(session_id));
+    let text = if notices.is_empty() {
+        reply
+    } else {
+        let details = notices
+            .iter()
+            .map(|(_, notice)| notice.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!("{}\n\n{details}", reply.trim_end());
+        // Some clients display only chunks once any chunk has arrived.
+        if tx
+            .send(Ok(service::pack(
+                session_id,
+                PilotStreamBody::TextChunk(text.clone()),
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        text
+    };
+    if tx
+        .send(Ok(service::pack(
+            session_id,
+            PilotStreamBody::FinalText(text),
+        )))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    for (marker, _) in notices {
+        if let Err(error) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            warn!(
+                "[pilot/learning] cannot record candidate notice {}: {error}",
+                marker.display()
+            );
+        }
+    }
 }
 
 /// The client's view of the tasks: the latest user message's task in the
@@ -307,11 +374,15 @@ fn task_modality(task: &Task) -> Option<String> {
         })
 }
 
+pub(crate) const RESPONSE_MODE_VOICE: &str = "Response mode for this task only: voice. Keep user-facing replies brief, plain, and suitable for TTS (about 30 Chinese characters or 50 English words).";
+pub(crate) const RESPONSE_MODE_TEXT: &str =
+    "Response mode for this task only: text. Earlier voice-only constraints no longer apply.";
+
 fn response_mode(task: &Task) -> &'static str {
     if task_modality(task).as_deref() == Some("voice") {
-        "Response mode for this task only: voice. Keep user-facing replies brief, plain, and suitable for TTS (about 30 Chinese characters or 50 English words)."
+        RESPONSE_MODE_VOICE
     } else {
-        "Response mode for this task only: text. Earlier voice-only constraints no longer apply."
+        RESPONSE_MODE_TEXT
     }
 }
 
@@ -983,8 +1054,13 @@ async fn fetch_executor_active_snapshot(executor: &mut ExecutorConn) -> (String,
 /// running. Draining is non-blocking; returns whether anything was pulled so
 /// the caller knows to re-plan. The model decides for itself whether the steer
 /// requires a root plan-control meta op.
-fn append_steer(task: Task, history: &mut Vec<Message>, tasks: &mut TaskTable) -> bool {
-    let pulled = receive_user_message(&task, history, tasks);
+fn append_steer(
+    task: Task,
+    history: &mut Vec<Message>,
+    tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
+) -> bool {
+    let pulled = receive_user_message(&task, history, tasks, learning);
     if pulled {
         info!("[pilot/steer] mid-task input: {}", task.text.trim());
     }
@@ -995,10 +1071,11 @@ fn drain_steers(
     steer_rx: &mut mpsc::Receiver<Task>,
     history: &mut Vec<Message>,
     tasks: &mut TaskTable,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
 ) -> bool {
     let mut pulled = false;
     while let Ok(task) = steer_rx.try_recv() {
-        pulled |= append_steer(task, history, tasks);
+        pulled |= append_steer(task, history, tasks, learning);
     }
     pulled
 }
@@ -1287,6 +1364,8 @@ pub async fn run_turn(
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
     history_budget: &HistoryBudget,
+    corrections: &crate::corrections::CorrectionSet,
+    learning: Option<&std::sync::Arc<crate::correction_learning::LearningRuntime>>,
     transcript: &mut Transcript,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
@@ -1353,7 +1432,12 @@ pub async fn run_turn(
     // Build deployment-independent system instructions once per turn.
     // Provider-specific semantics belong to the discovered capability catalog
     // and lazily loaded provider documentation, not Pilot's standing prefix.
-    let standing_prompt = build_system_prompt(load_agent_soul().as_deref());
+    let mut standing_prompt = build_system_prompt(load_agent_soul().as_deref());
+    if let Some(learning) = learning {
+        standing_prompt.push_str("\nCorrection learning runs in the background. Its candidates are disabled until a person reviews and enables them. Saving a memory does not activate a correction. When a user gives unclear correction feedback, ask what should change. Never claim a correction was saved or enabled unless its status is known.");
+        standing_prompt.push('\n');
+        standing_prompt.push_str(&learning.guidance());
+    }
     // Pilot binds to the canonical contract_id, not the LLM-facing tool
     // name: the latter is just the contract_id leaf and a provider could
     // rename it freely. contract_id is the stable identity.
@@ -1383,7 +1467,9 @@ pub async fn run_turn(
 
     // 2. Take in the user's message: Pilot files it under a task and puts it in
     // history once, with its id. Compaction keeps the open tasks' messages.
-    receive_user_message(task, history, tasks);
+    // Where this turn's additions to the history begin (for rules scoped to a turn).
+    let turn_start = history.len();
+    receive_user_message(task, history, tasks, learning);
     if !memory_prompt.is_empty() {
         history.push(Message::user(&memory_prompt));
     }
@@ -1391,6 +1477,7 @@ pub async fn run_turn(
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
+    let mut coordinate_restriction_cache: Option<(String, bool)> = None;
 
     // Pilot-assigned plan ids come from one process-global atomic counter.
     // They are reserved only for normal RTDL trees, never for meta operations,
@@ -1423,6 +1510,7 @@ pub async fn run_turn(
     let mut requests = 0usize;
     let mut output_retries = 0usize;
     let mut reply_shape = ReplyShape::RtdlEnvelope;
+    let mut correction_state = crate::corrections::CorrectionState::default();
 
     'supervisor: loop {
         while let Ok(event) = forest.interrupt_rx.try_recv() {
@@ -1442,12 +1530,13 @@ pub async fn run_turn(
             // for the user.
             if !waits_on_trees(forest, tasks) {
                 if !tasks.any_open() {
-                    let _ = tx
-                        .send(Ok(service::pack(
-                            &session_id,
-                            PilotStreamBody::FinalText(last_content.clone()),
-                        )))
-                        .await;
+                    send_final_with_correction_candidates(
+                        learning,
+                        &session_id,
+                        tx,
+                        last_content.clone(),
+                    )
+                    .await;
                     break;
                 }
                 // An open task with no running plan and no planning event is
@@ -1462,7 +1551,7 @@ pub async fn run_turn(
                     steer = steer_rx.recv() => {
                         match steer {
                             Some(task) => {
-                                if append_steer(task, history, tasks) {
+                                if append_steer(task, history, tasks, learning) {
                                     should_plan = true;
                                 }
                             }
@@ -1481,7 +1570,7 @@ pub async fn run_turn(
                 }
                 steer = steer_rx.recv() => {
                     if let Some(task) = steer
-                        && append_steer(task, history, tasks)
+                        && append_steer(task, history, tasks, learning)
                     {
                         // Re-plan now so the model can react (and decide
                         // whether to cancel any in-flight tree).
@@ -1505,7 +1594,7 @@ pub async fn run_turn(
 
         // Pull any steers that landed while we were busy (e.g. during the
         // previous VLM stream) so this round plans with the latest user input.
-        drain_steers(&mut steer_rx, history, tasks);
+        drain_steers(&mut steer_rx, history, tasks, learning);
         clock_result!(transcript.record(history, tasks));
 
         // Re-discover capabilities from atlas every round so providers that
@@ -1605,11 +1694,7 @@ pub async fn run_turn(
         let runtime_context = render_context_sections(&live_sections);
         if requests >= max_rounds {
             warn!("[pilot] hit max planning requests ({max_rounds}), stopping turn");
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::FinalText(last_content.clone()),
-                )))
+            send_final_with_correction_candidates(learning, &session_id, tx, last_content.clone())
                 .await;
             break;
         }
@@ -1630,6 +1715,49 @@ pub async fn run_turn(
         let board = tasks.board();
         if !board.is_empty() {
             request_history.push(Message::user(&board));
+        }
+        // Operator-written hints for this step. They join this request only; `history`
+        // is untouched, so a hint ends with the condition that caused it.
+        let mut require_user_coordinates = false;
+        if let Some(injection) = corrections.evaluate(history, turn_start, &mut correction_state) {
+            let applies = if let Some(instruction) = injection.guarded_message.as_deref() {
+                let request = crate::corrections::latest_user_request(history)
+                    .unwrap_or("")
+                    .to_string();
+                let key = format!("{request}\n{instruction}");
+                if let Some((cached, applies)) = &coordinate_restriction_cache
+                    && *cached == key
+                {
+                    *applies
+                } else {
+                    let applies = tokio::select! {
+                        biased;
+                        _ = term_signal.changed() => return_interrupted!(&forest.trees),
+                        steer = steer_rx.recv(), if !steer_rx.is_closed() => {
+                            if let Some(task) = steer {
+                                append_steer(task, history, tasks, learning);
+                                drain_steers(&mut steer_rx, history, tasks, learning);
+                            }
+                            should_plan = true;
+                            continue 'supervisor;
+                        }
+                        applies = crate::corrections::coordinate_restriction_applies(
+                            learning.map_or(vlm, |runtime| runtime.client()), &request, instruction
+                        ) => applies,
+                    };
+                    coordinate_restriction_cache = Some((key, applies));
+                    applies
+                }
+            } else {
+                injection.require_user_coordinates
+            };
+            require_user_coordinates = injection.require_user_coordinates && applies;
+            if applies || !injection.require_user_coordinates {
+                log_corrections(&session_id, round, &injection);
+                request_history.push(injection.message);
+            } else if let Some(message) = injection.unguarded_message {
+                request_history.push(message);
+            }
         }
         let messages = assemble_planning_messages(
             round,
@@ -1703,9 +1831,9 @@ pub async fn run_turn(
                         drop(stream);
                         let cleanup = live.cancel(&mut executor.control).await;
                         publish_stream(live, forest, history, tx, &session_id).await;
-                        append_steer(task, history, tasks);
+                        append_steer(task, history, tasks, learning);
                         cleanup?;
-                        drain_steers(&mut steer_rx, history, tasks);
+                        drain_steers(&mut steer_rx, history, tasks, learning);
                         should_plan = true;
                         continue 'supervisor;
                     }
@@ -1730,6 +1858,7 @@ pub async fn run_turn(
                             let submission = live.submit(parser.take_messages(), crate::stream_execution::SubmissionGuard {
                                 client: &mut executor.streaming, forbidden: &forbidden,
                                 revision: &forest.revision, expected_revision: planning_revision,
+                                require_user_coordinates, history,
                             }).await;
                             if streamed_task.is_none() && !live.plan.nodes.is_empty() {
                                 let mut fields = parser.task_fields.clone();
@@ -1744,6 +1873,15 @@ pub async fn run_turn(
                                 Err(error) => { live.transport_failed = true; stream_error = Some(error); break; }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Failed)) => {
                                     execution_failed = true; break;
+                                }
+                                Ok(Some(crate::stream_execution::SubmissionInterrupt::Blocked)) => {
+                                    drop(stream);
+                                    let cleanup = live.cancel(&mut executor.control).await;
+                                    publish_stream(live, forest, history, tx, &session_id).await;
+                                    cleanup?;
+                                    history.push(Message::user("Pilot blocked navigation because the goal did not match explicit map coordinates in the latest user request. Ask the user for coordinates as x=<number>, y=<number>; do not retry navigation without them."));
+                                    should_plan = true;
+                                    continue 'supervisor;
                                 }
                                 Ok(Some(crate::stream_execution::SubmissionInterrupt::Stale)) => {
                                     drop(stream);
@@ -1979,12 +2117,7 @@ pub async fn run_turn(
                 } else {
                     assistant_content
                 };
-                let _ = tx
-                    .send(Ok(service::pack(
-                        &session_id,
-                        PilotStreamBody::FinalText(reply),
-                    )))
-                    .await;
+                send_final_with_correction_candidates(learning, &session_id, tx, reply).await;
                 break;
             }
             // A completed interaction may close while unrelated long-running
@@ -1992,12 +2125,22 @@ pub async fn run_turn(
             // stream open: surface the model text as progress and wait for the
             // relevant plan result before producing FinalText.
             if !assistant_content.trim().is_empty() {
-                let body = if task_done {
-                    PilotStreamBody::FinalText(assistant_content.clone())
+                if task_done {
+                    send_final_with_correction_candidates(
+                        learning,
+                        &session_id,
+                        tx,
+                        assistant_content.clone(),
+                    )
+                    .await;
                 } else {
-                    PilotStreamBody::TextChunk(assistant_content.clone())
-                };
-                let _ = tx.send(Ok(service::pack(&session_id, body))).await;
+                    let _ = tx
+                        .send(Ok(service::pack(
+                            &session_id,
+                            PilotStreamBody::TextChunk(assistant_content.clone()),
+                        )))
+                        .await;
+                }
                 if !task_done {
                     // Status is the narration boundary consumed by Liaison:
                     // display/TTS the complete progress text now without
@@ -2038,11 +2181,7 @@ pub async fn run_turn(
             // The tree keeps running under the session's forest; the caller
             // still gets a final answer.
             warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
-            let _ = tx
-                .send(Ok(service::pack(
-                    &session_id,
-                    PilotStreamBody::FinalText(last_content.clone()),
-                )))
+            send_final_with_correction_candidates(learning, &session_id, tx, last_content.clone())
                 .await;
             break;
         }
@@ -2324,6 +2463,31 @@ fn format_plan_summary(plan: &Plan) -> Vec<String> {
 }
 
 /// Emit the compact plan-start log block for one expanded RTDL plan.
+/// One info line per request a rule changed, to check from the log which rule
+/// fired in which round.
+fn log_corrections(session_id: &str, round: u32, injection: &crate::corrections::Injection) {
+    let rules: Vec<serde_json::Value> = injection
+        .fired
+        .iter()
+        .map(|rule| {
+            serde_json::json!({
+                "id": rule.id,
+                "window_round": rule.window_round,
+                "vars": rule.vars,
+            })
+        })
+        .collect();
+    info!(
+        "[pilot/correction] {}",
+        serde_json::json!({
+            "session": session_id,
+            "round": round,
+            "rules": rules,
+            "bytes": injection.message.content.as_deref().map_or(0, str::len),
+        })
+    );
+}
+
 fn log_plan_start(plan: &Plan, description: &str, round: u32, calls: usize) {
     info!(
         "[pilot/rtdl] -- plan start plan_id={} round={} calls={} --",
@@ -2454,7 +2618,8 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
                 }
             });
             Message::user(&format!(
-                "Executor feedback for the current RTDL leaf (not a new user request): {}",
+                "{}{}",
+                crate::corrections::LEAF_FEEDBACK_PREFIX,
                 feedback
             ))
         })
@@ -2464,6 +2629,14 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
         tool_messages,
         followup_messages: mapped.followup_messages,
     }
+}
+
+/// The history message a leaf result becomes, for tests of readers of that format.
+#[cfg(test)]
+pub(crate) fn rtdl_result_to_messages_for_test(
+    r: &CapabilityCallResult,
+) -> history::ToolResultHistory {
+    rtdl_result_to_messages(r)
 }
 
 // ── System prompt + SOUL ──────────────────────────────────────────────────────
@@ -2741,6 +2914,8 @@ mod tests {
                                     steer_rx,
                                     Arc::new(AtomicU64::new(0)),
                                     &HistoryBudget::new(None, "unavailable"),
+                                    &crate::corrections::CorrectionSet::default(),
+                                    None,
                                     &mut transcript,
                                 ),
                             )
@@ -3191,6 +3366,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         tasks.answered();
         assert!(append_steer(
@@ -3200,6 +3376,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         assert_eq!(tasks.tasks.len(), 1);
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
@@ -3248,6 +3425,7 @@ mod tests {
             },
             &mut history,
             &mut tasks,
+            None,
         ));
         assert_eq!(tasks.message_ids("T1"), ["m1", "m2"]);
         tasks.attach_tree("T1", "11", "navigate to the meeting room");
@@ -3369,6 +3547,8 @@ mod tests {
         output: std::sync::Arc<tokio::sync::Mutex<Option<ExecutorEventSender>>>,
         /// Exact plan admitted by the incremental input stream.
         plan_id: std::sync::Arc<tokio::sync::Mutex<String>>,
+        /// Error text of a failed leaf; empty keeps the default file error.
+        fail_error: String,
     }
 
     #[tonic::async_trait]
@@ -3395,7 +3575,7 @@ mod tests {
                                 leaf_result: Some(CapabilityCallResult {
                                     call_id: call.call_id, contract_id: call.contract_id,
                                     success: !failed, output: if failed { "" } else { "completed action" }.into(),
-                                    error: if failed { "No such file or directory" } else { "" }.into(),
+                                    error: if !failed { String::new() } else if state.fail_error.is_empty() { "No such file or directory".into() } else { state.fail_error.clone() },
                                     ..Default::default()
                                 }), ..Default::default()
                             }), ..Default::default()
@@ -3552,6 +3732,8 @@ mod tests {
                 steer,
                 std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 &HistoryBudget::new(None, "test"),
+                &crate::corrections::CorrectionSet::default(),
+                None,
                 &mut transcript,
             ),
         )
@@ -3584,6 +3766,237 @@ mod tests {
             });
         }
         assert!(failed_leaf, "client retains exact failed leaf feedback");
+    }
+
+    /// Runs one real `run_turn` against a fake Atlas, Executor and model. The first
+    /// model reply plans a leaf that fails with `fail_error`; the second ends the
+    /// task. Returns the request bodies the model received, in order.
+    async fn model_requests_after_a_failed_leaf(
+        fail_error: &str,
+        rules: &crate::corrections::CorrectionSet,
+        user_text: &str,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let registry = std::sync::Arc::new(robonix_atlas::service::AtlasRegistry::default());
+        registry
+            .register(
+                "executor",
+                atlas_pb::Kind::Service,
+                "robonix/system/executor",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        registry
+            .declare(
+                "executor",
+                "robonix/system/executor/builtin/read_file",
+                atlas_pb::Transport::Mcp,
+                "http://127.0.0.1:1/mcp",
+                atlas_pb::TransportParams {
+                    kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                        input_schema_json:
+                            r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.into(),
+                    })),
+                },
+                "Read a file",
+            )
+            .await
+            .unwrap();
+        let execution = FastLeafExecutor {
+            fail_error: fail_error.into(),
+            ..Default::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures_util::stream::unfold(listener, |listener| async {
+            let stream = listener.accept().await.map(|(stream, _)| stream);
+            Some((stream, listener))
+        });
+        let grpc = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(atlas_pb::atlas_server::AtlasServer::new(robonix_atlas::service::AtlasService::new(registry)))
+            .add_service(crate::pb::contracts::robonix_system_executor_execute_stream_server::RobonixSystemExecutorExecuteStreamServer::new(execution.clone()))
+            .add_service(crate::pb::contracts::robonix_system_executor_control_plan_server::RobonixSystemExecutorControlPlanServer::new(execution.clone()))
+            .serve_with_incoming(incoming));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let received = requests.clone();
+        let http = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let received = received.clone();
+                handlers.spawn(async move {
+                    let mut raw = Vec::new(); let mut bytes = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut bytes).await.unwrap(); assert!(count > 0);
+                        raw.extend_from_slice(&bytes[..count]);
+                        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                            let headers = std::str::from_utf8(&raw[..end]).unwrap();
+                            let length: usize = headers.lines().find_map(|line| {
+                                let (name,value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                            }).unwrap();
+                            if raw.len() >= end + 4 + length { received.lock().await.push(String::from_utf8(raw[end+4..].to_vec()).unwrap()); break; }
+                        }
+                    }
+                    let content = if index == 0 {
+                        r#"{"content":"","rtdl_description":"read it","message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[],"rtdl":{"op":"sequence","description":"read it","children":[{"op":"do","cap":"executor.builtin_read_file","args":{"path":"missing"}}"#.to_string()
+                    } else {
+                        json!({"content":"told the user", "rtdl_description":"done", "rtdl":{"op":"sequence","children":[]},"message_updates":[],"rtdl_parent_task_id":"T1","task_updates":[{"task_id":"T1","status":"done"}]}).to_string()
+                    };
+                    let event = format!("data: {}\n\n", json!({"choices":[{"delta":{"content":content}}]}));
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                    socket.write_all(format!("{:x}\r\n{}\r\n",event.len(),event).as_bytes()).await.unwrap();
+                    if index == 0 { std::future::pending::<()>().await; }
+                    let end = "data: [DONE]\n\n";
+                    socket.write_all(format!("{:x}\r\n{}\r\n0\r\n\r\n",end.len(),end).as_bytes()).await.unwrap();
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut executor = super::ExecutorConn {
+            streaming: super::RobonixSystemExecutorExecuteStreamClient::new(channel.clone()),
+            graph: super::RobonixSystemExecutorExecuteClient::new(channel.clone()),
+            control: super::RobonixSystemExecutorControlPlanClient::new(channel.clone()),
+            active: super::RobonixSystemExecutorListActivePlansClient::new(channel),
+        };
+        let vlm = crate::vlm::VlmClient::new(&crate::config::VlmConfig {
+            upstream: format!("http://{model_address}"),
+            api_key: String::new(),
+            model: "test".into(),
+            reasoning_effort: None,
+            catalog_id: None,
+            context_window_tokens: None,
+            api_format: "openai".into(),
+        });
+        let task = Task {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            text: user_text.into(),
+            ..Default::default()
+        };
+        let mut history = Vec::new();
+        let mut tasks = TaskTable::default();
+        let mut forest = super::SessionForest::default();
+        let mut transcript = crate::transcript::Transcript::new(&task.session_id, &history, &tasks);
+        let (_term, term) = tokio::sync::watch::channel(false);
+        let (_steer, steer) = tokio::sync::mpsc::channel(4);
+        let (tx, _events) = tokio::sync::mpsc::channel(128);
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::run_turn(
+                &task,
+                &mut history,
+                &mut tasks,
+                &mut forest,
+                &vlm,
+                &mut executor,
+                &mut robonix_atlas::client::AtlasClient::connect(format!("http://{address}"))
+                    .await
+                    .unwrap(),
+                "pilot",
+                &tx,
+                term,
+                steer,
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                &HistoryBudget::new(None, "test"),
+                rules,
+                None,
+                &mut transcript,
+            ),
+        )
+        .await;
+        http.abort();
+        grpc.abort();
+        result
+            .expect("turn must finish within its test bound")
+            .expect("turn must succeed");
+        // A correction joins one request; it is never stored in the session history.
+        assert!(
+            history.iter().all(|m| !m
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("Pilot corrections")),
+            "a correction must not be written to the session history"
+        );
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        requests.clone()
+    }
+
+    const READ_FILE_RULE: &str = r#"
+apiVersion: robonix.pilot/correction/v1
+id: read_file_denied
+when:
+  any:
+    - leaf:
+        contract: robonix/system/executor/builtin/read_file
+        success: false
+        error: {regex: 'permission denied for (?P<path>\w+)'}
+actions:
+  - kind: inject_message
+    template: "Do not retry reading {{path}}; tell the user it is not readable."
+"#;
+
+    fn rules_from(text: &str) -> crate::corrections::CorrectionSet {
+        let dir = std::env::temp_dir().join(format!("pilot-corrections-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rule.yaml"), text).unwrap();
+        let set = crate::corrections::CorrectionSet::load(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        set
+    }
+
+    #[tokio::test]
+    async fn a_matching_rule_adds_its_hint_to_the_request_after_the_failure() {
+        let rules = rules_from(READ_FILE_RULE);
+        let requests = model_requests_after_a_failed_leaf(
+            "permission denied for missing",
+            &rules,
+            "read the missing file",
+        )
+        .await;
+        assert!(
+            !requests[0].contains("Pilot corrections"),
+            "nothing has failed yet, so the first request carries no hint"
+        );
+        assert!(
+            requests[1].contains("Pilot corrections for this step"),
+            "the request after the failure carries the hint: {}",
+            requests[1]
+        );
+        assert!(requests[1].contains("Do not retry reading missing"));
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_does_not_match_leaves_every_request_unchanged() {
+        let rules = rules_from(READ_FILE_RULE);
+        // The same failing leaf, but with an error the rule does not describe.
+        let with_rule =
+            model_requests_after_a_failed_leaf("disk on fire", &rules, "read the missing file")
+                .await;
+        let without_rule = model_requests_after_a_failed_leaf(
+            "disk on fire",
+            &crate::corrections::CorrectionSet::default(),
+            "read the missing file",
+        )
+        .await;
+        for request in &with_rule {
+            assert!(!request.contains("Pilot corrections"));
+        }
+        // With or without the rule the model is sent the same number of messages.
+        assert_eq!(
+            with_rule[1].matches("\"role\"").count(),
+            without_rule[1].matches("\"role\"").count()
+        );
     }
 
     #[tokio::test]
@@ -4559,5 +4972,67 @@ mod tests {
                 assert_eq!(messages[1].content, history[0].content);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn candidate_notice_is_session_scoped_and_reported_once() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("candidates/p1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rule.yaml"), "enabled: false\n").unwrap();
+        std::fs::write(
+            dir.join("metadata.json"),
+            serde_json::json!({
+                "status": "drafted", "rule_id": "living_room", "episode": {"session_id": "s1"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let active = root.path().join("active");
+        let runtime = std::sync::Arc::new(crate::correction_learning::LearningRuntime::new(
+            crate::config::LearningConfig {
+                root_dir: root.path().into(),
+                reflection_upstream: None,
+                reflection_api_key: None,
+                reflection_model: None,
+            },
+            &crate::config::VlmConfig {
+                upstream: "http://127.0.0.1:1".into(),
+                api_key: String::new(),
+                model: "test".into(),
+                reasoning_effort: None,
+                catalog_id: None,
+                context_window_tokens: None,
+                api_format: "openai".into(),
+            },
+            vec![],
+            Some(active.clone()),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        super::send_final_with_correction_candidates(Some(&runtime), "other", &tx, "answer".into())
+            .await;
+        assert_eq!(rx.try_recv().unwrap().unwrap().final_text, "answer");
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        let event = rx.try_recv().unwrap().unwrap();
+        assert!(event.text_chunk.contains("answer"));
+        assert!(event.text_chunk.contains("living_room"));
+        assert!(
+            event
+                .text_chunk
+                .contains(dir.join("rule.yaml").to_str().unwrap())
+        );
+        assert!(event.text_chunk.contains(active.to_str().unwrap()));
+        assert!(event.text_chunk.contains("restart Pilot"));
+        let final_event = rx.try_recv().unwrap().unwrap();
+        assert_eq!(final_event.final_text, event.text_chunk);
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        assert_eq!(rx.try_recv().unwrap().unwrap().final_text, "answer");
+        std::fs::remove_file(dir.join(".notified")).unwrap();
+        drop(rx);
+        super::send_final_with_correction_candidates(Some(&runtime), "s1", &tx, "answer".into())
+            .await;
+        assert!(!dir.join(".notified").exists());
     }
 }

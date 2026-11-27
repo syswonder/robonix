@@ -35,6 +35,27 @@ pub struct PilotConfig {
     pub listen: String,
     pub id: String,
     pub vlm: VlmConfig,
+    /// Directory of correction rules (see `corrections.rs`). `None` turns the
+    /// feature off and leaves every request exactly as it was.
+    pub corrections_dir: Option<PathBuf>,
+    /// User-feedback correction learning (see `correction_learning.rs`).
+    /// `None` turns the feature off.
+    pub learning: Option<LearningConfig>,
+}
+
+/// Settings for user-feedback correction learning. Phase 1 drafts disabled
+/// candidates only; nothing is auto-enabled.
+#[derive(Debug, Clone)]
+pub struct LearningConfig {
+    /// Root directory for episodes, candidates and the audit log, e.g.
+    /// `<deploy>/rbnx-boot/correction-learning/`.
+    pub root_dir: PathBuf,
+    /// Optional OpenAI-compatible endpoint for correction learning.
+    pub reflection_upstream: Option<String>,
+    /// Optional API key for the correction-learning endpoint.
+    pub reflection_api_key: Option<String>,
+    /// Model for the reflection call; `None` reuses the planning model.
+    pub reflection_model: Option<String>,
 }
 
 /// Connection settings used by Pilot's model client.
@@ -119,6 +140,39 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VLM_FORMAT")]
     pub vlm_format: Option<String>,
 
+    /// Directory of correction rules. Each `*.yaml` is one rule; a matching
+    /// rule adds a hint to the next planning request. Unset = feature off.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTIONS_DIR")]
+    pub corrections_dir: Option<PathBuf>,
+
+    /// Turn on user-feedback correction learning: when the user explicitly
+    /// says an execution was wrong, Pilot drafts a disabled correction-rule
+    /// candidate. Off by default; drafts are never auto-enabled.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING")]
+    pub correction_learning: bool,
+
+    /// Root directory for correction learning (episodes, candidates,
+    /// audit.jsonl). Required when correction learning is on; must be
+    /// separate from the corrections dir.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING_DIR")]
+    pub correction_learning_dir: Option<PathBuf>,
+
+    /// OpenAI-compatible endpoint for correction learning; defaults to the planning endpoint.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING_UPSTREAM")]
+    pub correction_learning_upstream: Option<String>,
+
+    /// API key for correction learning; required when its endpoint differs from the planning endpoint.
+    #[arg(
+        long,
+        env = "ROBONIX_PILOT_CORRECTION_LEARNING_API_KEY",
+        hide_env_values = true
+    )]
+    pub correction_learning_api_key: Option<String>,
+
+    /// Model used for the reflection call; defaults to the planning model.
+    #[arg(long, env = "ROBONIX_PILOT_CORRECTION_LEARNING_MODEL")]
+    pub correction_learning_model: Option<String>,
+
     /// YAML config file (rbnx writes this; CLI/env still override individual fields).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -149,6 +203,18 @@ struct FileConfig {
     id: Option<String>,
     #[serde(default)]
     vlm: Option<FileVlmConfig>,
+    #[serde(default)]
+    corrections_dir: Option<PathBuf>,
+    #[serde(default)]
+    correction_learning: Option<bool>,
+    #[serde(default)]
+    correction_learning_dir: Option<PathBuf>,
+    #[serde(default)]
+    correction_learning_upstream: Option<String>,
+    #[serde(default)]
+    correction_learning_api_key: Option<String>,
+    #[serde(default)]
+    correction_learning_model: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -211,6 +277,58 @@ impl PilotConfig {
             .vlm_api_key
             .or(file_vlm.api_key)
             .filter(|value| !value.trim().is_empty());
+        let corrections_dir = args
+            .corrections_dir
+            .or(file_cfg.corrections_dir)
+            .filter(|dir| !dir.as_os_str().is_empty());
+        let learning = if args.correction_learning || file_cfg.correction_learning.unwrap_or(false)
+        {
+            let root_dir = args
+                .correction_learning_dir
+                .or(file_cfg.correction_learning_dir)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .ok_or_else(|| {
+                    missing_field(
+                        "correction_learning_dir",
+                        "ROBONIX_PILOT_CORRECTION_LEARNING_DIR",
+                        "--correction-learning-dir",
+                    )
+                })?;
+            if corrections_dir
+                .as_ref()
+                .is_some_and(|active| *active == root_dir)
+            {
+                bail!(
+                    "correction_learning_dir must be separate from corrections_dir: \
+                       candidates are never loaded, and a shared directory blurs the two"
+                );
+            }
+            let reflection_upstream = args
+                .correction_learning_upstream
+                .filter(|value| !value.trim().is_empty())
+                .or(file_cfg
+                    .correction_learning_upstream
+                    .filter(|value| !value.trim().is_empty()));
+            let reflection_api_key = args
+                .correction_learning_api_key
+                .filter(|value| !value.trim().is_empty())
+                .or(file_cfg
+                    .correction_learning_api_key
+                    .filter(|value| !value.trim().is_empty()));
+            Some(LearningConfig {
+                root_dir,
+                reflection_upstream,
+                reflection_api_key,
+                reflection_model: args
+                    .correction_learning_model
+                    .filter(|model| !model.trim().is_empty())
+                    .or(file_cfg
+                        .correction_learning_model
+                        .filter(|model| !model.trim().is_empty())),
+            })
+        } else {
+            None
+        };
         let explicit_context = args
             .vlm_context_window_tokens
             .or(file_vlm.context_window_tokens)
@@ -270,11 +388,23 @@ impl PilotConfig {
                 api_format,
             )?
         };
+        if let Some(learning) = &learning
+            && learning.reflection_upstream.as_ref().is_some_and(|value| {
+                value.trim_end_matches('/') != vlm.upstream.trim_end_matches('/')
+            })
+            && learning.reflection_api_key.is_none()
+        {
+            bail!(
+                "correction_learning_api_key is required when correction_learning_upstream differs from vlm.upstream"
+            );
+        }
         Ok(Self {
             atlas_endpoint,
             listen,
             id,
             vlm,
+            corrections_dir,
+            learning,
         })
     }
 }
@@ -398,6 +528,12 @@ mod tests {
             vlm_reasoning_effort: None,
             vlm_context_window_tokens: None,
             vlm_format: Some("openai".into()),
+            corrections_dir: None,
+            correction_learning: false,
+            correction_learning_dir: None,
+            correction_learning_upstream: None,
+            correction_learning_api_key: None,
+            correction_learning_model: None,
             config: None,
             log: None,
             config_json: None,
@@ -525,5 +661,79 @@ mod tests {
         args.vlm_api_key = Some("explicit-key".into());
         let config = PilotConfig::resolve(args).expect("explicit key");
         assert_eq!(config.vlm.api_key, "explicit-key");
+    }
+
+    fn learning_base_args() -> Args {
+        let mut args = Args::parse_from([
+            "robonix-pilot",
+            "--vlm-upstream",
+            "https://planner.example/v1",
+            "--vlm-api-key",
+            "planner-test",
+            "--vlm-model",
+            "planner",
+            "--correction-learning",
+            "--correction-learning-dir",
+            "drafts",
+        ]);
+        args.correction_learning_upstream = None;
+        args.correction_learning_api_key = None;
+        args.correction_learning_model = None;
+        args.config = None;
+        args
+    }
+
+    #[test]
+    fn correction_model_overrides_are_independent_and_require_key_for_a_new_endpoint() {
+        let default = PilotConfig::resolve(learning_base_args()).unwrap();
+        let learning = default.learning.unwrap();
+        assert!(learning.reflection_upstream.is_none());
+        assert!(learning.reflection_api_key.is_none());
+        assert!(learning.reflection_model.is_none());
+
+        let mut args = learning_base_args();
+        args.correction_learning_upstream = Some("https://review.example/v1".into());
+        args.correction_learning_model = Some("reviewer".into());
+        assert!(
+            PilotConfig::resolve(args)
+                .unwrap_err()
+                .to_string()
+                .contains("correction_learning_api_key")
+        );
+
+        let mut args = learning_base_args();
+        args.correction_learning_upstream = Some("https://review.example/v1".into());
+        args.correction_learning_api_key = Some("review-test".into());
+        args.correction_learning_model = Some("reviewer".into());
+        let config = PilotConfig::resolve(args).unwrap();
+        assert_eq!(config.vlm.model, "planner");
+        let learning = config.learning.unwrap();
+        assert_eq!(
+            learning.reflection_upstream.as_deref(),
+            Some("https://review.example/v1")
+        );
+        assert_eq!(learning.reflection_api_key.as_deref(), Some("review-test"));
+        assert_eq!(learning.reflection_model.as_deref(), Some("reviewer"));
+
+        let mut args = learning_base_args();
+        args.correction_learning_upstream = Some("https://planner.example/v1/".into());
+        assert!(PilotConfig::resolve(args).is_ok());
+    }
+
+    #[test]
+    fn correction_model_can_be_configured_in_a_yaml_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pilot.yaml");
+        std::fs::write(&path, "correction_learning_upstream: https://review.example/v1\ncorrection_learning_api_key: review-test\ncorrection_learning_model: reviewer\n").unwrap();
+        let mut args = learning_base_args();
+        args.config = Some(path);
+        args.correction_learning_model = Some(String::new());
+        let learning = PilotConfig::resolve(args).unwrap().learning.unwrap();
+        assert_eq!(
+            learning.reflection_upstream.as_deref(),
+            Some("https://review.example/v1")
+        );
+        assert_eq!(learning.reflection_api_key.as_deref(), Some("review-test"));
+        assert_eq!(learning.reflection_model.as_deref(), Some("reviewer"));
     }
 }

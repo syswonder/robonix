@@ -1,6 +1,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Pilot session transcripts: the binary (and its tests, whose cwd is the
+# package dir) writes ./sessions when ROBONIX_SESSION_DIR is unset. Deployed
+# sessions live under <deploy>/rbnx-boot/sessions, already covered by rbnx-boot.
+sessions/
+
 log/
 build/
 install/

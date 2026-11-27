@@ -117,9 +117,63 @@ On every planning round the model sees, in this order:
 - the session history, which only grows (see Tasks below);
 - the live sections of the round (catalog changes, in-flight trees, Executor snapshot, embodiment and environment);
 - the task status board, the request's tail, rebuilt every round and never written into history;
+- correction hints, when a rule in `corrections_dir` matches (see Correction rules below), after the status board and likewise never written into history;
 - the response JSON schema, built by `rtdl_envelope_schema` in `src/vlm.rs`, sent as the request's `response_format`.
 
 `assemble_planning_messages` in `src/prompt.rs` puts them in order; `src/prompt.rs` also does usage accounting, and each round's section list supplies both context-budget estimates and request rendering. There is no other prompt text: no protocol file is sent.
+
+## Correction rules
+
+A correction rule is a short hint that Pilot adds to a planning request only while a condition on the conversation holds. Use it for a known mistake a model keeps making, so the advice costs tokens only in the rounds where it applies instead of sitting in the standing prompt.
+
+Set `system.pilot.corrections_dir` in the manifest (or `--corrections-dir` / `ROBONIX_PILOT_CORRECTIONS_DIR`). Pilot reads every `*.yaml` / `*.yml` in that directory once at startup; restart Pilot to pick up a change. With the option unset nothing changes: no rule is loaded and every request is sent exactly as before. A missing directory or a repeated rule `id` stops Pilot at startup; a file that cannot be parsed is skipped with a warning.
+
+```yaml
+apiVersion: robonix.pilot/correction/v1
+id: goal_near_unreachable          # [a-z0-9_], unique in the directory
+enabled: true                      # optional, default true
+scope: current_message             # current_message (default) | turn | session
+when:
+  any:                             # or `all`
+    - leaf:                        # a capability result Pilot has recorded
+        contract: robonix/system/scene/goal_near
+        success: false             # optional
+        error:                     # optional; a string means "contains"
+          regex: 'no free cell within [\d.]+ m of (?P<object_id>[\w.]+)'
+window:
+  max_rounds: null                 # rounds, from the first match; null = while the condition holds
+actions:
+  - kind: inject_message
+    template: |
+      goal_near found no free spot near {{object_id}}; do not navigate for it.
+```
+
+- `scope` limits which history the leaf condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
+- `when.latest_user_request` can be used alone or as an additional AND gate, e.g. `{regex: 'how many|count'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. It provides no template variables.
+- Existing rules without the gate behave unchanged. An older Pilot without this field rejects gated files; rebuild this Pilot and restart before using them. `enabled: false` preserves a candidate file without loading or injecting it.
+- Named groups in a leaf `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
+- The hint is sent as a final user message headed `Pilot corrections for this step:`, after the task status board. Several matching rules are joined under one header in file-name order. It is never stored in the session history, so it leaves the request as soon as the condition stops holding.
+- A rule's text is limited to 1200 bytes. Actions of a kind this version does not know are skipped with a warning, so a rule written for a later version still loads.
+- Each request a rule changed logs one `[pilot/correction]` line with the rules, their round in the window and the captured variables.
+- A request-only rule can add `- kind: require_user_coordinates` alongside `inject_message`. Its template must describe the destination and restriction. A model checks the request against the template before planning; a timeout or invalid reply keeps the restriction. When it applies, Pilot rejects a navigation call unless its goal matches `x=<number>, y=<number>` in the latest request. Model classification can still be wrong, so this is not a guarantee for every paraphrase. User coordinates still need to be reachable.
+
+`corrections/examples/` holds an example rule.
+
+## Correction learning (user feedback, phase 1)
+
+Pilot can draft correction rules from feedback and clear standing instructions. Off by default; turn it on with `--correction-learning` (`ROBONIX_PILOT_CORRECTION_LEARNING`) plus a root directory `--correction-learning-dir` (`ROBONIX_PILOT_CORRECTION_LEARNING_DIR`), e.g. `<deploy>/rbnx-boot/correction-learning/`. The directory must be separate from `corrections_dir` and is created at startup; `--correction-learning-model` optionally picks a stronger reflection model (default: the planning model).
+
+In a deployment manifest, set `system.pilot.correction_learning: true` and `system.pilot.correction_learning_dir`. `correction_learning_model` is optional.
+
+Correction drafting and rule applicability can use a separate OpenAI-compatible endpoint with `correction_learning_upstream`, `correction_learning_model`, and `correction_learning_api_key`. The corresponding flags are `--correction-learning-upstream`, `--correction-learning-model`, and `--correction-learning-api-key`; their environment variables are `ROBONIX_PILOT_CORRECTION_LEARNING_UPSTREAM`, `ROBONIX_PILOT_CORRECTION_LEARNING_MODEL`, and `ROBONIX_PILOT_CORRECTION_LEARNING_API_KEY`. Unset values fall back to the planning model settings. A different endpoint requires an explicit correction API key so the planning key is not sent to it. Supply keys through environment variables rather than command-line arguments.
+
+For each user message, a detached model call decides whether it contains feedback or a standing instruction. This adds model calls and their cost. The task does not wait for the result:
+
+1. The evidence between the original request and the correction (dispatch records and executor feedback, bounded) is snapshotted.
+2. A side-channel model call — no tools, no RTDL admission, no Executor access — classifies the mistake and drafts a rule in the format above, or answers `no_rule` / `needs_clarification` / `unsupported`.
+3. The draft is strictly validated (`validate_rule_text` in `src/corrections.rs` checks every field even though the draft is disabled), its id is sanitized and de-duplicated, and it is written with `enabled: false` directly into `corrections_dir`. The learning directory retains a copy under `candidates/<proposal_id>/rule.yaml`, plus `metadata.json`, `tests.json` and an `audit.jsonl` line. A repeated identical draft is recorded as `duplicate` and not written again. If `corrections_dir` is not configured, the draft is kept only in the learning directory.
+
+Nothing is auto-enabled: review the rule in `corrections_dir`, set `enabled: true` and restart Pilot. Pilot reports the exact file and restart requirement if the draft is ready before the reply ends; otherwise it reports them on the next turn in the same session. To revoke a rule, remove it or set `enabled: false` in that directory and restart. Ambiguous feedback needs clarification; ordinary messages produce no candidate. At most two diagnoses run at once, up to 32 messages can be pending, and each invalid draft gets one revision attempt. Design and later phases: `docs/agent_fix/pilot_self_correction_skill_plan.md` in the main checkout.
 
 ## Tasks
 

@@ -13,7 +13,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionStreamOptions, ChatCompletionTool,
     ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
-    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat, ResponseFormatJsonSchema,
+    FunctionObjectArgs, ImageDetail, ImageUrl, ResponseFormat,
 };
 use futures_util::stream::{Stream, StreamExt};
 use robonix_llm_metrics::{Call, Status, Usage};
@@ -423,16 +423,8 @@ pub enum ReplyShape {
     RtdlJsonObject,
 }
 
-/// The RTDL envelope as a JSON schema.
-///
-/// Deliberately not `strict`. Strict structured output requires every object in
-/// the schema to close with `additionalProperties: false`, and an RTDL `do`
-/// node's `args` is open by construction: its keys come from the called
-/// capability's own contract, which differs per capability. Closing it would
-/// mean flattening `args` into a JSON string, which is the opaque-blob shape
-/// that costs a contract its type surface. The schema therefore guides the
-/// model; admission stays with Pilot's own validator, which resolves every call
-/// against the catalog before a plan is dispatched.
+/// The RTDL envelope schema retained for tests while response formats are disabled.
+#[cfg(test)]
 fn rtdl_envelope_schema() -> Value {
     let node = serde_json::json!({
         "type": "object",
@@ -576,18 +568,12 @@ fn add_claude_cache_breakpoints(model: &str, body: &mut Value) {
 /// themselves mention JSON, so attaching it to a summarisation prompt turns
 /// every such request into a 400.
 fn response_format_for(shape: ReplyShape) -> Option<ResponseFormat> {
-    match shape {
-        ReplyShape::Text => None,
-        ReplyShape::RtdlEnvelope => Some(ResponseFormat::JsonSchema {
-            json_schema: ResponseFormatJsonSchema {
-                description: None,
-                name: "rtdl_envelope".to_string(),
-                schema: Some(rtdl_envelope_schema()),
-                strict: Some(false),
-            },
-        }),
-        ReplyShape::RtdlJsonObject => Some(ResponseFormat::JsonObject),
-    }
+    // Forced response_format disabled: the upstream rejects or mishandles the
+    // json_schema envelope (the bench chain always sent --drop-response-format;
+    // without a proxy the same must hold for direct connections). The RTDL
+    // reply is parsed and corrected regardless, so no schema is attached.
+    let _ = shape;
+    None
 }
 
 impl VlmClient {
@@ -609,6 +595,62 @@ impl VlmClient {
     /// until a restart or provider cache expiry.
     pub fn prompt_cache_key(&self) -> &str {
         &self.prompt_cache_key
+    }
+
+    /// One non-streaming chat completion, for side channels that must not
+    /// touch the planning stream: a plain `system` + `user` exchange with no
+    /// tools, no RTDL admission and no history. Used by the correction
+    /// learning workflow, whose output is parsed as JSON by its caller and
+    /// never dispatched to the Executor.
+    ///
+    /// `model_override` selects a reflection model different from the
+    /// planning model; `None` reuses this client's model.
+    pub async fn chat_once(
+        &self,
+        model_override: Option<&str>,
+        system: &str,
+        user: &str,
+    ) -> Result<String> {
+        #[derive(serde::Serialize)]
+        struct OnceMessage<'a> {
+            role: &'a str,
+            content: &'a str,
+        }
+        let body = serde_json::json!({
+            "model": model_override.unwrap_or(&self.model),
+            "messages": [
+                OnceMessage { role: "system", content: system },
+                OnceMessage { role: "user", content: user },
+            ],
+            "stream": false,
+            "max_tokens": 4096,
+        });
+        let url = format!("{}/chat/completions", self.api_base);
+        let response = self
+            .inner
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("open VLM chat completion")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("read VLM chat completion body")?;
+        if !status.is_success() {
+            bail!("VLM chat completion: HTTP {status}: {text}");
+        }
+        let value: Value = serde_json::from_str(&text).context("parse VLM chat completion JSON")?;
+        value
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("VLM chat completion reply has no message content")
     }
 
     /// Resolve the usable context-window limit at process start.
@@ -1038,7 +1080,7 @@ mod tests {
     }
 
     use super::{
-        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, ResponseFormat, VlmStreamItem, VlmUsage,
+        AccumulatedToolCall, MAX_OPEN_RETRIES, ReplyShape, VlmStreamItem, VlmUsage,
         context_window_from_metadata, context_window_match_from_model_list,
         downgrade_response_format, open_retry_delay, parse_usage, process_stream_line,
         rejects_optional_request_fields, response_format_for,
@@ -1163,18 +1205,9 @@ mod tests {
     }
 
     #[test]
-    fn a_planning_reply_carries_the_rtdl_schema() {
-        let Some(ResponseFormat::JsonSchema { json_schema }) =
-            response_format_for(ReplyShape::RtdlEnvelope)
-        else {
-            panic!("planning replies must carry a schema");
-        };
-        assert_eq!(json_schema.name, "rtdl_envelope");
-        // Strict would require every object to close, and an RTDL `do` node's
-        // `args` is open by construction: its keys come from the called
-        // capability's contract.
-        assert_eq!(json_schema.strict, Some(false));
-        let schema = json_schema.schema.expect("schema body");
+    fn rtdl_schema_describes_plans_and_control_operations() {
+        assert!(response_format_for(ReplyShape::RtdlEnvelope).is_none());
+        let schema = super::rtdl_envelope_schema();
         let node = &schema["$defs"]["node"];
         assert_eq!(node["properties"]["op"]["enum"][0], "sequence");
         assert_eq!(

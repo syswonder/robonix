@@ -62,6 +62,37 @@ properties:
     # Matching ignores case. An unrecognized value is ignored without a
     # warning, and the fallback applies.
 
+  corrections_dir:
+    type: string
+    description: Directory of correction rules loaded at Pilot startup.
+
+  correction_learning:
+    type: boolean
+    default: false
+    description: Generate disabled correction rules from user feedback.
+
+  correction_learning_dir:
+    type: string
+    description: Directory for correction learning records and candidate metadata.
+
+  correction_learning_upstream:
+    type: string
+    description: >-
+      OpenAI-compatible endpoint for correction learning and rule applicability.
+      When unset, use vlm.upstream. A different endpoint requires an explicit
+      correction_learning_api_key.
+
+  correction_learning_model:
+    type: string
+    description: Model id for correction learning; defaults to vlm.model.
+
+  correction_learning_api_key:
+    type: string
+    x-secret: true
+    description: >-
+      API key for the correction model; defaults to vlm.api_key when using the
+      same endpoint. rbnx passes this value to Pilot through its environment.
+
   vlm:
     type: object
     description: The model endpoint Pilot plans with.
