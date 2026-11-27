@@ -989,6 +989,8 @@ mod tests {
             upstream: std::env::var("ROBONIX_TEST_VLM_BASE_URL").unwrap(),
             api_key: std::env::var("ROBONIX_TEST_VLM_API_KEY").unwrap(),
             model: std::env::var("ROBONIX_TEST_VLM_MODEL").unwrap(),
+            reasoning_effort: None,
+            catalog_id: None,
             context_window_tokens: None,
             api_format: "openai".into(),
         };
@@ -1005,8 +1007,8 @@ mod tests {
         );
         let episode = Episode {
             session_id: "test".into(), turn_task_id: "test".into(),
-            correction_text: "客厅的默认坐标会导致你导航出错，以后我让你去客厅的时候请你拒绝并提醒我给出具体的可达坐标".into(),
-            original_request: Some("去客厅".into()), evidence: vec![], captured_at_unix: 1,
+            correction_text: "客厅的默认坐标会导致你导航出错，以后我让你去客厅的时候请你拒绝并提醒我给出具体的可达坐标".into(), // i18n-ok
+            original_request: Some("去客厅".into()), evidence: vec![], captured_at_unix: 1, // i18n-ok
         };
         run_episode(&runtime, episode).await.unwrap();
         let candidates = std::fs::read_dir(root.path().join("candidates"))
@@ -1028,13 +1030,13 @@ mod tests {
         let client = VlmClient::new(&vlm);
         let instruction = "When asked to navigate to the living room, request explicit map coordinates; do not use its default destination.";
         assert!(
-            crate::corrections::coordinate_restriction_applies(&client, "请回客厅", instruction)
+            crate::corrections::coordinate_restriction_applies(&client, "请回客厅", instruction) // i18n-ok
                 .await
         );
         assert!(
             !crate::corrections::coordinate_restriction_applies(
                 &client,
-                "我在客厅，请去厨房",
+                "我在客厅，请去厨房", // i18n-ok
                 instruction
             )
             .await
@@ -1075,7 +1077,7 @@ mod tests {
     #[test]
     fn episode_captures_the_original_request_and_bounded_evidence() {
         let mut history = vec![
-            user_message(1, "去那盆植物旁边"),
+            user_message(1, "去那盆植物旁边"), // i18n-ok
             dispatch_record(),
             leaf_feedback(
                 "robonix/system/scene/goal_near",
@@ -1084,10 +1086,10 @@ mod tests {
                 "no free cell within 1.5 m of scene.object.0002",
             ),
             leaf_feedback("robonix/service/navigation/navigate", true, "done", ""),
-            user_message(2, "你去错了，我说的是植物旁边"),
+            user_message(2, "你去错了，我说的是植物旁边"), // i18n-ok
         ];
-        let episode = build_episode(&history, "s1", "t1", "你去错了，我说的是植物旁边").unwrap();
-        assert_eq!(episode.original_request.as_deref(), Some("去那盆植物旁边"));
+        let episode = build_episode(&history, "s1", "t1", "你去错了，我说的是植物旁边").unwrap(); // i18n-ok
+        assert_eq!(episode.original_request.as_deref(), Some("去那盆植物旁边")); // i18n-ok
         assert_eq!(episode.evidence.len(), 3);
         assert!(episode.evidence[0].starts_with("dispatch plan 9fd9-1"));
         assert!(episode.evidence[1].contains("goal_near success=false"));
@@ -1097,7 +1099,7 @@ mod tests {
         // A standing instruction can be given before any task.
         history.remove(0);
         assert!(
-            build_episode(&history, "s1", "t1", "你去错了")
+            build_episode(&history, "s1", "t1", "你去错了") // i18n-ok
                 .unwrap()
                 .original_request
                 .is_none()
@@ -1105,12 +1107,12 @@ mod tests {
 
         // Boards and assistant text carry no evidence.
         let history = vec![
-            user_message(1, "去那盆植物旁边"),
+            user_message(1, "去那盆植物旁边"), // i18n-ok
             Message::user("Tasks: T1 in_progress"),
             Message::assistant("going"),
-            user_message(2, "你去错了"),
+            user_message(2, "你去错了"), // i18n-ok
         ];
-        let episode = build_episode(&history, "s1", "t1", "你去错了").unwrap();
+        let episode = build_episode(&history, "s1", "t1", "你去错了").unwrap(); // i18n-ok
         assert!(episode.evidence.is_empty());
     }
 
@@ -1207,8 +1209,8 @@ mod tests {
         let episode = Episode {
             session_id: "s1".into(),
             turn_task_id: "t1".into(),
-            correction_text: "你去错了".into(),
-            original_request: Some("去那盆植物旁边".into()),
+            correction_text: "你去错了".into(), // i18n-ok
+            original_request: Some("去那盆植物旁边".into()), // i18n-ok
             evidence: vec!["leaf goal_near success=false".into()],
             captured_at_unix: 1,
         };
@@ -1321,6 +1323,8 @@ mod tests {
                 upstream: "http://127.0.0.1:1".into(),
                 api_key: String::new(),
                 model: "test".into(),
+                reasoning_effort: None,
+                catalog_id: None,
                 context_window_tokens: None,
                 api_format: "openai".into(),
             },
@@ -1402,8 +1406,8 @@ mod tests {
         let episode = Episode {
             session_id: "s1".into(),
             turn_task_id: "t1".into(),
-            correction_text: "你去错了".into(),
-            original_request: Some("去那盆植物旁边".into()),
+            correction_text: "你去错了".into(), // i18n-ok
+            original_request: Some("去那盆植物旁边".into()), // i18n-ok
             evidence: vec!["leaf goal_near success=false".into()],
             captured_at_unix: 1,
         };
@@ -1413,7 +1417,7 @@ mod tests {
             "must be false",
             "Rust regex",
             "goal_near_unreachable",
-            "去那盆植物旁边",
+            "去那盆植物旁边", // i18n-ok
             "leaf goal_near success=false",
             "no lookahead",
             "never auto-enabled",

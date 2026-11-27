@@ -2167,7 +2167,16 @@ pub async fn execute(
                     soma_stage_writer = Some(writer);
                     sp
                 } else {
-                    spawn_system_binary(&log_dir, &session_dir, name, bin, &args, catalog.as_ref(), deploy.system.get(*name)).await?
+                    spawn_system_binary(
+                        &log_dir,
+                        &session_dir,
+                        name,
+                        bin,
+                        &args,
+                        catalog.as_ref(),
+                        deploy.system.get(*name),
+                    )
+                    .await?
                 };
                 children.push(sp);
                 persist_state(
@@ -2788,7 +2797,9 @@ fn system_cli_args(
         let mut v = v.clone();
         if let Some(m) = v.as_mapping_mut() {
             m.remove("status");
-            if name == "pilot" { m.remove("correction_learning_api_key"); }
+            if name == "pilot" {
+                m.remove("correction_learning_api_key");
+            }
         }
         v
     });
@@ -2797,7 +2808,6 @@ fn system_cli_args(
     {
         out.push("--config-json".into());
         out.push(json);
-
     }
 
     let s = |k: &str| -> Option<String> {

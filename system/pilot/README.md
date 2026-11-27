@@ -145,7 +145,7 @@ actions:
 ```
 
 - `scope` limits which history the leaf condition reads: `current_message` is everything after the latest user message, so a new message ends the rule; `turn` is what this turn added; `session` is everything.
-- `when.latest_user_request` can be used alone or as an additional AND gate, e.g. `{regex: '几把|how many'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. It provides no template variables.
+- `when.latest_user_request` can be used alone or as an additional AND gate, e.g. `{regex: 'how many|count'}`. It matches only the latest labelled user's multiline body, excluding its label and the generated response-mode suffix. No labelled request means no match. It provides no template variables.
 - Existing rules without the gate behave unchanged. An older Pilot without this field rejects gated files; rebuild this Pilot and restart before using them. `enabled: false` preserves a candidate file without loading or injecting it.
 - Named groups in a leaf `regex` become variables for the template. A placeholder that not every alternative of `when` can fill is rejected when the rule loads.
 - The hint is sent as a final user message headed `Pilot corrections for this step:`, after the task status board. Several matching rules are joined under one header in file-name order. It is never stored in the session history, so it leaves the request as soon as the condition stops holding.

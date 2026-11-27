@@ -734,6 +734,5 @@ mod tests {
         );
         assert_eq!(learning.reflection_api_key.as_deref(), Some("review-test"));
         assert_eq!(learning.reflection_model.as_deref(), Some("reviewer"));
-
     }
 }

@@ -332,7 +332,7 @@ pub(crate) fn navigation_uses_user_coordinates(history: &[Message], args: &str) 
     static COORDINATES: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let pattern = COORDINATES.get_or_init(|| {
         Regex::new(
-            r"(?i)\bx\s*[:=：]\s*(-?\d+(?:\.\d+)?)\s*[,，;；\s]+y\s*[:=：]\s*(-?\d+(?:\.\d+)?)",
+            r"(?i)\bx\s*[:=：]\s*(-?\d+(?:\.\d+)?)\s*[,，;；\s]+y\s*[:=：]\s*(-?\d+(?:\.\d+)?)", // i18n-ok
         )
         .unwrap()
     });
@@ -1087,21 +1087,21 @@ actions:
 apiVersion: robonix.pilot/correction/v1
 id: living_room_coordinates
 when:
-  latest_user_request: {regex: '客厅|living room'}
+  latest_user_request: {regex: '客厅|living room'}  # i18n-ok
 actions:
   - kind: inject_message
     template: Ask for explicit map coordinates before going to the living room.
   - kind: require_user_coordinates
 "#;
         let set = set_of(&[rule]);
-        let history = vec![user_message(1, "去客厅")];
+        let history = vec![user_message(1, "去客厅")]; // i18n-ok
         let injection = set
             .evaluate(&history, 0, &mut CorrectionState::default())
             .unwrap();
         assert!(injection.require_user_coordinates);
         let target = r#"{"goal":{"pose":{"position":{"x":1.0,"y":2.0}}}}"#;
         assert!(!navigation_uses_user_coordinates(&history, target));
-        let explicit = vec![user_message(2, "去客厅，x=1, y=2")];
+        let explicit = vec![user_message(2, "去客厅，x=1, y=2")]; // i18n-ok
         assert!(navigation_uses_user_coordinates(&explicit, target));
         assert!(!navigation_uses_user_coordinates(
             &explicit,
@@ -1111,7 +1111,7 @@ actions:
             &explicit,
             r#"{"goal":{"var":"room_goal"}}"#
         ));
-        let kitchen = vec![user_message(3, "去厨房")];
+        let kitchen = vec![user_message(3, "去厨房")]; // i18n-ok
         assert!(
             set.evaluate(&kitchen, 0, &mut CorrectionState::default())
                 .is_none()
@@ -1124,21 +1124,23 @@ actions:
             upstream: "http://127.0.0.1:1".into(),
             api_key: String::new(),
             model: "test".into(),
+            reasoning_effort: None,
+            catalog_id: None,
             context_window_tokens: None,
             api_format: "openai".into(),
         });
-        assert!(coordinate_restriction_applies(&client, "去客厅", "Require coordinates").await);
+        assert!(coordinate_restriction_applies(&client, "去客厅", "Require coordinates").await); // i18n-ok
     }
 
     #[test]
     fn request_gate_requires_both_the_latest_request_and_leaf_feedback() {
-        let rule = request_rule("{regex: '几把|how many'}");
+        let rule = request_rule("{regex: '几把|how many'}"); // i18n-ok
         let set = set_of(&[&rule]);
         for (request, leaf, expected) in [
-            ("这里一共有几把椅子？", true, true),
+            ("这里一共有几把椅子？", true, true), // i18n-ok
             ("how many chairs?", true, true),
-            ("这里一共有几把椅子？", false, false),
-            ("去会议桌旁边", true, false),
+            ("这里一共有几把椅子？", false, false), // i18n-ok
+            ("去会议桌旁边", true, false), // i18n-ok
         ] {
             let mut history = vec![user_message(1, request)];
             if leaf {
@@ -1159,14 +1161,14 @@ actions:
             crate::planner::RESPONSE_MODE_TEXT,
             crate::planner::RESPONSE_MODE_VOICE,
         ] {
-            let body = "先看场景\n数一下：椅子数量";
+            let body = "先看场景\n数一下：椅子数量"; // i18n-ok
             let message = user_message(1, &format!("{body}\n{mode}"));
             assert_eq!(
                 latest_user_request(std::slice::from_ref(&message)),
                 Some(body)
             );
             let history = vec![message, feedback("a/query", true, "objects", "")];
-            let rule = request_rule("{regex: '(?s)^先看场景.*椅子数量$'}");
+            let rule = request_rule("{regex: '(?s)^先看场景.*椅子数量$'}"); // i18n-ok
             assert!(
                 set_of(&[&rule])
                     .evaluate(&history, 0, &mut CorrectionState::default())
@@ -1181,7 +1183,7 @@ actions:
                 );
             }
         }
-        let body = "说明：Response mode for this task only: 这行是用户正文\n继续";
+        let body = "说明：Response mode for this task only: 这行是用户正文\n继续"; // i18n-ok
         assert_eq!(latest_user_request(&[user_message(1, body)]), Some(body));
     }
 
@@ -1413,12 +1415,12 @@ actions:
             "robonix/system/scene/get_scene_graph",
         ];
         for request in [
-            "这里一共有几把椅子？",
-            "数一下办公区有几把椅子，然后播报",
-            "办公区有多少椅子？",
+            "这里一共有几把椅子？", // i18n-ok
+            "数一下办公区有几把椅子，然后播报", // i18n-ok
+            "办公区有多少椅子？", // i18n-ok
             "How many chairs are there?",
             "Count the chairs",
-            "先看场景\n统计椅子数量",
+            "先看场景\n统计椅子数量", // i18n-ok
         ] {
             for contract in query_contracts {
                 let history = vec![
@@ -1447,21 +1449,21 @@ actions:
             );
         }
         for request in [
-            "去离会议室白板最近的那把椅子旁边",
-            "去会议桌旁边",
-            "同时拍照和扫雷达，然后保存地图",
-            "先去绿植旁播报，再去会议桌旁播报",
-            "按文件中的巡检约定巡检",
-            "读开工口令",
-            "这里一共要巡检两站",
-            "你前面是什么房间？",
+            "去离会议室白板最近的那把椅子旁边", // i18n-ok
+            "去会议桌旁边", // i18n-ok
+            "同时拍照和扫雷达，然后保存地图", // i18n-ok
+            "先去绿植旁播报，再去会议桌旁播报", // i18n-ok
+            "按文件中的巡检约定巡检", // i18n-ok
+            "读开工口令", // i18n-ok
+            "这里一共要巡检两站", // i18n-ok
+            "你前面是什么房间？", // i18n-ok
         ] {
             let history = vec![
                 user_message(1, request),
                 feedback(
                     "robonix/system/scene/list_objects",
                     true,
-                    "几把椅子 count chairs",
+                    "几把椅子 count chairs", // i18n-ok
                     "",
                 ),
                 feedback("robonix/service/navigation/navigate", true, "done", ""),
@@ -1476,7 +1478,7 @@ actions:
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let expected = if request == "去离会议室白板最近的那把椅子旁边" {
+            let expected = if request == "去离会议室白板最近的那把椅子旁边" { // i18n-ok
                 vec!["nearest_to_anchor_resolution"]
             } else {
                 vec![]
@@ -1486,10 +1488,10 @@ actions:
         let count = std::fs::read_to_string(dir.join("scene_count_all_regions.yaml")).unwrap();
         let count_set = set_of(&[&count]);
         let mut history = vec![
-            user_message(1, "几把椅子？"),
+            user_message(1, "几把椅子？"), // i18n-ok
             feedback(query_contracts[0], true, "objects", ""),
         ];
-        history.push(user_message(2, "去会议桌旁边"));
+        history.push(user_message(2, "去会议桌旁边")); // i18n-ok
         history.push(feedback(query_contracts[0], true, "objects", ""));
         assert!(
             count_set
@@ -1497,9 +1499,9 @@ actions:
                 .is_none()
         );
         for history in [
-            vec![feedback(query_contracts[0], true, "几把椅子", "")],
+            vec![feedback(query_contracts[0], true, "几把椅子", "")], // i18n-ok
             vec![
-                user_message(1, "几把椅子？"),
+                user_message(1, "几把椅子？"), // i18n-ok
                 feedback(query_contracts[0], false, "", "error"),
             ],
         ] {
@@ -1516,8 +1518,8 @@ actions:
         assert!(parse_rule(&disabled).unwrap().is_none());
         let candidate = set_of(&[&nearest]);
         for request in [
-            "去离会议室白板最近的那把椅子旁边",
-            "找离办公桌最近的杯子",
+            "去离会议室白板最近的那把椅子旁边", // i18n-ok
+            "找离办公桌最近的杯子", // i18n-ok
             "Go to the chair closest to the meeting room whiteboard",
             "Find the object nearest to the sink",
         ] {
@@ -1544,10 +1546,10 @@ actions:
             );
         }
         for request in [
-            "去离我最近的椅子旁边",
-            "去会议室靠窗的那把椅子旁边",
-            "这里一共有几把椅子？",
-            "同时拍照和扫雷达",
+            "去离我最近的椅子旁边", // i18n-ok
+            "去会议室靠窗的那把椅子旁边", // i18n-ok
+            "这里一共有几把椅子？", // i18n-ok
+            "同时拍照和扫雷达", // i18n-ok
         ] {
             let history = vec![
                 user_message(1, request),
@@ -1560,7 +1562,7 @@ actions:
                 "{request}"
             );
         }
-        let request = "去离会议室白板最近的那把椅子旁边";
+        let request = "去离会议室白板最近的那把椅子旁边"; // i18n-ok
         for contract in query_contracts
             .into_iter()
             .chain(["robonix/system/scene/get_object_context"])
@@ -1589,7 +1591,7 @@ actions:
                     .is_none()
             );
             let mut changed = history;
-            changed.push(user_message(2, "去会议桌旁边"));
+            changed.push(user_message(2, "去会议桌旁边")); // i18n-ok
             changed.push(feedback(contract, true, "objects", ""));
             assert!(
                 set.evaluate(&changed, 0, &mut CorrectionState::default())

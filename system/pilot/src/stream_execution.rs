@@ -310,7 +310,7 @@ mod tests {
         let revision = AtomicU64::new(0);
         let forbidden = HashSet::new();
         let no_coordinates = [crate::vlm::Message::user(
-            "User message m1 (filed under T1): 去客厅",
+            "User message m1 (filed under T1): 去客厅", // i18n-ok
         )];
         let result = live
             .submit(
@@ -333,7 +333,7 @@ mod tests {
         ));
 
         let coordinates = [crate::vlm::Message::user(
-            "User message m2 (filed under T1): 去客厅 x=1, y=2",
+            "User message m2 (filed under T1): 去客厅 x=1, y=2", // i18n-ok
         )];
         let result = live
             .submit(
