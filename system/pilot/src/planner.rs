@@ -2908,6 +2908,8 @@ mod tests {
                                     steer_rx,
                                     Arc::new(AtomicU64::new(0)),
                                     &HistoryBudget::new(None, "unavailable"),
+                                    &crate::corrections::CorrectionSet::default(),
+                                    None,
                                     &mut transcript,
                                 ),
                             )
