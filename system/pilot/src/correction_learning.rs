@@ -319,6 +319,7 @@ pub(crate) fn build_episode(
 // ── Hook (called from the planner) ───────────────────────────────────────────
 
 /// Inspect each message on a detached task without delaying the turn.
+#[allow(deprecated)] // fetch_update also supports Rust versions before try_update.
 pub(crate) fn maybe_start_learning(
     learning: Option<&Arc<LearningRuntime>>,
     history: &[Message],
