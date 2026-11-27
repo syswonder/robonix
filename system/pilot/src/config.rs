@@ -389,10 +389,9 @@ impl PilotConfig {
             )?
         };
         if let Some(learning) = &learning
-            && learning
-                .reflection_upstream
-                .as_ref()
-                .is_some_and(|value| value.trim_end_matches('/') != vlm.upstream.trim_end_matches('/'))
+            && learning.reflection_upstream.as_ref().is_some_and(|value| {
+                value.trim_end_matches('/') != vlm.upstream.trim_end_matches('/')
+            })
             && learning.reflection_api_key.is_none()
         {
             bail!(
