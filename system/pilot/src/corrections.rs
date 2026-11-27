@@ -1140,7 +1140,7 @@ actions:
             ("这里一共有几把椅子？", true, true), // i18n-ok
             ("how many chairs?", true, true),
             ("这里一共有几把椅子？", false, false), // i18n-ok
-            ("去会议桌旁边", true, false), // i18n-ok
+            ("去会议桌旁边", true, false),          // i18n-ok
         ] {
             let mut history = vec![user_message(1, request)];
             if leaf {
@@ -1415,9 +1415,9 @@ actions:
             "robonix/system/scene/get_scene_graph",
         ];
         for request in [
-            "这里一共有几把椅子？", // i18n-ok
+            "这里一共有几把椅子？",             // i18n-ok
             "数一下办公区有几把椅子，然后播报", // i18n-ok
-            "办公区有多少椅子？", // i18n-ok
+            "办公区有多少椅子？",               // i18n-ok
             "How many chairs are there?",
             "Count the chairs",
             "先看场景\n统计椅子数量", // i18n-ok
@@ -1450,13 +1450,13 @@ actions:
         }
         for request in [
             "去离会议室白板最近的那把椅子旁边", // i18n-ok
-            "去会议桌旁边", // i18n-ok
-            "同时拍照和扫雷达，然后保存地图", // i18n-ok
+            "去会议桌旁边",                     // i18n-ok
+            "同时拍照和扫雷达，然后保存地图",   // i18n-ok
             "先去绿植旁播报，再去会议桌旁播报", // i18n-ok
-            "按文件中的巡检约定巡检", // i18n-ok
-            "读开工口令", // i18n-ok
-            "这里一共要巡检两站", // i18n-ok
-            "你前面是什么房间？", // i18n-ok
+            "按文件中的巡检约定巡检",           // i18n-ok
+            "读开工口令",                       // i18n-ok
+            "这里一共要巡检两站",               // i18n-ok
+            "你前面是什么房间？",               // i18n-ok
         ] {
             let history = vec![
                 user_message(1, request),
@@ -1478,7 +1478,8 @@ actions:
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let expected = if request == "去离会议室白板最近的那把椅子旁边" { // i18n-ok
+            let nearest_request = "去离会议室白板最近的那把椅子旁边"; // i18n-ok
+            let expected = if request == nearest_request {
                 vec!["nearest_to_anchor_resolution"]
             } else {
                 vec![]
@@ -1519,7 +1520,7 @@ actions:
         let candidate = set_of(&[&nearest]);
         for request in [
             "去离会议室白板最近的那把椅子旁边", // i18n-ok
-            "找离办公桌最近的杯子", // i18n-ok
+            "找离办公桌最近的杯子",             // i18n-ok
             "Go to the chair closest to the meeting room whiteboard",
             "Find the object nearest to the sink",
         ] {
@@ -1546,10 +1547,10 @@ actions:
             );
         }
         for request in [
-            "去离我最近的椅子旁边", // i18n-ok
+            "去离我最近的椅子旁边",       // i18n-ok
             "去会议室靠窗的那把椅子旁边", // i18n-ok
-            "这里一共有几把椅子？", // i18n-ok
-            "同时拍照和扫雷达", // i18n-ok
+            "这里一共有几把椅子？",       // i18n-ok
+            "同时拍照和扫雷达",           // i18n-ok
         ] {
             let history = vec![
                 user_message(1, request),
